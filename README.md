@@ -2,9 +2,29 @@
 
 Inference engine for **basal-1.0** — small, fast, calibrated *typed-decision* models for Polish (and English).
 
-A typed-decision model reads a **state** (a message, a document, a case file) and answers a schema-constrained
-**question** about it with a **probability distribution** over the allowed answers — in a single forward pass,
-without generating text:
+**What it is.** basal-1.0 is inspired by the *System 1* (fast, intuitive) decision models such as Jev: instead of a
+chatbot that writes an answer, the model reads a **state** (a message, a document, a case file, a web page as JSON)
+and answers a **typed question** about it by returning a **probability for each allowed answer** — in one forward
+pass, without generating any text. The answer can therefore never fall outside the options you gave, and the
+probability says how sure the model is.
+
+**What it is for: a dynamic classifier.** You describe the classes *in the request* — in plain language, per call —
+instead of training a classifier for them. The same model routes tickets today, checks a filing deadline tomorrow and
+scores the urgency of an incident report next week, each time with new options and no retraining. This makes it a
+drop-in, very fast replacement for:
+
+- ticket, e-mail and document **routing** with categories that change often;
+- **rule and policy checks** on a document ("is the claim covered?", "was the appeal filed in time?");
+- **scoring** on ordered scales (urgency, risk, satisfaction);
+- **agent decisions** (which tool, which next step, which element to click) and **guard checks** in LLM pipelines,
+  where a full LLM call is too slow or too expensive;
+- **triage with a confidence threshold**: accept confident decisions automatically and send the rest to a person.
+
+**How fast.** One decision (both option orders, calibrated) takes **8.8 ms on a B300, 12.5 ms on an H100, 27 ms on an
+RTX 5090 and 45 ms on a desktop DGX Spark (FP8)**; the 1.5B model is about twice as fast. On Polish decisions it is more
+accurate than the commercial Jev API and ten open decision models (see [Quality](#quality)).
+
+A question has one of three types:
 
 | type     | answer                                              | example                                   |
 |----------|-----------------------------------------------------|-------------------------------------------|
@@ -12,7 +32,8 @@ without generating text:
 | `noul`   | probability of *yes* (with optional descriptions)   | "was the appeal filed on time?"           |
 | `score`  | distribution over ordered levels + expected level   | urgency 0–3, sentiment scale              |
 
-The API is compatible with the *System One* JSON interface, so existing clients work unchanged.
+The HTTP API is compatible with the *System One* JSON interface (`POST /v1/systemone`), so existing clients work by
+changing the base URL.
 
 > The name comes from the *basal ganglia* — the part of the brain that selects one action among competing options.
 
@@ -132,6 +153,46 @@ print(round(a["score"], 2), a["probabilities"])
 # (expected level 2.71 of 0-3: most likely "krytyczna" 0.72, "wysoka" 0.27)
 ```
 
+## Inference on a JSONL file
+
+`basal-run` sends every line of a JSONL file to a running server (concurrently; the server batches the requests) and
+writes one answer per line, in the same order. Start a server first (`basal-serve ...`), then:
+
+```bash
+basal-run --input examples/questions.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
+```
+
+Each input line is either a **simple item** or a **full request** (the formats can be mixed):
+
+```jsonc
+// simple item: one question, options as a list; "type" defaults to "choice", "gold" (index) is optional
+{"id": "t1", "state": "Klient: od wczoraj nie mogę zalogować się do bankowości ...", "question": "Do którego działu skierować zgłoszenie?",
+ "options": ["Reklamacje kart", "Wsparcie bankowości elektronicznej", "Kredyty"], "gold": 1}
+// yes/no item: options are [yes-text, no-text]
+{"id": "t2", "type": "noul", "state": "...", "question": "Czy odstąpienie złożono w terminie?", "options": ["Tak", "Nie"]}
+// full /v1/systemone request: several typed questions about one state
+{"id": "t3", "state": {"ticket": "..."}, "questions": {"category": {"type": "choice", "instructions": "...", "criteria": {"complaint": "...", "other": "..."}},
+                                                      "urgent": {"type": "noul", "instructions": "..."}}}
+```
+
+Each output line contains `id`, the full `answers` (probabilities, confidence) and the server `latency_ms`; simple items
+also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. At the
+end `basal-run` prints a summary (items per second, median latency and accuracy if gold labels are present).
+`examples/questions.jsonl` contains 20 Polish and English examples with gold labels. Add `--early-exit 0.99` when the
+server runs in `fast-exit` mode.
+
+From Python, with the client of a running server:
+
+```python
+from basal.client import Basal
+import json
+b = Basal("http://127.0.0.1:8000")
+for line in open("examples/questions.jsonl"):
+    q = json.loads(line)
+    a = b.choice(q["state"], q["question"], {str(i): o for i, o in enumerate(q["options"])})
+    print(a["choice"], round(a["confidence"], 3))
+```
+
 ## Serving modes
 
 `basal-serve --mode <mode>`:
@@ -148,9 +209,16 @@ print(round(a["score"], 2), a["probabilities"])
 
 - **Two option orders** (`--orders 2`, default): every question is asked with the options in original and reversed
   order and the probabilities are averaged; with the shared prefix this costs only ~7% more than one order.
-- **Early exit** (`--mode fast-exit`): add `"early_exit": "0.99"` to a request to let confident decisions stop at
-  an intermediate layer (12.2 → 10.5 ms on H100 at unchanged agreement); `"off"` always uses the final layer.
-  Levels: `off`, `0.999`, `0.995`, `0.99`, `0.98` (share of decisions agreeing with the final layer on calibration data).
+- **Early exit** (`--mode fast-exit`): *what it is.* The model has 60 layers, and for many questions the answer is
+  already clear before the last one. We trained small **exit heads** (a normalisation layer and a low-rank adapter
+  that reuse the model's output head) after layers 30, 35, …, 55. During the forward pass the server checks the exit
+  head at each of these points; if the probability of the top option is above a threshold calibrated for that layer,
+  the remaining layers are skipped and the answer is taken from the exit head. Thresholds are calibrated so that the
+  early answer agrees with the full model on a chosen share of decisions (99.9%, 99.5%, 99% or 98% on calibration
+  data). Because the model forms its decision late (around layers 51–53), the saving is modest: **12.2 → 10.5 ms per
+  decision on H100 at `0.99` with 99.2% agreement with fp32** (8.8 → 7.7 ms on B300). Each request chooses its level
+  with `"early_exit": "0.99"`; `"off"` (default) always uses the final layer, so one server serves both. A batch stops
+  only when all its requests are confident. Levels: `off`, `0.999`, `0.995`, `0.99`, `0.98`.
 - **FP4 with vLLM**: `pip install "basal[vllm]"`, then
   `basal-serve --model Remek/basal-1.0-4.5B-NVFP4 --mode vllm` (see [docs/QUANTIZATION.md](docs/QUANTIZATION.md)).
 
