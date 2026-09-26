@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "basal"
+version = "1.0.0"
+description = "Inference engine for basal-1.0: fast, calibrated typed decisions (choice / yes-no / score) for Polish and English"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.11",
+  "transformers==5.17.0",
+  "huggingface_hub>=0.34",
+  "accelerate>=1.10",
+  "safetensors>=0.6",
+  "starlette>=0.47",
+  "uvicorn[standard]>=0.35",
+  "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+fp8 = ["torchao==0.18.0"]
+nvfp4 = ["torchao==0.18.0"]
+vllm = ["vllm>=0.11"]
+test = ["pytest"]
+
+[project.scripts]
+basal-serve = "basal.server:main"
+basal-bench = "basal.bench:main"
+basal-loadtest = "basal.loadtest:main"
+
+[tool.setuptools]
+packages = ["basal"]
