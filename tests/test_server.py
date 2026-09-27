@@ -47,15 +47,18 @@ class FakeServer(Server):
             w.cancel()
 
 
-def test_named_options_keep_keys_when_needed():
-    assert named_options({"returns": "Returns", "it": "IT"}) == (["returns", "it"], ["Returns", "IT"])
-    assert named_options({"option_1": "Yes", "opcja_2": "Nie", "0": "x"})[1] == ["Yes", "Nie", "x"]  # placeholders
-    assert named_options({"in_time": "Filed in time"})[1] == ["Filed in time"]           # key words in text
-    assert named_options({"late": "Filed after the deadline"})[1] == ["late: Filed after the deadline"]
+def test_named_options_show_keys_by_default():
+    assert named_options({"returns": "Returns", "it": "IT"}) == (["returns", "it"], ["returns: Returns", "it: IT"])
+    assert named_options({"x": None, "y": "why"})[1] == ["x", "y: why"]
     keys, opts = named_options({"approve": {"requires_manager": False}, "reject": {"requires_manager": False}})
     assert opts == ['approve: {"requires_manager": false}', 'reject: {"requires_manager": false}']
-    assert named_options({"a": "same", "b": "same"})[1] == ["a: same", "b: same"]
-    assert named_options({"x": None, "y": "why"})[1] == ["x", "why"]
+
+
+def test_named_options_hide_only_on_request():
+    assert named_options({"option_1": "Yes", "opcja_2": "Nie"}, "hide")[1] == ["Yes", "Nie"]
+    assert named_options({"a": "same", "b": "same"}, "hide")[1] == ["a: same", "b: same"]   # still distinguishable
+    with pytest.raises(ValueError):
+        named_options({"a": "x", "b": "y"}, "maybe")
 
 
 def test_structured_choices_give_distinct_prompts():
@@ -80,13 +83,18 @@ def test_model_list_conforms_to_official_schema():
     jsonschema.validate(models_payload("basal-1.0-4.5B", "fast", {"0.99": None}), schema("ModelMetadataList"))
 
 
-def test_semantic_keys_of_unique_strings_reach_the_prompt():
-    """Swapping which key owns which description must change what the model sees (regression)."""
-    a = to_items("Action requested: reject.", {"q": {"type": "choice", "instructions": "Return the requested action.",
-                 "criteria": {"approve": "Handled by Alice", "reject": "Handled by Bob"}}})[0]
-    b = to_items("Action requested: reject.", {"q": {"type": "choice", "instructions": "Return the requested action.",
-                 "criteria": {"reject": "Handled by Alice", "approve": "Handled by Bob"}}})[0]
-    assert a["options"] == ["approve: Handled by Alice", "reject: Handled by Bob"]
-    assert b["options"] == ["reject: Handled by Alice", "approve: Handled by Bob"]
-    s = to_items("x", {"q": {"type": "score", "instructions": "Level?", "criteria": {"low": "minor", "high": "severe"}}})[0]
-    assert s["options"] == ["low: minor", "high: severe"]
+def swapped_prompts_differ(crit_a, crit_b, t="choice"):
+    q = lambda c: to_items("Customer selected shipping service B.", {"q": {"type": t, "instructions": "Which code?",
+                                                                            "criteria": c}})[0]["options"]
+    return q(crit_a) != q(crit_b)
+
+
+def test_swapping_keys_changes_what_the_model_sees():
+    """Regression: whoever owns which description must reach the prompt (short codes, names mentioned in text)."""
+    assert swapped_prompts_differ({"approve": "Handled by Alice", "reject": "Handled by Bob"},
+                                  {"reject": "Handled by Alice", "approve": "Handled by Bob"})
+    assert swapped_prompts_differ({"A": "Dispatch office: Warsaw", "B": "Dispatch office: Krakow"},
+                                  {"B": "Dispatch office: Warsaw", "A": "Dispatch office: Krakow"})
+    d1, d2 = "Processes approve/reject requests; handled by Alice", "Processes approve/reject requests; handled by Bob"
+    assert swapped_prompts_differ({"approve": d1, "reject": d2}, {"reject": d1, "approve": d2})
+    assert swapped_prompts_differ({"low": "minor", "high": "severe"}, {"high": "minor", "low": "severe"}, "score")

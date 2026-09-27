@@ -1,7 +1,8 @@
 """HTTP server for typed decisions (System One-compatible JSON interface).
 
   POST /v1/systemone   {"state": "...", "questions": {"q1": {"type": "choice"|"noul"|"score", "instructions": "...",
-                        "criteria": {...} | [...]}}, "early_exit": "off"|"0.99"|... (optional)}
+                        "criteria": {...} | [...], "option_keys": "show"|"hide" (optional, default "show")}},
+                        "early_exit": "off"|"0.99"|... (optional)}
   GET  /v1/models
   GET  /health
 
@@ -10,7 +11,6 @@
 import argparse
 import asyncio
 import json
-import re
 import time
 
 import torch
@@ -37,28 +37,22 @@ def _text(x):
     return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
 
 
-INDEX_KEY = re.compile(r"^(?:(?:opt(?:ion)?|opcja|choice|answer|odp(?:owiedz)?)[_ \-]?)?(?:\d+|[a-j])$", re.I)
+def named_options(crit, option_keys="show"):
+    """{key: description} -> option texts shown to the model.
 
-
-def informative_key(key, desc):
-    """A key carries information the description may lack unless it is an index-like placeholder ("0", "option_2",
-    "opcja_1", "B") or its words already appear in the description ("returns" -> "Returns")."""
-    if INDEX_KEY.match(str(key)):
-        return False
-    return re.sub(r"[_\-]+", " ", str(key)).strip().lower() not in desc.lower()
-
-
-def named_options(crit):
-    """{key: description} -> option texts shown to the model. A description is shown as "key: description" whenever
-    the key carries meaning that the description alone would lose: structured descriptions (objects, lists, numbers),
-    descriptions that are not unique within the question, and plain strings whose informative key they do not contain
-    ({"approve": "Handled by Alice"} -> "approve: Handled by Alice"). Otherwise the description is shown as it is (the
-    training format). A key without a description is shown by itself."""
-    keys = list(crit)
+    option_keys="show" (default): every described option is shown as "key: description", because only the caller knows
+    whether a key is meaningful (a service code "B", a decision name "approve"); the server never guesses. A key without
+    a description is shown by itself.
+    option_keys="hide": the caller states that the keys are placeholders and the descriptions alone define the options
+    (the format of the training data and of our PL/EN evaluation clients); descriptions that are not unique within the
+    question still get their key, otherwise the options could not be told apart."""
+    if option_keys not in ("show", "hide"):
+        raise ValueError(f'option_keys must be "show" or "hide", got {option_keys!r}')
     texts = [str(k) if v is None else _text(v) for k, v in crit.items()]
     dup = {t for t in texts if texts.count(t) > 1}
-    return keys, [t if v is None or (isinstance(v, str) and t not in dup and not informative_key(k, t)) else f"{k}: {t}"
-                  for (k, v), t in zip(crit.items(), texts)]
+    shown = [t if v is None or (option_keys == "hide" and t not in dup) else f"{k}: {t}"
+             for (k, v), t in zip(crit.items(), texts)]
+    return list(crit), shown
 
 
 def to_items(state, questions):
@@ -77,14 +71,14 @@ def to_items(state, questions):
         elif t == "score":  # ordered levels (list or {key: description})
             crit = q.get("criteria") or q.get("levels") or []
             if isinstance(crit, dict):
-                keys, opts = named_options(crit)
+                keys, opts = named_options(crit, q.get("option_keys", "show"))
             else:
                 keys, opts = [str(i) for i in range(len(crit))], [_text(v) for v in crit]
         else:  # choice: {key: description} or [keys]
             crit = q.get("criteria") or {}
             if isinstance(crit, list):
                 crit = {k: None for k in crit}
-            keys, opts = named_options(crit)
+            keys, opts = named_options(crit, q.get("option_keys", "show"))
         if not 2 <= len(opts) <= MAX_OPTIONS:
             raise ValueError(f"question {name!r}: {len(opts)} options (supported: 2..{MAX_OPTIONS})")
         out.append(dict(name=name, type=t, keys=keys, state=state, question=instr, options=opts, lang=lang))

@@ -16,7 +16,8 @@ from .bench import DEFAULT_QUESTIONS, load_questions
 
 def body(q, early_exit=None):
     b = {"state": q["state"], "questions": {"q": {"type": "choice", "instructions": q["question"],
-                                                   "criteria": {f"option_{k + 1}": o for k, o in enumerate(q["options"])}}}}
+                                                   "criteria": {f"option_{k + 1}": o for k, o in enumerate(q["options"])},
+                                                   "option_keys": "hide"}}}
     if early_exit:
         b["early_exit"] = early_exit
     return b

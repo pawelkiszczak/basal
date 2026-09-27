@@ -62,13 +62,13 @@ Accuracy, both option orders averaged. *PL decisions*: 7,081 held-out Polish dec
 domains); *PL general*: Polish knowledge, exams, reading comprehension; *EN decisions*: 1,479 held-out English
 decisions; *Public bench.*: the 231-item public English decision benchmark (official harness). basal-1.0 was served with
 this engine (`--mode fast`), open systems with their own official servers, all on one H100. Full table with all eleven
-open systems and speeds: [jev-pl-benchmark](https://huggingface.co/spaces/Remek/jev-pl-benchmark). The basal public-benchmark scores are measured with engine v1.0.1, which shows informative option keys next to
-their descriptions (the benchmark's options have such keys); with v1.0 they were 0.706 (4.5B) and 0.662 (1.5B).
+open systems and speeds: [jev-pl-benchmark](https://huggingface.co/spaces/Remek/jev-pl-benchmark). The basal public-benchmark scores are measured with engine v1.0.1, which shows option keys next to their
+descriptions by default (the benchmark's options have meaningful keys); with v1.0 they were 0.706 (4.5B) and 0.662 (1.5B).
 
 | system | params | PL decisions | PL general | EN decisions | Public bench. |
 |---|---|---|---|---|---|
-| **basal-1.0-4.5B** | 4.5B | **0.884** | 0.737 | 0.741 | 0.732 |
-| basal-1.0-1.5B | 1.5B | 0.849 | 0.656 | 0.734 | 0.667 |
+| **basal-1.0-4.5B** | 4.5B | **0.884** | 0.737 | 0.741 | 0.740 |
+| basal-1.0-1.5B | 1.5B | 0.849 | 0.656 | 0.734 | 0.675 |
 | Jev 1.13.0 (commercial API) | – | 0.780 | – | 0.736 | 0.861 |
 | Cygnet | 12B | 0.688 | 0.793 | 0.703 | **0.879** |
 | AutoJev-27B | 27B | 0.779 | **0.833** | **0.753** | 0.870 |
@@ -132,7 +132,8 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 
 Response (real output, H100, mode `fast`; probabilities in the examples of this README were produced with the v1.0
 engine and calibration; the v1.0.1 temperatures change them slightly but never change the chosen answer, and v1.0.1
-also shows informative option keys next to their descriptions, which can change the probabilities of such requests):
+shows option keys by default (see *Option keys* below; add `"option_keys": "hide"` for the v1.0 prompt), which can
+change the probabilities):
 
 ```json
 {
@@ -194,6 +195,7 @@ Each input line is either a **simple item** or a **full request** (the formats c
                                                       "urgent": {"type": "noul", "instructions": "..."}}}
 ```
 
+Simple items are sent with placeholder keys and `"option_keys": "hide"`, so the model sees exactly the option texts.
 Each output line contains `id`, the full `answers` (probabilities, confidence) and the server `latency_ms`; simple items
 also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. At the
 end `basal-run` prints a summary (items per second, median latency and accuracy if gold labels are present).
@@ -310,7 +312,8 @@ prompt about 360 tokens), which we do not publish so that it cannot be trained o
 {
   "state": "text or JSON",
   "questions": {
-    "<name>": {"type": "choice", "instructions": "...", "criteria": {"<key>": "<description>", ...}},
+    "<name>": {"type": "choice", "instructions": "...", "criteria": {"<key>": "<description>", ...},
+               "option_keys": "show" | "hide"},                                        // optional, default "show"
     "<name>": {"type": "noul",   "instructions": "...", "criteria": {"true": "...", "false": "..."}},   // criteria optional
     "<name>": {"type": "score",  "instructions": "...", "criteria": ["level 0", "level 1", ...]}
   },
@@ -320,10 +323,13 @@ prompt about 360 tokens), which we do not publish so that it cannot be trained o
 
 2–10 options per question. Each answer has `probabilities` (calibrated), `confidence` and the type-specific field
 (`choice`, `noul` = P(yes), `score` = expected level + `legend`); `usage` has `input_tokens` and `output_tokens`.
-An option is shown to the model as `key: description` whenever the key carries meaning the description lacks: structured
-or non-unique descriptions, and plain descriptions whose informative key they do not contain (`{"approve": "Handled by
-Alice"}` → `approve: Handled by Alice`). Placeholder keys (`0`, `option_1`, `B`) and keys already contained in the
-description (`{"returns": "Returns"}`) are not repeated. `GET /v1/models` returns `{"models": [{"name", "description",
+**Option keys.** By default every described option is shown to the model as `key: description`
+(`{"B": "Dispatch office: Krakow"}` → `B: Dispatch office: Krakow`), because only you know whether a key is meaningful
+(a service code, a decision name); the server never guesses. If your keys are mere placeholders (`option_1`, `0`, …) and
+the descriptions alone define the options, send `"option_keys": "hide"` in the question: the model then sees the
+descriptions only, which is also the format of the training data (descriptions that are not unique still get their key).
+A key without a description (`"criteria": {"approve": null}` or a list of keys) is shown by itself. The same applies to
+named `score` levels. `GET /v1/models` returns `{"models": [{"name", "description",
 "release_date", ...}]}`; `GET /health`.
 
 **Using the confidence.** The server averages both option orders and then applies the per-type temperatures of

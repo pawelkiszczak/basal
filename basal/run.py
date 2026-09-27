@@ -32,7 +32,10 @@ def to_request(item, early_exit=None):
             crit = {"true": opts[0], "false": opts[1]}
         else:
             crit = {str(k): o for k, o in enumerate(opts)}
-        body = {"state": item["state"], "questions": {"q": {"type": t, "instructions": item["question"], "criteria": crit}}}
+        q = {"type": t, "instructions": item["question"], "criteria": crit}
+        if t != "noul":
+            q["option_keys"] = "hide"  # keys are the placeholders "0", "1", ...; the option texts define the options
+        body = {"state": item["state"], "questions": {"q": q}}
     if early_exit and "early_exit" not in body:
         body["early_exit"] = early_exit
     return body
