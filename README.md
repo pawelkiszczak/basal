@@ -37,8 +37,9 @@ A question has one of three types:
 | `noul`   | probability of *yes* (with optional descriptions)   | "was the appeal filed on time?"           |
 | `score`  | distribution over ordered levels + expected level   | urgency 0–3, sentiment scale              |
 
-The HTTP API is compatible with the *System One* JSON interface (`POST /v1/systemone`), so existing clients work by
-changing the base URL.
+The HTTP API implements the *System One* JSON interface (`POST /v1/systemone`, `GET /v1/models`); responses validate
+against the official OpenAPI schema (`tests/test_server.py`). Clients using this subset work by changing the base URL
+(the official SDK was not tested; at most 10 options per question).
 
 > The name comes from the *basal ganglia* — the part of the brain that selects one action among competing options.
 
@@ -65,29 +66,31 @@ open systems and speeds: [jev-pl-benchmark](https://huggingface.co/spaces/Remek/
 
 | system | params | PL decisions | PL general | EN decisions | Public bench. |
 |---|---|---|---|---|---|
-| **basal-1.0-4.5B** | 4.5B | **0.886** | 0.737 | 0.741 | 0.706 |
-| basal-1.0-1.5B | 1.5B | 0.851 | 0.656 | 0.734 | 0.662 |
-| Jev 1.13.0 (commercial API) | – | 0.779 | – | 0.736 | 0.861 |
-| Cygnet | 12B | 0.686 | 0.793 | 0.703 | **0.879** |
-| AutoJev-27B | 27B | 0.776 | **0.833** | **0.753** | 0.870 |
-| Jev-Omni | 12B | 0.685 | 0.768 | 0.694 | 0.866 |
-| JevK5 v0.2 | 4B | 0.632 | 0.744 | 0.670 | 0.857 |
-| Winnow-12B | 12B | 0.686 | 0.772 | 0.703 | 0.853 |
-| decider-4b v2 | 4B | 0.708 | 0.717 | 0.694 | 0.835 |
-| decider-35B-A3B | 35B (3B active) | 0.691 | 0.781 | 0.751 | 0.831 |
-| Hopper | 4B | 0.647 | 0.727 | 0.669 | 0.823 |
-| reflex-4B | 4B | 0.585 | 0.729 | 0.645 | 0.814 |
-| nimble-9B v2 | 9B | 0.683 | 0.758 | 0.669 | 0.805 |
-| kev-4B | 4B | 0.692 | 0.690 | 0.666 | 0.758 |
+| **basal-1.0-4.5B** | 4.5B | **0.884** | 0.737 | 0.741 | 0.706 |
+| basal-1.0-1.5B | 1.5B | 0.849 | 0.656 | 0.734 | 0.662 |
+| Jev 1.13.0 (commercial API) | – | 0.780 | – | 0.736 | 0.861 |
+| Cygnet | 12B | 0.688 | 0.793 | 0.703 | **0.879** |
+| AutoJev-27B | 27B | 0.779 | **0.833** | **0.753** | 0.870 |
+| Jev-Omni | 12B | 0.687 | 0.768 | 0.694 | 0.866 |
+| JevK5 v0.2 | 4B | 0.630 | 0.744 | 0.670 | 0.857 |
+| Winnow-12B | 12B | 0.688 | 0.772 | 0.703 | 0.853 |
+| decider-4b v2 | 4B | 0.709 | 0.717 | 0.694 | 0.835 |
+| decider-35B-A3B | 35B (3B active) | 0.694 | 0.781 | 0.751 | 0.831 |
+| Hopper | 4B | 0.649 | 0.727 | 0.669 | 0.823 |
+| reflex-4B | 4B | 0.586 | 0.729 | 0.645 | 0.814 |
+| nimble-9B v2 | 9B | 0.685 | 0.758 | 0.669 | 0.805 |
+| kev-4B | 4B | 0.694 | 0.690 | 0.666 | 0.758 |
 
-basal-1.0 is a **Polish specialist**: best on Polish decisions, 11 points above the best open system, on par with Jev 1.13.0 and within about 1
+basal-1.0 is a **Polish specialist**: best on Polish decisions, 10.5 points above the best open system, on par with Jev 1.13.0 and within about 1
 point of the best open systems on English decisions, and weaker on the general-purpose English benchmark, which it was
-not trained for. At a 1% error budget it can decide **60%** of the held-out test decisions (8,560 Polish and English
-items) automatically (Jev 1.13.0: 31%); with the thresholds shipped in `CALIBRATION.json`: 58.6% at 1.1% observed error.
+not trained for. With the confidence threshold shipped in `CALIBRATION.json` (fixed on calibration data before testing,
+target 1% error) it decides **58.6%** of the held-out test decisions (8,560 Polish and English items) automatically, at
+1.2% observed error; Jev 1.13.0 under the same procedure: 18.1%. Polish-decision scores use the corrected notice-period
+labels of the technical report (v1.0.1); the checkpoints still give the old answer on those items (see Limitations).
 
 ## Speed
 
-One decision = **both option orders** (the default; removes order bias). Batch size 1, median latency; throughput with
+One decision = **both option orders** (the default; reduces sensitivity to option order). Batch size 1, median latency; throughput with
 32 option-order passes per forward. Offline numbers from `basal-bench` (H100, RTX PRO 6000 and RTX 5090 with the
 equivalent research harness), HTTP numbers from `basal-loadtest` (RTX PRO 6000 and RTX 5090: research server), all on the same private 500-item test
 sample.
@@ -125,7 +128,8 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
     "criteria": {"cards": "Reklamacje kart", "online": "Wsparcie bankowości elektronicznej", "loans": "Kredyty"}}}}'
 ```
 
-Response (real output, H100, mode `fast`):
+Response (real output, H100, mode `fast`; probabilities in the examples of this README were produced with the v1.0
+calibration file, the v1.0.1 temperatures change them slightly but never change the chosen answer):
 
 ```json
 {
@@ -143,7 +147,7 @@ Response (real output, H100, mode `fast`):
   }
  },
  "usage": {
-  "input_tokens_approx": 271,
+  "input_tokens": 284,
   "output_tokens": 0,
   "questions": 1,
   "latency_ms": 10.49
@@ -249,7 +253,7 @@ for line in open("basal/examples/questions.jsonl"):
   head at each of these points; if the probability of the top option is above a threshold calibrated for that layer,
   the remaining layers are skipped and the answer is taken from the exit head. Thresholds are calibrated so that the
   early answer agrees with the full model on a chosen share of decisions (99.9%, 99.5%, 99% or 98% on calibration
-  data). Because the model forms its decision late (around layers 51–53), the saving is modest: **12.2 → 10.5 ms per
+  data). Because the decision becomes readable only in the last ten of 60 layers, the saving is modest: **12.2 → 10.5 ms per
   decision on H100 at `0.99` with 99.2% agreement with fp32** (8.8 → 7.7 ms on B300). Each request chooses its level
   with `"early_exit": "0.99"`; `"off"` (default) always uses the final layer, so one server serves both (servers in other
   modes reject the field). A batch stops
@@ -312,12 +316,18 @@ prompt about 360 tokens), which we do not publish so that it cannot be trained o
 ```
 
 2–10 options per question. Each answer has `probabilities` (calibrated), `confidence` and the type-specific field
-(`choice`, `noul` = P(yes), `score` = expected level + `legend`). `GET /v1/models`, `GET /health`.
+(`choice`, `noul` = P(yes), `score` = expected level + `legend`); `usage` has `input_tokens` and `output_tokens`.
+A choice description that is structured (an object or list) or not unique is shown to the model together with its key
+(`"reject: {...}"`), so the key's meaning is never lost. `GET /v1/models` returns `{"models": [{"name", "description",
+"release_date", ...}]}`; `GET /health`.
 
-**Using the confidence.** Probabilities are calibrated on held-out data; `CALIBRATION.json` in each model repo contains
-confidence thresholds chosen on the calibration split for a target error of 1% and 5% among accepted decisions (on
-the test split: 4.5B 1.1% / 4.4%, 1.5B 1.3% / 5.3%) — accept decisions above the threshold automatically and route
-the rest to a person.
+**Using the confidence.** The server averages both option orders and then applies the per-type temperatures of
+`CALIBRATION.json`, which were fitted on exactly that averaged prediction. The file also contains confidence thresholds
+chosen on the calibration split, before testing, for a target error of 1% and 5% among accepted decisions; applied
+once to the test split they accept 58.6% / 75.0% of decisions at 1.2% / 4.4% observed error (4.5B) and 49.5% / 68.6%
+at 1.4% / 5.5% (1.5B). Accept decisions above the threshold automatically and route the rest to a person; with your own
+data, refit the thresholds on a labelled sample. The FP8 and NVFP4 checkpoints inherit the bf16 temperatures and
+thresholds, which are not validated for them.
 
 ## Limitations
 
@@ -325,6 +335,15 @@ the rest to a person.
   collections require validation on your own data.
 - Polish world knowledge of a 4.5B model is limited; supply the relevant facts in the state.
 - Legal rules change; the model does not know rules introduced after its training.
+- A generator error in the training data taught the checkpoints the wrong notice period (art. 36 § 1 KP) when three
+  years of employment are completed during a one-month notice: they answer one month instead of three. The evaluation
+  labels are corrected; the checkpoints will be retrained in the next release.
+- Averaging the original and reversed option order reduces, but does not remove, sensitivity to option order for three
+  or more options.
+- About 21% of the training items (13,500 English items) come from an aggregated public corpus whose upstream sources
+  could not be traced item by item; see the technical report.
+- The test split was consulted during development; its results are those of an adaptive process on held-out templates,
+  not a single untouched final evaluation.
 - Decisions with serious consequences for people should be reviewed by a person.
 
 ## License

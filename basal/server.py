@@ -17,6 +17,8 @@ import torch
 from .engine import EagerBackend, ExitGraphBackend, GraphBackend, VLLMBackend, resolve
 from .prompt import MAX_OPTIONS, lang_of, letter_ids, render
 
+RELEASE_DATE = "2026-10-01"
+
 MODES = {
     # mode: (backend, quantisation, compile)
     "eager": ("eager", None, False),        # reference PyTorch forward, any GPU (or CPU)
@@ -32,6 +34,17 @@ MODES = {
 def _text(x):
     """Strings as they are; structured values (objects, lists, numbers) as compact JSON."""
     return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
+
+
+def named_options(crit):
+    """{key: description} -> option texts shown to the model. A plain string description is shown as it is (the
+    training format). The key is added ("key: description") whenever the description alone would lose it: structured
+    descriptions (objects, lists, numbers), and descriptions that are not unique within the question."""
+    keys = list(crit)
+    texts = [str(k) if v is None else _text(v) for k, v in crit.items()]
+    dup = {t for t in texts if texts.count(t) > 1}
+    return keys, [t if v is None or (isinstance(v, str) and t not in dup) else f"{k}: {t}"
+                  for (k, v), t in zip(crit.items(), texts)]
 
 
 def to_items(state, questions):
@@ -50,18 +63,25 @@ def to_items(state, questions):
         elif t == "score":  # ordered levels (list or {key: description})
             crit = q.get("criteria") or q.get("levels") or []
             if isinstance(crit, dict):
-                keys, opts = list(crit), [_text(v) for v in crit.values()]
+                keys, opts = named_options(crit)
             else:
                 keys, opts = [str(i) for i in range(len(crit))], [_text(v) for v in crit]
         else:  # choice: {key: description} or [keys]
             crit = q.get("criteria") or {}
             if isinstance(crit, list):
                 crit = {k: None for k in crit}
-            keys, opts = list(crit), [str(k) if v is None else _text(v) for k, v in crit.items()]
+            keys, opts = named_options(crit)
         if not 2 <= len(opts) <= MAX_OPTIONS:
             raise ValueError(f"question {name!r}: {len(opts)} options (supported: 2..{MAX_OPTIONS})")
         out.append(dict(name=name, type=t, keys=keys, state=state, question=instr, options=opts, lang=lang))
     return out
+
+
+def models_payload(name, mode, policies):
+    """GET /v1/models in the official ModelMetadataList shape, plus the serving mode and early-exit levels."""
+    return {"models": [{"name": name, "release_date": RELEASE_DATE,
+                        "description": "basal typed-decision model (choice / noul / score), Polish and English",
+                        "mode": mode, "early_exit": sorted(policies)}]}
 
 
 class Server:
@@ -141,7 +161,7 @@ class Server:
             if any(ids is None for _, _, ids in jobs):
                 raise ValueError("option letters are not single tokens for this tokenizer")
             fut = loop.create_future()
-            n_tok += sum(len(p) for _, p, _ in jobs) // 4
+            n_tok += sum(len(self.tok(p, add_special_tokens=False).input_ids) for _, p, _ in jobs)
             await self.queue.put(([p for _, p, _ in jobs], [ids for _, _, ids in jobs], fut, pol))
             pend.append((q, [perm for perm, _, _ in jobs], fut))
         answers = {}
@@ -168,7 +188,7 @@ class Server:
                 ans = {"type": "choice", "choice": max(probs, key=probs.get), "probabilities": probs, "confidence": conf}
             answers[q["name"]] = ans
         return {"model": self.name, "answers": answers,
-                "usage": {"input_tokens_approx": n_tok, "output_tokens": 0, "questions": len(qs),
+                "usage": {"input_tokens": n_tok, "output_tokens": 0, "questions": len(qs),
                           "latency_ms": round((time.perf_counter() - t0) * 1000, 2)}}
 
 
@@ -181,7 +201,7 @@ def parser():
     ap.add_argument("--quant", choices=["fp8", "nvfp4"], default=None, help="override the quantisation of the mode")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--orders", type=int, choices=[1, 2], default=2,
-                    help="2 = ask in original and reversed option order and average (default, removes order bias)")
+                    help="2 = ask in original and reversed option order and average (default, reduces order sensitivity)")
     ap.add_argument("--early-exit", dest="early_exit", default="off", help="default policy for --mode fast-exit")
     ap.add_argument("--exit-heads", dest="exit_heads", default=None, help="exit heads dir (default: <model>/exit_heads)")
     ap.add_argument("--no-calibration", dest="no_calibration", action="store_true")
@@ -214,8 +234,7 @@ def main():
             return JSONResponse({"error": str(e)}, status_code=422)
 
     async def models(_):
-        return JSONResponse({"data": [{"id": srv.name, "mode": a.mode,
-                                       "early_exit": sorted(getattr(srv.backend, "policies", {}))}]})
+        return JSONResponse(models_payload(srv.name, a.mode, getattr(srv.backend, "policies", {})))
 
     async def health(_):
         return JSONResponse({"status": "ok"})
