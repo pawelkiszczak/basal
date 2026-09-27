@@ -198,7 +198,7 @@ for f in choice noul score complex; do basal-run --input examples/$f.jsonl --out
 Add `--early-exit 0.99` when the server runs in `fast-exit` mode.
 
 **What to expect on these files** (basal-1.0-4.5B, `fast`, real run): `choice` 6/8, `noul` 7/8, `score` 6/8 correct.
-The mistakes are instructive: the model picks a wrong invoice total (738 zł) and a wrong bonus band (103% of plan), and
+The mistakes are instructive: the model picks a wrong invoice total (823 zł instead of 738 zł) and a wrong bonus band at 103% of plan, and
 misreads "above 5 000 zł net" for an amount of exactly 5 000 zł net — with high confidence. Like other System 1 models,
 it is weak at **arithmetic and exact thresholds**. Compute numbers in code and let the model make the typed decision on
 top of them; split composite rules into simple questions (`complex.jsonl`, `cx-03`: the model gets the last day and the
