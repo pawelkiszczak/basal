@@ -336,8 +336,8 @@ named `score` levels. `GET /v1/models` returns `{"models": [{"name", "descriptio
 `CALIBRATION.json`, which were fitted on exactly that averaged prediction. The file also contains confidence thresholds
 chosen on the calibration split, before testing, for a target error of 1% and 5% among accepted decisions; applied
 once to the test split they accept 58.6% / 75.0% of decisions at 1.2% / 4.4% observed error (4.5B) and 49.5% / 68.6%
-at 1.4% / 5.5% (1.5B). Accept decisions above the threshold automatically and route the rest to a person; with your own
-data, refit the thresholds on a labelled sample. The FP8 and NVFP4 checkpoints inherit the bf16 temperatures and
+at 1.4% / 5.5% (1.5B). These numbers were measured on descriptions-only prompts (`"option_keys": "hide"`); in the default mode, which
+also shows option keys, they are not validated — refit the thresholds on your own labelled requests. Accept decisions above the threshold automatically and route the rest to a person. The FP8 and NVFP4 checkpoints inherit the bf16 temperatures and
 thresholds, which are not validated for them.
 
 ## Limitations
