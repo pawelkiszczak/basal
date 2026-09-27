@@ -36,7 +36,7 @@ Add `--mode fast-exit` to let requests choose `"early_exit": "0.99"` (about 1.15
 | **RTX PRO 6000 Blackwell** | `fast` (bf16) | 18.9 | 39 | 0.994 | 0.822 |
 | | `fp8` | 14.9 | 58 | 0.968 | 0.840 |
 | | HTTP `fast` (p50) | 22.5 | 39 | – | – |
-| **RTX 5090** | `fast` (bf16) | 27.3 | 24 | 0.999 | 0.824 |
+| **RTX 5090** | `fast` (bf16) | 27.3 (28.0 on a second machine) | 24 | 0.999 | 0.824 |
 | | `fp8` | 19.4 | 40 | 0.968 | 0.828 |
 | | HTTP `fast` (p50) | 32.3 | 23 | – | – |
 | **DGX Spark (GB10)** | `eager` fp32 | 800.4 | 0.4 | reference | 0.822 |
@@ -48,7 +48,19 @@ Add `--mode fast-exit` to let requests choose `"early_exit": "0.99"` (about 1.15
 
 ¹ agreement with bf16 (which agrees with fp32 on 99.6%).
 
-basal-1.0-1.5B on H100 (`fast`): 6.4 ms, about 158 dec/s.
+## basal-1.0-1.5B (lite)
+
+| GPU | `fast` (bf16) | dec/s | `fp8` | dec/s | agreement bf16 / fp8 | vs 4.5B bf16 |
+|---|---|---|---|---|---|---|
+| B300 SXM6 | **4.7 ms** | **250** | 5.2 ms | 224 | 0.994 / 0.966 | 1.9× faster |
+| H100 80GB | 6.2 ms | 157 | 6.3 ms | 177 | 0.992 / 0.964 | 2.0× |
+| RTX PRO 6000 Blackwell | 8.8 ms | 101 | 7.6 ms | 128 | 0.998 / 0.968 | 2.2× |
+| RTX 5090 | 12.7 ms | 67 | 9.3 ms | 99 | 0.996 / 0.960 | 2.2× |
+| RTX 4090 | 12.5 ms | 51 | – | – | – | – |
+| DGX Spark (GB10) | 34.3 ms | 20 | **18.1 ms** | 31 | 0.996 / 0.962 | 2.7× |
+
+HTTP on H100 (`basal-serve --mode fast`): 7.7 ms p50, 147 decisions/s with 32 clients. NVFP4 on the DGX Spark: 16.5 ms
+but agreement 0.87 — not recommended. RTX 4090: the FP8 compilation stalled on our test machine; bf16 works.
 
 ## Notes per platform
 

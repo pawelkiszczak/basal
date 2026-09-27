@@ -65,7 +65,7 @@ with their own official servers on one H100.
 | system | params | PL decisions | PL general | EN decisions | Public bench. |
 |---|---|---|---|---|---|
 | **basal-1.0-4.5B** | 4.5B | **0.886** | 0.737 | 0.740 | 0.714 |
-| basal-1.0-1.5B | 1.5B | 0.852¹ | – | 0.728¹ | – |
+| basal-1.0-1.5B | 1.5B | 0.851 | 0.656 | 0.734 | 0.662 |
 | Jev 1.13.0 (commercial API) | – | 0.779 | – | 0.736 | 0.861 |
 | AutoJev-27B | 27B | 0.776 | **0.833** | **0.753** | 0.870 |
 | Cygnet | 12B | 0.686 | 0.793 | 0.703 | **0.879** |
@@ -75,8 +75,6 @@ with their own official servers on one H100.
 | decider-4b v2 | 4B | 0.708 | 0.717 | 0.694 | 0.835 |
 | decider-35B-A3B | 35B (3B active) | 0.691 | 0.781 | 0.751 | 0.831 |
 | nimble-9B v2 | 9B | 0.683 | 0.758 | 0.669 | 0.805 |
-
-¹ v4 test split (Polish / English part), fp32 readout.
 
 basal-1.0 is a **Polish specialist**: best on Polish decisions by 11 points, on par with the best systems on English
 decisions, and weaker on the general-purpose English benchmark, which it was not trained for. At a 1% error budget it
@@ -94,7 +92,9 @@ One decision = **both option orders** (the default; removes order bias). Batch s
 | RTX PRO 6000 Blackwell | workstation | 18.9 ms, 39 dec/s | 14.9 ms, 58 dec/s | 22.5 ms p50, 39 dec/s |
 | RTX 5090 | consumer | 27.3 ms, 24 dec/s | 19.4 ms, 40 dec/s | 32.3 ms p50, 23 dec/s |
 | DGX Spark (GB10) | desktop | 92.0 ms, 7 dec/s | **44.6 ms**, 8 dec/s | – |
-| basal-1.0-1.5B on H100 | server | **6.4 ms**, 158 dec/s | – | – |
+| basal-1.0-1.5B on B300 | server | **4.7 ms**, 250 dec/s | 5.2 ms, 224 dec/s | – |
+| basal-1.0-1.5B on H100 | server | 6.2 ms, 157 dec/s | 6.3 ms, 177 dec/s | 7.7 ms p50, 147 dec/s |
+| basal-1.0-1.5B on DGX Spark | desktop | 34.3 ms, 20 dec/s | **18.1 ms**, 31 dec/s | – |
 
 `fast` keeps decisions identical to the fp32 reference (argmax agreement ≥ 0.99); `fp8` changes about 2–3% of
 decisions. Which mode is fastest depends on the bottleneck of the card: on the DGX Spark (memory-bandwidth-bound) FP8
