@@ -1,5 +1,8 @@
 # basal
 
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-basal--1.0%20collection-yellow)](https://huggingface.co/collections/Remek/basal-10-6ab8224bf7bd8732d7a6117d)
+[![arXiv](https://img.shields.io/badge/arXiv-technical%20report-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
+
 Inference engine for **basal-1.0** — small, fast, calibrated *typed-decision* models for Polish (and English).
 
 **What it is.** basal-1.0 is inspired by the *System 1* (fast, intuitive) decision models such as Jev: instead of a
@@ -178,8 +181,29 @@ Each input line is either a **simple item** or a **full request** (the formats c
 Each output line contains `id`, the full `answers` (probabilities, confidence) and the server `latency_ms`; simple items
 also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. At the
 end `basal-run` prints a summary (items per second, median latency and accuracy if gold labels are present).
-`examples/questions.jsonl` contains 20 Polish and English examples with gold labels. Add `--early-exit 0.99` when the
-server runs in `fast-exit` mode.
+Ready-to-run examples (Polish and English) in `examples/`:
+
+| file | what it shows |
+|---|---|
+| `choice.jsonl` | routing, document type, amounts, policy rules, sentiment, next step — one option out of 3–4 (with `gold`) |
+| `noul.jsonl` | yes/no decisions: deadlines, approval thresholds, phishing, refunds, missing information, alerts (with `gold`) |
+| `score.jsonl` | ordered scales: urgency, satisfaction, fraud risk, answer correctness; the answer includes the expected level |
+| `complex.jsonl` | full requests: several typed questions about one JSON state (fan-out), a web-agent step with structured options, a deadline decomposed into simple questions, loan triage, a prompt-injection guard |
+| `questions.jsonl` | 20 mixed items used by `basal-bench` |
+
+```bash
+for f in choice noul score complex; do basal-run --input examples/$f.jsonl --output answers_$f.jsonl; done
+```
+
+Add `--early-exit 0.99` when the server runs in `fast-exit` mode.
+
+**What to expect on these files** (basal-1.0-4.5B, `fast`, real run): `choice` 6/8, `noul` 7/8, `score` 6/8 correct.
+The mistakes are instructive: the model picks a wrong invoice total (738 zł) and a wrong bonus band (103% of plan), and
+misreads "above 5 000 zł net" for an amount of exactly 5 000 zł net — with high confidence. Like other System 1 models,
+it is weak at **arithmetic and exact thresholds**. Compute numbers in code and let the model make the typed decision on
+top of them; split composite rules into simple questions (`complex.jsonl`, `cx-03`: the model gets the last day and the
+filing date right with high confidence, while the direct "was it in time?" question stays uncertain at 0.59). Low
+confidence is the signal to route a decision to a person; the thresholds for 1% and 5% error are in `CALIBRATION.json`.
 
 From Python, with the client of a running server:
 
