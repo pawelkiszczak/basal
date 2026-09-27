@@ -3,6 +3,8 @@
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-basal--1.0%20collection-yellow)](https://huggingface.co/collections/Remek/basal-10-6ab8224bf7bd8732d7a6117d)
 [![arXiv](https://img.shields.io/badge/arXiv-technical%20report-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
 
+![basal-1.0 overview](assets/basal.png)
+
 Inference engine for **basal-1.0** — small, fast, calibrated *typed-decision* models for Polish (and English).
 
 **What it is.** basal-1.0 is inspired by the *System 1* (fast, intuitive) decision models such as Jev: instead of a
