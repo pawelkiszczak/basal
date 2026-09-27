@@ -253,14 +253,37 @@ first time, seconds with a warm compile cache). Prompts longer than 3,072 tokens
 
 ## Benchmark your GPU
 
+Two tools are installed with the package. Both run out of the box on the bundled examples (`examples/questions.jsonl`,
+`choice.jsonl`, `noul.jsonl`, `score.jsonl`: 44 Polish and English items with gold answers):
+
 ```bash
-basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 fast fp8 fast-exit@0.99
+# offline: latency, throughput and agreement of serving modes (no HTTP); put eager-fp32 first as the reference
+basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 fast fp8 fast-exit@0.99 --out bench.json
+
+# end to end over HTTP against a running server (basal-serve ...)
 basal-loadtest --url http://127.0.0.1:8000/v1/systemone
 ```
 
-`basal-bench` reports latency with one and two option orders, throughput, argmax agreement with the first mode
-(use `eager-fp32` first as the reference) and accuracy on the bundled example questions (`examples/questions.jsonl`).
-The numbers in the tables above were measured with the same tool on our private 500-item test sample.
+`basal-bench` loads the model once per mode and reports, per mode:
+
+| column | meaning |
+|---|---|
+| `lat2 ms` | median latency of one decision with **both** option orders at batch size 1 (what the server does by default) |
+| `lat1 ms` | the same with one option order |
+| `dec/s` | two-order decisions per second when 32 option-order passes are processed together |
+| `agree` | share of decisions whose top option equals the first mode's (use `eager-fp32` first) |
+| `acc` | accuracy against `gold` |
+| `GB` | peak GPU memory |
+
+`basal-loadtest` reports the median and p95 latency of sequential requests and the decisions per second with 32
+concurrent clients.
+
+**Your own data.** 44 examples are enough to check that everything works, not for precise numbers: latency depends on
+prompt length, and accuracy on 44 items is noisy. For numbers that describe *your* workload, write a JSONL file with a
+few hundred items in the same simple format (`{"state": ..., "question": ..., "options": [...], "gold": <index>}`,
+`gold` optional) with realistic state lengths, and pass it with `--questions my_items.jsonl` (several files are
+allowed). The tables in this README were measured with the same tools on our private 500-item test sample (mean
+prompt about 360 tokens), which we do not publish so that it cannot be trained on.
 
 ## API
 

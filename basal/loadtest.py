@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 
-from .bench import load_questions
+from .bench import DEFAULT_QUESTIONS, load_questions
 
 
 def body(q, early_exit=None):
@@ -59,7 +59,7 @@ async def run(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", default="http://127.0.0.1:8000/v1/systemone")
-    ap.add_argument("--questions", default=str(Path(__file__).resolve().parent.parent / "examples" / "questions.jsonl"))
+    ap.add_argument("--questions", nargs="+", default=DEFAULT_QUESTIONS, help="JSONL file(s) with simple items")
     ap.add_argument("--n-seq", dest="n_seq", type=int, default=200)
     ap.add_argument("--n-conc", dest="n_conc", type=int, default=1000)
     ap.add_argument("--concurrency", type=int, default=32)

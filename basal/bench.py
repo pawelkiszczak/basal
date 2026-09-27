@@ -1,6 +1,7 @@
 """Offline benchmark of a serving mode (no HTTP): latency, throughput, agreement with an fp32 reference, accuracy.
 
-  basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 fast fp8 --questions examples/questions.jsonl
+  basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 fast fp8              # bundled examples
+  basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 fast --questions my_items.jsonl
 
 Questions file (JSONL): {"state": ..., "question": ..., "options": [...], "gold": <index, optional>}.
 Measured per mode (same definitions as in the technical report):
@@ -40,8 +41,17 @@ def build(mode, md, vllm_model=None):
     return GraphBackend(md, "bfloat16", quant, compile=comp, shared=True)
 
 
-def load_questions(path, n, seed=0):
-    qs = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+DEFAULT_QUESTIONS = [str(EXAMPLES / f) for f in ("questions.jsonl", "choice.jsonl", "noul.jsonl", "score.jsonl")]
+
+
+def load_questions(paths, n, seed=0):
+    """Simple-format items {"state", "question", "options", "gold"?} from one or more JSONL files (full-request lines
+    with "questions" are skipped)."""
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    qs = [json.loads(line) for p in paths for line in Path(p).read_text().splitlines() if line.strip()]
+    qs = [q for q in qs if "options" in q]
     random.Random(seed).shuffle(qs)
     return qs[:n]
 
@@ -111,7 +121,8 @@ def main():
     ap.add_argument("--vllm-model", dest="vllm_model", default=None, help="checkpoint for --modes vllm (e.g. the NVFP4 repo)")
     ap.add_argument("--modes", nargs="+", default=["eager-fp32", "fast"],
                     help="eager-fp32, eager, fast, fast-nocompile, fp8, nvfp4, vllm, fast-exit@off|0.999|0.995|0.99|0.98")
-    ap.add_argument("--questions", default=str(Path(__file__).resolve().parent.parent / "examples" / "questions.jsonl"))
+    ap.add_argument("--questions", nargs="+", default=DEFAULT_QUESTIONS,
+                    help="JSONL file(s) with simple items (default: the bundled examples, 44 items)")
     ap.add_argument("--n", type=int, default=500)
     ap.add_argument("--lat-n", dest="lat_n", type=int, default=100)
     ap.add_argument("--out", default=None, help="write results as JSON")
