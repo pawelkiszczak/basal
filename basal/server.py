@@ -21,9 +21,9 @@ MODES = {
     # mode: (backend, quantisation, compile)
     "eager": ("eager", None, False),        # reference PyTorch forward, any GPU (or CPU)
     "fast": ("graph", None, True),          # bf16 + torch.compile + CUDA graphs + shared prefix (recommended)
-    "fast-nocompile": ("graph", None, False),  # same without torch.compile (faster start-up, ~1.3x slower on H100)
+    "fast-nocompile": ("graph", None, False),  # same without torch.compile (faster start-up, ~1.4x slower on H100)
     "fast-exit": ("exit", None, True),      # "fast" + trained early exits, policy chosen per request
-    "fp8": ("graph", "fp8", True),          # "fast" with torchao FP8 (Ada / Hopper / Blackwell)
+    "fp8": ("graph", "fp8", True),          # "fast" with torchao FP8 (Hopper / Blackwell)
     "nvfp4": ("graph", "nvfp4", True),      # "fast" with torchao NVFP4 (Blackwell, experimental)
     "vllm": ("vllm", None, False),          # vLLM, for the ModelOpt FP8 / NVFP4 checkpoints
 }

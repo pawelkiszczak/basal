@@ -1,6 +1,6 @@
 """HTTP load test of a running basal server: sequential latency and throughput with concurrent clients.
 
-  basal-loadtest --url http://127.0.0.1:8000/v1/systemone --questions examples/questions.jsonl
+  basal-loadtest --url http://127.0.0.1:8000/v1/systemone --questions basal/examples/questions.jsonl
 """
 import argparse
 import asyncio

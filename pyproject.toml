@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -34,3 +34,6 @@ basal-run = "basal.run:main"
 
 [tool.setuptools]
 packages = ["basal"]
+
+[tool.setuptools.package-data]
+basal = ["examples/*.jsonl", "examples/*.py"]

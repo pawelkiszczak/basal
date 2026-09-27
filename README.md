@@ -27,7 +27,7 @@ drop-in, very fast replacement for:
 
 **How fast.** One decision (both option orders, calibrated) takes **8.8 ms on a B300, 12.5 ms on an H100, 27 ms on an
 RTX 5090 and 45 ms on a desktop DGX Spark (FP8)**; the 1.5B model is about twice as fast. On Polish decisions it is more
-accurate than the commercial Jev API and ten open decision models (see [Quality](#quality)).
+accurate than the commercial Jev API and eleven open decision models (see [Quality](#quality)).
 
 A question has one of three types:
 
@@ -47,8 +47,8 @@ changing the base URL.
 | model | params | use | Hugging Face |
 |---|---|---|---|
 | **basal-1.0-4.5B** | 4.5B | main model, highest quality | `Remek/basal-1.0-4.5B` (bf16, includes early-exit heads) |
-| basal-1.0-4.5B-FP8 / -NVFP4 | 4.5B | ModelOpt checkpoints for vLLM (Hopper / Blackwell) | `Remek/basal-1.0-4.5B-FP8`, `Remek/basal-1.0-4.5B-NVFP4` |
-| **basal-1.0-1.5B** | 1.5B | *lite*: 2.5× throughput, −2.9 points | `Remek/basal-1.0-1.5B` |
+| basal-1.0-4.5B-FP8 / -NVFP4 | 4.5B | ModelOpt checkpoints for vLLM (FP8: Hopper / Blackwell; NVFP4: Blackwell) | `Remek/basal-1.0-4.5B-FP8`, `Remek/basal-1.0-4.5B-NVFP4` |
+| **basal-1.0-1.5B** | 1.5B | *lite*: 2× faster, −2.9 points on the full held-out test (−3.5 on Polish decisions with the released engine) | `Remek/basal-1.0-1.5B` |
 | basal-1.0-1.5B-FP8 / -NVFP4 | 1.5B | ModelOpt checkpoints for vLLM | `Remek/basal-1.0-1.5B-FP8`, `Remek/basal-1.0-1.5B-NVFP4` |
 
 Both models are fine-tuned from Apache-2.0 base models (see [NOTICE](NOTICE)) on Polish and English decision data whose
@@ -59,31 +59,38 @@ type (temperatures stored in `CALIBRATION.json` and applied by the server).
 
 Accuracy, both option orders averaged. *PL decisions*: 7,081 held-out Polish decisions (unseen templates, statutes and
 domains); *PL general*: Polish knowledge, exams, reading comprehension; *EN decisions*: 1,479 held-out English
-decisions; *Public bench.*: the 231-item public English decision benchmark (official harness). Open systems were served
-with their own official servers on one H100.
+decisions; *Public bench.*: the 231-item public English decision benchmark (official harness). basal-1.0 was served with
+this engine (`--mode fast`), open systems with their own official servers, all on one H100. Full table with all eleven
+open systems and speeds: [jev-pl-benchmark](https://huggingface.co/spaces/Remek/jev-pl-benchmark).
 
 | system | params | PL decisions | PL general | EN decisions | Public bench. |
 |---|---|---|---|---|---|
-| **basal-1.0-4.5B** | 4.5B | **0.886** | 0.737 | 0.740 | 0.714 |
+| **basal-1.0-4.5B** | 4.5B | **0.886** | 0.737 | 0.741 | 0.706 |
 | basal-1.0-1.5B | 1.5B | 0.851 | 0.656 | 0.734 | 0.662 |
 | Jev 1.13.0 (commercial API) | – | 0.779 | – | 0.736 | 0.861 |
-| AutoJev-27B | 27B | 0.776 | **0.833** | **0.753** | 0.870 |
 | Cygnet | 12B | 0.686 | 0.793 | 0.703 | **0.879** |
+| AutoJev-27B | 27B | 0.776 | **0.833** | **0.753** | 0.870 |
 | Jev-Omni | 12B | 0.685 | 0.768 | 0.694 | 0.866 |
 | JevK5 v0.2 | 4B | 0.632 | 0.744 | 0.670 | 0.857 |
 | Winnow-12B | 12B | 0.686 | 0.772 | 0.703 | 0.853 |
 | decider-4b v2 | 4B | 0.708 | 0.717 | 0.694 | 0.835 |
 | decider-35B-A3B | 35B (3B active) | 0.691 | 0.781 | 0.751 | 0.831 |
+| Hopper | 4B | 0.647 | 0.727 | 0.669 | 0.823 |
+| reflex-4B | 4B | 0.585 | 0.729 | 0.645 | 0.814 |
 | nimble-9B v2 | 9B | 0.683 | 0.758 | 0.669 | 0.805 |
+| kev-4B | 4B | 0.692 | 0.690 | 0.666 | 0.758 |
 
-basal-1.0 is a **Polish specialist**: best on Polish decisions by 11 points, on par with the best systems on English
-decisions, and weaker on the general-purpose English benchmark, which it was not trained for. At a 1% error budget it
-can decide **60%** of Polish-test decisions automatically (Jev 1.13.0: 31%).
+basal-1.0 is a **Polish specialist**: best on Polish decisions, 11 points above the best open system, on par with Jev 1.13.0 and within about 1
+point of the best open systems on English decisions, and weaker on the general-purpose English benchmark, which it was
+not trained for. At a 1% error budget it can decide **60%** of the held-out test decisions (8,560 Polish and English
+items) automatically (Jev 1.13.0: 31%); with the thresholds shipped in `CALIBRATION.json`: 58.6% at 1.1% observed error.
 
 ## Speed
 
 One decision = **both option orders** (the default; removes order bias). Batch size 1, median latency; throughput with
-32 option-order passes per forward. Offline numbers from `basal-bench`, HTTP numbers from `basal-loadtest`.
+32 option-order passes per forward. Offline numbers from `basal-bench` (H100, RTX PRO 6000 and RTX 5090 with the
+equivalent research harness), HTTP numbers from `basal-loadtest` (RTX PRO 6000 and RTX 5090: research server), all on the same private 500-item test
+sample.
 
 | GPU | class | `fast` (bf16) | `fp8` | HTTP `fast` |
 |---|---|---|---|---|
@@ -96,18 +103,18 @@ One decision = **both option orders** (the default; removes order bias). Batch s
 | basal-1.0-1.5B on H100 | server | 6.2 ms, 157 dec/s | 6.3 ms, 177 dec/s | 7.7 ms p50, 147 dec/s |
 | basal-1.0-1.5B on DGX Spark | desktop | 34.3 ms, 20 dec/s | **18.1 ms**, 31 dec/s | – |
 
-`fast` keeps decisions identical to the fp32 reference (argmax agreement ≥ 0.99); `fp8` changes about 2–3% of
-decisions. Which mode is fastest depends on the bottleneck of the card: on the DGX Spark (memory-bandwidth-bound) FP8
+`fast` keeps decisions practically identical to the fp32 reference (argmax agreement 0.99–1.00); `fp8` changes about
+2–4% of decisions. Which mode is fastest depends on the bottleneck of the card: on the DGX Spark (memory-bandwidth-bound) FP8
 halves latency, on workstation and consumer cards it gives 1.3–1.4×, and on the B300 bf16 is already fastest. NVFP4
 (4-bit) costs this model about 3 accuracy points and is meant only for batched high-throughput serving (vLLM on the
-DGX Spark: 27 instead of 8 decisions/s). See [docs/HARDWARE.md](docs/HARDWARE.md) for every GPU we validated, including B300, A100, RTX 4090 and
-DGX Spark (GB10).
+DGX Spark: 27 instead of 8 decisions/s). See [docs/HARDWARE.md](docs/HARDWARE.md) for every GPU we measured: B300, H100,
+RTX PRO 6000, RTX 5090, RTX 4090 (1.5B only) and DGX Spark (GB10).
 
 ## Quick start
 
 ```bash
 pip install "basal[fp8] @ git+https://github.com/rkinas/basal"     # or: git clone ... && pip install -e ".[fp8]"
-huggingface-cli login                                               # the model repos are private for now
+hf auth login                                                       # only needed while the model repos are private
 basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
 ```
 
@@ -154,7 +161,7 @@ a = b.score("Zgłoszenie z oddziału w Gdańsku: od 7:40 nie działa żaden term
             "Jak pilne jest to zgłoszenie?",
             ["niska — można zaplanować", "średnia — w ciągu kilku dni", "wysoka — dziś", "krytyczna — natychmiast"])
 print(round(a["score"], 2), a["probabilities"])
-# real output: 2.71 {"0": 0.005, "1": 0.003, "2": 0.269, "3": 0.722}
+# real output (rounded): 2.71 {'0': 0.005, '1': 0.003, '2': 0.269, '3': 0.722}
 # (expected level 2.71 of 0-3: most likely "krytyczna" 0.72, "wysoka" 0.27)
 ```
 
@@ -164,7 +171,7 @@ print(round(a["score"], 2), a["probabilities"])
 writes one answer per line, in the same order. Start a server first (`basal-serve ...`), then:
 
 ```bash
-basal-run --input examples/questions.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
+basal-run --input basal/examples/questions.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
 ```
 
 Each input line is either a **simple item** or a **full request** (the formats can be mixed):
@@ -183,7 +190,8 @@ Each input line is either a **simple item** or a **full request** (the formats c
 Each output line contains `id`, the full `answers` (probabilities, confidence) and the server `latency_ms`; simple items
 also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. At the
 end `basal-run` prints a summary (items per second, median latency and accuracy if gold labels are present).
-Ready-to-run examples (Polish and English) in `examples/`:
+Ready-to-run examples (Polish and English) in `basal/examples/` (in a clone of this repository; they are also
+installed with the package):
 
 | file | what it shows |
 |---|---|
@@ -191,10 +199,10 @@ Ready-to-run examples (Polish and English) in `examples/`:
 | `noul.jsonl` | yes/no decisions: deadlines, approval thresholds, phishing, refunds, missing information, alerts (with `gold`) |
 | `score.jsonl` | ordered scales: urgency, satisfaction, fraud risk, answer correctness; the answer includes the expected level |
 | `complex.jsonl` | full requests: several typed questions about one JSON state (fan-out), a web-agent step with structured options, a deadline decomposed into simple questions, loan triage, a prompt-injection guard |
-| `questions.jsonl` | 20 mixed items used by `basal-bench` |
+| `questions.jsonl` | 20 mixed items; with `choice`, `noul` and `score` the default set of `basal-bench` and `basal-loadtest` |
 
 ```bash
-for f in choice noul score complex; do basal-run --input examples/$f.jsonl --output answers_$f.jsonl; done
+for f in choice noul score complex; do basal-run --input basal/examples/$f.jsonl --output answers_$f.jsonl; done
 ```
 
 Add `--early-exit 0.99` when the server runs in `fast-exit` mode.
@@ -213,7 +221,7 @@ From Python, with the client of a running server:
 from basal.client import Basal
 import json
 b = Basal("http://127.0.0.1:8000")
-for line in open("examples/questions.jsonl"):
+for line in open("basal/examples/questions.jsonl"):
     q = json.loads(line)
     a = b.choice(q["state"], q["question"], {str(i): o for i, o in enumerate(q["options"])})
     print(a["choice"], round(a["confidence"], 3))
@@ -228,33 +236,35 @@ for line in open("examples/questions.jsonl"):
 | `fast` *(default)* | bf16 + `torch.compile` + CUDA graphs + shared prefix + token-budget batching | any CUDA GPU (sm80+) |
 | `fast-nocompile` | same without compilation (start-up in seconds instead of minutes) | any CUDA GPU |
 | `fast-exit` | `fast` + trained early-exit heads, exit policy chosen **per request** | any CUDA GPU (4.5B only) |
-| `fp8` | `fast` with dynamic FP8 weights + activations (torchao) | Ada, Hopper, Blackwell |
+| `fp8` | `fast` with dynamic FP8 weights + activations (torchao) | Hopper, Blackwell (Ada: FP8 compilation stalled on an RTX 4090) |
 | `nvfp4` | `fast` with NVFP4 weights + activations (torchao, experimental) | Blackwell (B200/B300, RTX 50xx/PRO, GB10) |
 | `vllm` | vLLM with the ModelOpt **FP8 / NVFP4** checkpoints (native low-precision kernels) | Hopper / Blackwell |
 | `eager` | plain PyTorch reference | any GPU or CPU |
 
 - **Two option orders** (`--orders 2`, default): every question is asked with the options in original and reversed
-  order and the probabilities are averaged; with the shared prefix this costs only ~7% more than one order.
+  order and the probabilities are averaged; with the shared prefix this costs only ~8% more than one order.
 - **Early exit** (`--mode fast-exit`): *what it is.* The model has 60 layers, and for many questions the answer is
   already clear before the last one. We trained small **exit heads** (a normalisation layer and a low-rank adapter
-  that reuse the model's output head) after layers 30, 35, …, 55. During the forward pass the server checks the exit
+  that reuse the model's output head) after layers 30, 35, 40, 45 and 50–55. During the forward pass the server checks the exit
   head at each of these points; if the probability of the top option is above a threshold calibrated for that layer,
   the remaining layers are skipped and the answer is taken from the exit head. Thresholds are calibrated so that the
   early answer agrees with the full model on a chosen share of decisions (99.9%, 99.5%, 99% or 98% on calibration
   data). Because the model forms its decision late (around layers 51–53), the saving is modest: **12.2 → 10.5 ms per
   decision on H100 at `0.99` with 99.2% agreement with fp32** (8.8 → 7.7 ms on B300). Each request chooses its level
-  with `"early_exit": "0.99"`; `"off"` (default) always uses the final layer, so one server serves both. A batch stops
+  with `"early_exit": "0.99"`; `"off"` (default) always uses the final layer, so one server serves both (servers in other
+  modes reject the field). A batch stops
   only when all its requests are confident. Levels: `off`, `0.999`, `0.995`, `0.99`, `0.98`.
-- **FP4 with vLLM**: `pip install "basal[vllm]"`, then
+- **FP4 with vLLM**: `pip install "basal[vllm] @ git+https://github.com/rkinas/basal"`, then
   `basal-serve --model Remek/basal-1.0-4.5B-NVFP4 --mode vllm` (see [docs/QUANTIZATION.md](docs/QUANTIZATION.md)).
 
-Start-up: `fast` compiles and captures CUDA graphs for all input shapes before accepting requests (about 3–5 minutes the
-first time, seconds with a warm compile cache). Prompts longer than 3,072 tokens are served with a normal forward pass.
+Start-up: `fast` compiles and captures CUDA graphs for all input shapes before accepting requests (about 4–10 minutes
+the first time for the 4.5B model, 2.5–4 minutes for the 1.5B, 10–17 minutes in `fp8`; much less with a warm
+compile cache). Prompts longer than 3,072 tokens are served with a normal forward pass.
 
 ## Benchmark your GPU
 
-Two tools are installed with the package. Both run out of the box on the bundled examples (`examples/questions.jsonl`,
-`choice.jsonl`, `noul.jsonl`, `score.jsonl`: 44 Polish and English items with gold answers):
+Two tools are installed with the package. Both run out of the box on the bundled examples (`questions.jsonl`,
+`choice.jsonl`, `noul.jsonl`, `score.jsonl` in `basal/examples/`: 44 Polish and English items with gold answers):
 
 ```bash
 # offline: latency, throughput and agreement of serving modes (no HTTP); put eager-fp32 first as the reference
@@ -282,7 +292,7 @@ concurrent clients.
 prompt length, and accuracy on 44 items is noisy. For numbers that describe *your* workload, write a JSONL file with a
 few hundred items in the same simple format (`{"state": ..., "question": ..., "options": [...], "gold": <index>}`,
 `gold` optional) with realistic state lengths, and pass it with `--questions my_items.jsonl` (several files are
-allowed). The tables in this README were measured with the same tools on our private 500-item test sample (mean
+allowed). The speed tables in this README were measured with the same tools on our private 500-item test sample (mean
 prompt about 360 tokens), which we do not publish so that it cannot be trained on.
 
 ## API
@@ -305,8 +315,9 @@ prompt about 360 tokens), which we do not publish so that it cannot be trained o
 (`choice`, `noul` = P(yes), `score` = expected level + `legend`). `GET /v1/models`, `GET /health`.
 
 **Using the confidence.** Probabilities are calibrated on held-out data; `CALIBRATION.json` in each model repo contains
-the confidence thresholds at which the error among accepted decisions stays below 1% and 5% — accept decisions above
-the threshold automatically and route the rest to a person.
+confidence thresholds chosen on the calibration split for a target error of 1% and 5% among accepted decisions (on
+the test split: 4.5B 1.1% / 4.4%, 1.5B 1.3% / 5.3%) — accept decisions above the threshold automatically and route
+the rest to a person.
 
 ## Limitations
 

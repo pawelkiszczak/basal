@@ -1,6 +1,6 @@
 """Batch inference: send every line of a JSONL file to a running basal server and write one answer per line.
 
-  basal-run --input examples/questions.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
+  basal-run --input basal/examples/questions.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
 
 Two input formats are accepted (they can be mixed):
   simple   {"id": ..., "state": "...", "question": "...", "options": ["...", "..."], "type": "choice"|"noul"|"score",

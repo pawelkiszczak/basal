@@ -41,7 +41,7 @@ def build(mode, md, vllm_model=None):
     return GraphBackend(md, "bfloat16", quant, compile=comp, shared=True)
 
 
-EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "examples"  # installed with the package
 DEFAULT_QUESTIONS = [str(EXAMPLES / f) for f in ("questions.jsonl", "choice.jsonl", "noul.jsonl", "score.jsonl")]
 
 

@@ -1,7 +1,7 @@
 """Sends one request per decision type (and a combined, structured request) to a running basal server and prints
 request + response. Used to produce the examples in the README and the technical report.
 
-  python examples/types_demo.py --url http://127.0.0.1:8000/v1/systemone
+  python basal/examples/types_demo.py --url http://127.0.0.1:8000/v1/systemone
 """
 import argparse
 import json
