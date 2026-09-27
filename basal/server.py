@@ -10,6 +10,7 @@
 import argparse
 import asyncio
 import json
+import re
 import time
 
 import torch
@@ -36,14 +37,27 @@ def _text(x):
     return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
 
 
+INDEX_KEY = re.compile(r"^(?:(?:opt(?:ion)?|opcja|choice|answer|odp(?:owiedz)?)[_ \-]?)?(?:\d+|[a-j])$", re.I)
+
+
+def informative_key(key, desc):
+    """A key carries information the description may lack unless it is an index-like placeholder ("0", "option_2",
+    "opcja_1", "B") or its words already appear in the description ("returns" -> "Returns")."""
+    if INDEX_KEY.match(str(key)):
+        return False
+    return re.sub(r"[_\-]+", " ", str(key)).strip().lower() not in desc.lower()
+
+
 def named_options(crit):
-    """{key: description} -> option texts shown to the model. A plain string description is shown as it is (the
-    training format). The key is added ("key: description") whenever the description alone would lose it: structured
-    descriptions (objects, lists, numbers), and descriptions that are not unique within the question."""
+    """{key: description} -> option texts shown to the model. A description is shown as "key: description" whenever
+    the key carries meaning that the description alone would lose: structured descriptions (objects, lists, numbers),
+    descriptions that are not unique within the question, and plain strings whose informative key they do not contain
+    ({"approve": "Handled by Alice"} -> "approve: Handled by Alice"). Otherwise the description is shown as it is (the
+    training format). A key without a description is shown by itself."""
     keys = list(crit)
     texts = [str(k) if v is None else _text(v) for k, v in crit.items()]
     dup = {t for t in texts if texts.count(t) > 1}
-    return keys, [t if v is None or (isinstance(v, str) and t not in dup) else f"{k}: {t}"
+    return keys, [t if v is None or (isinstance(v, str) and t not in dup and not informative_key(k, t)) else f"{k}: {t}"
                   for (k, v), t in zip(crit.items(), texts)]
 
 

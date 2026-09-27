@@ -49,6 +49,9 @@ class FakeServer(Server):
 
 def test_named_options_keep_keys_when_needed():
     assert named_options({"returns": "Returns", "it": "IT"}) == (["returns", "it"], ["Returns", "IT"])
+    assert named_options({"option_1": "Yes", "opcja_2": "Nie", "0": "x"})[1] == ["Yes", "Nie", "x"]  # placeholders
+    assert named_options({"in_time": "Filed in time"})[1] == ["Filed in time"]           # key words in text
+    assert named_options({"late": "Filed after the deadline"})[1] == ["late: Filed after the deadline"]
     keys, opts = named_options({"approve": {"requires_manager": False}, "reject": {"requires_manager": False}})
     assert opts == ['approve: {"requires_manager": false}', 'reject: {"requires_manager": false}']
     assert named_options({"a": "same", "b": "same"})[1] == ["a: same", "b: same"]
@@ -75,3 +78,15 @@ def test_response_conforms_to_official_schema(q):
 
 def test_model_list_conforms_to_official_schema():
     jsonschema.validate(models_payload("basal-1.0-4.5B", "fast", {"0.99": None}), schema("ModelMetadataList"))
+
+
+def test_semantic_keys_of_unique_strings_reach_the_prompt():
+    """Swapping which key owns which description must change what the model sees (regression)."""
+    a = to_items("Action requested: reject.", {"q": {"type": "choice", "instructions": "Return the requested action.",
+                 "criteria": {"approve": "Handled by Alice", "reject": "Handled by Bob"}}})[0]
+    b = to_items("Action requested: reject.", {"q": {"type": "choice", "instructions": "Return the requested action.",
+                 "criteria": {"reject": "Handled by Alice", "approve": "Handled by Bob"}}})[0]
+    assert a["options"] == ["approve: Handled by Alice", "reject: Handled by Bob"]
+    assert b["options"] == ["reject: Handled by Alice", "approve: Handled by Bob"]
+    s = to_items("x", {"q": {"type": "score", "instructions": "Level?", "criteria": {"low": "minor", "high": "severe"}}})[0]
+    assert s["options"] == ["low: minor", "high: severe"]

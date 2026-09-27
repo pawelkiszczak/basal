@@ -62,12 +62,13 @@ Accuracy, both option orders averaged. *PL decisions*: 7,081 held-out Polish dec
 domains); *PL general*: Polish knowledge, exams, reading comprehension; *EN decisions*: 1,479 held-out English
 decisions; *Public bench.*: the 231-item public English decision benchmark (official harness). basal-1.0 was served with
 this engine (`--mode fast`), open systems with their own official servers, all on one H100. Full table with all eleven
-open systems and speeds: [jev-pl-benchmark](https://huggingface.co/spaces/Remek/jev-pl-benchmark).
+open systems and speeds: [jev-pl-benchmark](https://huggingface.co/spaces/Remek/jev-pl-benchmark). The basal public-benchmark scores are measured with engine v1.0.1, which shows informative option keys next to
+their descriptions (the benchmark's options have such keys); with v1.0 they were 0.706 (4.5B) and 0.662 (1.5B).
 
 | system | params | PL decisions | PL general | EN decisions | Public bench. |
 |---|---|---|---|---|---|
-| **basal-1.0-4.5B** | 4.5B | **0.884** | 0.737 | 0.741 | 0.706 |
-| basal-1.0-1.5B | 1.5B | 0.849 | 0.656 | 0.734 | 0.662 |
+| **basal-1.0-4.5B** | 4.5B | **0.884** | 0.737 | 0.741 | 0.732 |
+| basal-1.0-1.5B | 1.5B | 0.849 | 0.656 | 0.734 | 0.667 |
 | Jev 1.13.0 (commercial API) | – | 0.780 | – | 0.736 | 0.861 |
 | Cygnet | 12B | 0.688 | 0.793 | 0.703 | **0.879** |
 | AutoJev-27B | 27B | 0.779 | **0.833** | **0.753** | 0.870 |
@@ -81,8 +82,9 @@ open systems and speeds: [jev-pl-benchmark](https://huggingface.co/spaces/Remek/
 | nimble-9B v2 | 9B | 0.685 | 0.758 | 0.669 | 0.805 |
 | kev-4B | 4B | 0.694 | 0.690 | 0.666 | 0.758 |
 
-basal-1.0 is a **Polish specialist**: best on Polish decisions, 10.5 points above the best open system, on par with Jev 1.13.0 and within about 1
-point of the best open systems on English decisions, and weaker on the general-purpose English benchmark, which it was
+basal-1.0 is a **Polish specialist**: best on Polish decisions, 10.5 points above the best open system, on English decisions not
+distinguishable from Jev 1.13.0 or from the best open systems (differences of −1.2 to +0.5 points, all within their 95%
+intervals), and weaker on the general-purpose English benchmark, which it was
 not trained for. With the confidence threshold shipped in `CALIBRATION.json` (fixed on calibration data before testing,
 target 1% error) it decides **58.6%** of the held-out test decisions (8,560 Polish and English items) automatically, at
 1.2% observed error; Jev 1.13.0 under the same procedure: 18.1%. Polish-decision scores use the corrected notice-period
@@ -129,7 +131,8 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 ```
 
 Response (real output, H100, mode `fast`; probabilities in the examples of this README were produced with the v1.0
-calibration file, the v1.0.1 temperatures change them slightly but never change the chosen answer):
+engine and calibration; the v1.0.1 temperatures change them slightly but never change the chosen answer, and v1.0.1
+also shows informative option keys next to their descriptions, which can change the probabilities of such requests):
 
 ```json
 {
@@ -317,8 +320,10 @@ prompt about 360 tokens), which we do not publish so that it cannot be trained o
 
 2–10 options per question. Each answer has `probabilities` (calibrated), `confidence` and the type-specific field
 (`choice`, `noul` = P(yes), `score` = expected level + `legend`); `usage` has `input_tokens` and `output_tokens`.
-A choice description that is structured (an object or list) or not unique is shown to the model together with its key
-(`"reject: {...}"`), so the key's meaning is never lost. `GET /v1/models` returns `{"models": [{"name", "description",
+An option is shown to the model as `key: description` whenever the key carries meaning the description lacks: structured
+or non-unique descriptions, and plain descriptions whose informative key they do not contain (`{"approve": "Handled by
+Alice"}` → `approve: Handled by Alice`). Placeholder keys (`0`, `option_1`, `B`) and keys already contained in the
+description (`{"returns": "Returns"}`) are not repeated. `GET /v1/models` returns `{"models": [{"name", "description",
 "release_date", ...}]}`; `GET /health`.
 
 **Using the confidence.** The server averages both option orders and then applies the per-type temperatures of
