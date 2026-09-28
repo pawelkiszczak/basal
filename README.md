@@ -135,7 +135,6 @@ basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
   another torch, which breaks `transformers` ("operator torchvision::nms does not exist"). basal does not need
   torchvision; in a fresh environment it is not installed.
 - The first start in mode `fast` compiles the model (a few minutes); `--mode fast-nocompile` starts in seconds.
-- If a model repository is private or gated for you, log in first: `hf auth login`.
 - From a clone instead: `git clone https://github.com/rkinas/basal && cd basal && uv pip install -e ".[fp8]"`
   (after the torch line above).
 
