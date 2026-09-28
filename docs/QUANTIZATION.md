@@ -30,7 +30,7 @@ are standard ModelOpt Hugging Face exports; they load in vLLM (tested) and are a
 TensorRT-LLM (untested).
 
 ```bash
-pip install "basal[vllm] @ git+https://github.com/rkinas/basal"
+uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v1.0.1.tar.gz"   # separate environment: vLLM brings its own torch
 basal-serve --model Remek/basal-1.0-4.5B-NVFP4 --mode vllm --port 8000
 ```
 

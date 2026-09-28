@@ -118,11 +118,26 @@ RTX PRO 6000, RTX 5090, RTX 4090 (1.5B only) and DGX Spark (GB10).
 
 ## Quick start
 
+Install with [uv](https://docs.astral.sh/uv/) into a fresh environment (no git needed; `pip install uv` if it is
+missing):
+
 ```bash
-pip install "basal[fp8] @ git+https://github.com/rkinas/basal"     # or: git clone ... && pip install -e ".[fp8]"
-hf auth login                                                       # only needed while the model repos are private
+uv venv --python 3.12 ~/basal-env && source ~/basal-env/bin/activate
+uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v1.0.1.tar.gz"
 basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
 ```
+
+- **Install torch first, from the CUDA 12.8 index.** A plain `pip install basal` takes the newest torch from PyPI,
+  which may be built for a newer CUDA than your GPU driver ("The NVIDIA driver on your system is too old"). The cu128
+  build needs a driver that supports CUDA 12.8 or newer (`nvidia-smi` shows it top right).
+- **Use a fresh environment on cloud GPU images** (RunPod, Lambda, …). Their system Python ships a `torchvision` built for
+  another torch, which breaks `transformers` ("operator torchvision::nms does not exist"). basal does not need
+  torchvision; in a fresh environment it is not installed.
+- The first start in mode `fast` compiles the model (a few minutes); `--mode fast-nocompile` starts in seconds.
+- If a model repository is private or gated for you, log in first: `hf auth login`.
+- From a clone instead: `git clone https://github.com/rkinas/basal && cd basal && uv pip install -e ".[fp8]"`
+  (after the torch line above).
 
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -264,7 +279,7 @@ for line in open("basal/examples/questions.jsonl"):
   with `"early_exit": "0.99"`; `"off"` (default) always uses the final layer, so one server serves both (servers in other
   modes reject the field). A batch stops
   only when all its requests are confident. Levels: `off`, `0.999`, `0.995`, `0.99`, `0.98`.
-- **FP4 with vLLM**: `pip install "basal[vllm] @ git+https://github.com/rkinas/basal"`, then
+- **FP4 with vLLM**: in a separate environment (vLLM brings its own torch), `uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v1.0.1.tar.gz"`, then
   `basal-serve --model Remek/basal-1.0-4.5B-NVFP4 --mode vllm` (see [docs/QUANTIZATION.md](docs/QUANTIZATION.md)).
 
 Start-up: `fast` compiles and captures CUDA graphs for all input shapes before accepting requests (about 4–10 minutes

@@ -69,8 +69,8 @@ but agreement 0.87 — not recommended. RTX 4090: the FP8 compilation stalled on
 
 ## Notes per platform
 
-- **DGX Spark (GB10, aarch64, CUDA 13).** Install PyTorch for CUDA 13 (`--index-url https://download.pytorch.org/whl/cu130`)
-  before `pip install ".[fp8]"`. The GPU shares LPDDR5X memory (about 273 GB/s) with the CPU; every forward pass reads
+- **DGX Spark (GB10, aarch64, CUDA 13).** In the README install steps use the CUDA 13 build of PyTorch
+  (`uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130`) instead of cu128. The GPU shares LPDDR5X memory (about 273 GB/s) with the CPU; every forward pass reads
   all weights, which is why FP8 (half the bytes) halves latency.
 - **B300 / B200 (sm_100/sm_103).** PyTorch cu130 wheels work. The `vllm` mode needs a CUDA toolkit (nvcc) of version
   12.9 or newer on the machine: vLLM's FlashInfer kernels are compiled on first use, and nvcc 12.8 (found in some
