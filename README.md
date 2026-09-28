@@ -2,6 +2,7 @@
 
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-basal--1.0%20collection-yellow)](https://huggingface.co/collections/Remek/basal-10-6ab8224bf7bd8732d7a6117d)
 [![Technical report](https://img.shields.io/badge/technical%20report-PDF-b31b1b.svg)](docs/basal-1.pdf)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23022986.svg)](https://doi.org/10.5281/zenodo.23022986)
 
 ![basal-1.0 overview](assets/basal.png)
 
@@ -356,6 +357,21 @@ thresholds, which are not validated for them.
 - The test split was consulted during development; its results are those of an adaptive process on held-out templates,
   not a single untouched final evaluation.
 - Decisions with serious consequences for people should be reviewed by a person.
+
+
+## Citation
+
+```bibtex
+@techreport{kinas2026basal,
+  title       = {basal-1.0: Reliable, Highly Optimized Typed Decisions for Polish},
+  author      = {Kinas, Remigiusz},
+  institution = {ai5},
+  year        = {2026},
+  type        = {Technical report},
+  doi         = {10.5281/zenodo.23022986},
+  url         = {https://doi.org/10.5281/zenodo.23022986}
+}
+```
 
 ## License
 
