@@ -1,7 +1,7 @@
 # basal
 
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-basal--1.0%20collection-yellow)](https://huggingface.co/collections/Remek/basal-10-6ab8224bf7bd8732d7a6117d)
-[![arXiv](https://img.shields.io/badge/arXiv-technical%20report-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
+[![Technical report](https://img.shields.io/badge/technical%20report-PDF-b31b1b.svg)](docs/basal-1.pdf)
 
 ![basal-1.0 overview](assets/basal.png)
 
