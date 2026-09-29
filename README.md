@@ -158,7 +158,12 @@ basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple S
 - **Speed** (M4 Max, both option orders, bundled examples): 4.5B 266 ms per decision (`mlx`), 1.5B 87 ms; HTTP p50
   208 ms for the 4.5B. Apple GPUs are compute-bound on these prompts, so 8-bit weights save memory but not time.
   See [docs/HARDWARE.md](docs/HARDWARE.md#apple-silicon).
-- `fast*`, `fp8`, `nvfp4`, `fast-exit` and `vllm` need CUDA; early exit is not available on Apple backends.
+- **GGUF / llama.cpp**: `--mode gguf --gguf <file.gguf>` runs a converted checkpoint through llama.cpp (Metal here,
+  CUDA or CPU elsewhere); F16 is the closest to fp32 of all reduced-precision paths, Q8_0 halves the memory. See
+  [docs/GGUF.md](docs/GGUF.md).
+- `fast*`, `fp8`, `nvfp4` and `fast-exit` need CUDA; early exit is not available on Apple backends. `vllm` also runs
+  on [vllm-metal](https://github.com/vllm-project/vllm-metal) with a patched `config.json`
+  ([engine comparison](docs/HARDWARE.md#inference-engines-on-apple-silicon)).
 
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -288,6 +293,7 @@ for line in open("basal/examples/questions.jsonl"):
 | `mlx` *(default on Apple Silicon)* | MLX bf16 + shared prefix + token-budget batching | Apple Silicon (`[mlx]` extra) |
 | `mlx-q8` | `mlx` with 8-bit weights: about half the memory, not faster | Apple Silicon |
 | `mps` | PyTorch MPS + shared prefix + token-budget batching (no graphs) | Apple Silicon |
+| `gguf` | llama.cpp on a converted GGUF file (`--gguf`), shared prefix as llama.cpp sequences ([docs/GGUF.md](docs/GGUF.md)) | Apple Silicon (Metal), CUDA, CPU (`[gguf]` extra) |
 | `eager` | plain PyTorch reference | any GPU (CUDA or Apple MPS) or CPU |
 
 - **Two option orders** (`--orders 2`, default): every question is asked with the options in original and reversed

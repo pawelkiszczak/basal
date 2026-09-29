@@ -527,6 +527,106 @@ class MLXBackend(GraphBackend):
         return res
 
 
+class GGUFBackend(GraphBackend):
+    """GGUF checkpoints through llama.cpp (llama-cpp-python: Metal on Apple Silicon, CUDA or CPU elsewhere). Only the
+    weights come from the GGUF file; tokenizer, chat template and CALIBRATION.json come from the Hugging Face model
+    directory, so token ids are exactly those of the other backends. The shared prefix uses llama.cpp sequences: the
+    prefix tokens of a question belong to the sequences of all its option orders, each order's option block to its
+    own sequence, and all questions of a chunk go through one llama_decode (unified KV cache, cleared per chunk)."""
+
+    N_CTX = 16384  # KV cells per chunk: TOKEN_BUDGET plus room for a single long prompt
+
+    def __init__(self, model_dir, gguf, n_gpu_layers=-1):
+        import logging
+
+        import llama_cpp as C
+        logging.getLogger("llama-cpp-python").setLevel(logging.ERROR)  # llama.cpp load / Metal info lines
+        self.C = C
+        self.tok = AutoTokenizer.from_pretrained(model_dir)
+        self.prefill = PREFILL
+        self.shared = True
+        C.llama_backend_init()
+        mp = C.llama_model_default_params()
+        mp.n_gpu_layers = n_gpu_layers
+        self.cmodel = C.llama_model_load_from_file(str(gguf).encode(), mp)
+        if not self.cmodel:
+            raise ValueError(f"llama.cpp could not load {gguf}")
+        self.n_vocab = C.llama_vocab_n_tokens(C.llama_model_get_vocab(self.cmodel))
+        if self.n_vocab < len(self.tok):
+            raise ValueError(f"{gguf}: vocabulary of {self.n_vocab} tokens, tokenizer of {model_dir} has {len(self.tok)}")
+        cp = C.llama_context_default_params()
+        cp.n_ctx = cp.n_batch = self.N_CTX
+        cp.n_ubatch = 512
+        cp.n_seq_max = 2 * self.BATCHES[-1]  # two option orders per question
+        cp.kv_unified = True  # sequences share the prefix cells
+        self.ctx = C.llama_init_from_model(self.cmodel, cp)
+        if not self.ctx:
+            raise ValueError("llama.cpp could not create a context")
+        self.batch = C.llama_batch_init(self.N_CTX, 0, 2)  # a prefix token belongs to up to two sequences
+
+    def __del__(self):
+        C = getattr(self, "C", None)
+        if C is None:
+            return
+        if getattr(self, "batch", None) is not None:
+            C.llama_batch_free(self.batch)
+        if getattr(self, "ctx", None):
+            C.llama_free(self.ctx)
+        if getattr(self, "cmodel", None):
+            C.llama_model_free(self.cmodel)
+
+    def run(self, prompts, ids_list, policy=None):
+        return [r[0] for r in self.run_shared([([p], [x]) for p, x in zip(prompts, ids_list)])]
+
+    def _decode(self, packs, idx):
+        """One llama_decode for the packed groups idx -> readout logits [n_readouts, n_vocab] (float32)."""
+        import numpy as np
+        C, b = self.C, self.batch
+        n, seq, reads = 0, 0, []
+        for k in idx:
+            t, pos, seg, last = packs[k]
+            if n + len(t) > self.N_CTX:
+                raise ValueError(f"prompt too long for the GGUF backend: {len(t)} tokens (max {self.N_CTX})")
+            orders = len(last)
+            for tok, p, s in zip(t, pos, seg):
+                b.token[n], b.pos[n], b.logits[n] = tok, p, 0
+                if s == 0:
+                    b.n_seq_id[n] = orders
+                    for o in range(orders):
+                        b.seq_id[n][o] = seq + o
+                else:
+                    b.n_seq_id[n] = 1
+                    b.seq_id[n][0] = seq + s - 1
+                n += 1
+            for r in last:
+                b.logits[n - len(t) + r] = 1
+                reads.append(n - len(t) + r)
+            seq += orders
+        b.n_tokens = n
+        C.llama_memory_clear(C.llama_get_memory(self.ctx), True)
+        if C.llama_decode(self.ctx, b) != 0:
+            raise RuntimeError("llama_decode failed")
+        return np.stack([np.ctypeslib.as_array(C.llama_get_logits_ith(self.ctx, r), shape=(self.n_vocab,))
+                         for r in reads])
+
+    def run_shared(self, groups, policy=None):
+        import numpy as np
+        packs = [self._pack([self.tok(p, add_special_tokens=False).input_ids for p in prompts]) for prompts, _ in groups]
+        res = [None] * len(packs)
+        for idx in self._chunks([len(pk[0]) for pk in packs]):
+            lg = self._decode(packs, idx)
+            lids = [x for k in idx for x in groups[k][1]]
+            probs = []
+            for m, ids in enumerate(lids):
+                x = lg[m, ids].astype(np.float64)
+                e = np.exp(x - x.max())
+                probs.append((e / e.sum()).tolist())
+            j = 0
+            for k in idx:
+                n = len(groups[k][1]); res[k] = probs[j: j + n]; j += n
+        return res
+
+
 class VLLMBackend:
     """vLLM backend for ModelOpt FP8 / NVFP4 checkpoints. One generated token restricted to the option letters; with
     logprobs_mode="processed_logprobs" the log-probabilities are computed after that restriction, so the softmax over

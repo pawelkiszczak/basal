@@ -28,7 +28,8 @@ mlx = [
   "mlx>=0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-lm>=0.31; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
-test = ["pytest", "jsonschema"]
+gguf = ["llama-cpp-python>=0.3.35"]
+test = ["pytest", "jsonschema", "gguf"]
 
 [project.scripts]
 basal-serve = "basal.server:main"

@@ -94,9 +94,55 @@ HTTP: `basal-loadtest` against `basal-serve --mode mlx` (default prompts of the 
   speed-up (so the `mlx` backend pads only to the longest prompt of a batch instead of to fixed shape buckets). Other
   M-series chips were not measured; being compute-bound, latency should scale roughly with GPU core count and clock.
 - **8-bit weights** (`mlx-q8`, MLX affine, group 64, decoder layers only) cut the resident weights of the 4.5B from
-  8.9 to 4.8 GB (the checkpoint is loaded lazily, so the bf16 copy is never held) and are about 10% slower.
+  8.9 to 4.8 GB (the checkpoint is loaded lazily, so the bf16 copy is never held); 0–10% slower.
 - **4-bit weights** were tried and dropped: agreement fell to 0.86 on the 1.5B without any speed gain.
-- **Early exit** (`fast-exit`) and the `fp8` / `nvfp4` / `vllm` modes are CUDA-only.
+- **Throttling.** Under sustained load the MacBook's GPU slows down by up to 2× (automatic power mode); the table above
+  was measured back to back, the comparison below after a cool-down before every engine.
+- **Early exit** (`fast-exit`) and the `fp8` / `nvfp4` modes are CUDA-only.
+
+### Inference engines on Apple Silicon
+
+basal needs the next-token probabilities of the option letters after a prompt that ends in `{"answer": "`, not generated
+text. Every engine that can return them was run on the same M4 Max: 44 bundled examples, both option orders, each
+engine on prompts it had not seen (so prefix caches only help between the two orders of a question), 60 s cool-down
+before each engine. *ms*: median per decision, one request at a time; *dec/s*: remaining 21 decisions in one call
+(in-process) or with 4 concurrent clients (HTTP servers); *TV*: total-variation distance of the averaged two-order
+probabilities to the fp32 PyTorch reference.
+
+| engine | 4.5B ms | 4.5B dec/s | 1.5B ms | 1.5B dec/s | agreement 4.5B / 1.5B | TV mean / max (4.5B) |
+|---|---|---|---|---|---|---|
+| basal `mlx` | 198 | 5.1 | **67** | 15.8 | 1.000 / 0.977 | 0.0047 / 0.024 |
+| basal `mlx-q8` | 200 | 4.8 | 70 | 14.3 | 1.000 / 0.977 | 0.0085 / 0.091 |
+| basal `mps` | 239 | 4.4 | 89 | 12.4 | 0.977 / 0.977 | 0.0050 / 0.035 |
+| basal `gguf` F16 | 200 | 5.5 | 69 | 16.7 | 1.000 / 1.000 | **0.0006** / 0.004 |
+| basal `gguf` Q8_0 | 212 | 5.1 | 72 | 15.9 | 1.000 / 0.977 | 0.0039 / 0.038 |
+| basal `gguf` Q4_K_M | 222 | 4.9 | 76 | 14.3 | 0.955 / 0.955 | 0.0465 / 0.307 |
+| basal `vllm` on vllm-metal 0.30 ¹ | 211 | **7.2** | 81 | **21.2** | 0.977 / 0.977 | 0.0056 / 0.051 |
+| mlx-lm 0.31 Python API, KV prompt cache, orders one after the other ¹ | 261 | 3.7 | 94 | 10.7 | 1.000 / 0.977 | 0.0050 / 0.042 |
+| llama-cpp-python 0.3.35 F16, orders one after the other | 261 | 3.8 | 101 | 9.8 | 1.000 / 1.000 | 0.0005 / 0.005 |
+| mlx_lm.server 0.31 (`top_logprobs` 11) ¹ | 374 | 3.1 | 153 | 7.6 | 1.000 / 0.955 | 0.0053 / 0.031 |
+| llama-server b11146 F16 (token ids, `n_probs` 20) | **191** | 5.1 | 79 | 13.2 | 1.000 / 1.000 | 0.0005 / 0.005 |
+| MTPLX 2.12, prompt-scoring lane (`echo`, `max_tokens` 0) ¹ | 339 | 2.9 | 129 | 8.0 | 0.977 / 0.977 | 0.0059 / 0.043 |
+| Ollama 0.34, safetensors import ³ | 280 | 3.3 | 105 | 9.0 | 1.000 / 0.977 | 0.0055 / 0.059 |
+| LM Studio, llama.cpp engine, F16 GGUF (chat with assistant prefill) ² | 211 | 5.4 | 81 | 16.2 | 0.955 / 0.977 | 0.0607 / 0.630 |
+
+¹ These engines build the model with mlx-lm's Llama, which does not read `rope_parameters` (transformers 5) and falls
+back to `rope_theta` 10000 instead of 1e6: unpatched, mlx_lm.server gives a mean TV of 0.12 (max 0.72) and vllm-metal
+0.13 (max 0.73). They were run on a copy of the checkpoint whose `config.json` also has `"rope_theta": 1000000`
+(basal's own `mlx` backend reads the value itself). ² LM Studio (and Ollama with a GGUF import, and llama-server with
+text prompts) tokenize with the GGUF vocabulary, which splits basal prompts differently from the training tokenizer;
+see [GGUF.md](GGUF.md#other-llamacpp-front-ends-send-token-ids). ³ Imported from the patched copy of ¹ (not tested
+without).
+
+- **Fastest single decision**: llama.cpp (llama-server with token ids, basal `gguf`) and basal `mlx`, within 5%.
+  **Highest throughput**: vLLM's scheduler on vllm-metal — basal's `vllm` mode runs unchanged with the rope patch.
+  **Closest to fp32**: llama.cpp F16.
+- Packing both option orders into one forward pass (basal `mlx` / `gguf`) is worth 25–30% against running them one
+  after the other with a prompt cache (mlx-lm, llama-cpp-python rows).
+- Not usable as shipped: **oMLX** 0.7.0rc1 returns no logprobs (checked with a request), **vllm-mlx** 0.5.0 has no
+  logprobs in its API models; **mistral.rs** and **MLC-LLM** implement Llama without the q/k/v/o and MLP biases basal
+  needs; **Swama**, **Exo** and Apple's Foundation Models framework expose no logprobs. **MTPLX** accelerates decoding
+  with multi-token prediction, which a one-token decision does not use; plain Llama runs on its experimental AR path.
 
 ## Notes per platform
 
