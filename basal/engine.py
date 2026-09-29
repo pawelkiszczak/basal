@@ -4,10 +4,12 @@
   run_shared(groups[, policy])    -> groups = [(prompts, ids_list)], all option orders of one question in one group
 
 Backends:
-  EagerBackend      plain PyTorch forward (reference, any GPU or CPU)
+  EagerBackend      plain PyTorch forward (reference, any GPU, Apple MPS or CPU)
   GraphBackend      static shapes + CUDA graphs, optional torch.compile, shared prefix for the two option orders,
                     token-budget batching, optional torchao FP8 / NVFP4 quantisation
   ExitGraphBackend  GraphBackend split into graph segments at trained early-exit layers; exit policy per request
+  MPSBackend        GraphBackend's shared prefix + token-budget batching on Apple MPS (PyTorch, no graphs)
+  MLXBackend        the same packing on Apple MLX (Metal), optional 8-bit weights
   VLLMBackend       vLLM, for ModelOpt FP8 / NVFP4 checkpoints (native low-precision kernels)
 """
 import json
@@ -28,12 +30,18 @@ def resolve(name, revision=None):
     return Path(snapshot_download(name, revision=revision))
 
 
+def default_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    return "mps" if torch.backends.mps.is_available() else "cpu"
+
+
 class EagerBackend:
     def __init__(self, model_dir, dtype="bfloat16", device=None):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.padding_side = "left"
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
-        dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dev = device or default_device()
         self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).to(dev).eval()
         self.dev = dev
         self.prefill = PREFILL
@@ -203,7 +211,8 @@ class GraphBackend(EagerBackend):
                 res[r] = p
         return res
 
-    def _fill(self, packs, idx, b, L, ids, mask, pos):
+    def _host_rows(self, packs, idx, b, L):
+        """Packed groups -> padded host tensors ids / positions / segment ids [b, L] + readout rows and columns."""
         h_ids = torch.full((b, L), self.tok.pad_token_id, dtype=torch.long)
         h_pos = torch.arange(L)[None].repeat(b, 1)
         h_seg = torch.full((b, L), -1, dtype=torch.long)
@@ -213,6 +222,10 @@ class GraphBackend(EagerBackend):
             h_ids[r, : len(t)] = torch.tensor(t); h_pos[r, : len(t)] = torch.tensor(pp)
             h_seg[r, : len(t)] = torch.tensor(sg)
             rows += [r] * len(last); cols += last
+        return h_ids, h_pos, h_seg, rows, cols
+
+    def _fill(self, packs, idx, b, L, ids, mask, pos):
+        h_ids, h_pos, h_seg, rows, cols = self._host_rows(packs, idx, b, L)
         ids.copy_(h_ids.pin_memory(), non_blocking=True)
         pos.copy_(h_pos.pin_memory(), non_blocking=True)
         mask.copy_(self._mask_from_seg(h_seg.to(self.dev, non_blocking=True)))
@@ -375,6 +388,139 @@ class ExitGraphBackend(GraphBackend):
                 probs = self._readout(outs[-1][ri, ci], lids)
             key = (policy or self.default_policy, depth)
             self.stats[key] = self.stats.get(key, 0) + len(idx)
+            j = 0
+            for k in idx:
+                n = len(groups[k][1]); res[k] = probs[j: j + n]; j += n
+        return res
+
+
+class MPSBackend(GraphBackend):
+    """Apple GPU through PyTorch MPS: the shared-prefix packing and token-budget batching of GraphBackend, run as plain
+    forwards (MPS has no CUDA graphs). Rows are padded on the right to the longest packed group of the chunk."""
+
+    def __init__(self, model_dir, dtype="bfloat16", shared=True, device="mps"):
+        EagerBackend.__init__(self, model_dir, dtype, device)
+        self.dev = torch.device(device)
+        self.shared = shared
+
+    @torch.no_grad()
+    def run(self, prompts, ids_list):
+        if not self.shared:
+            return EagerBackend.run(self, prompts, ids_list)
+        return GraphBackend.run(self, prompts, ids_list)
+
+    @torch.no_grad()
+    def run_shared(self, groups, policy=None):
+        if not self.shared:
+            return EagerBackend.run_shared(self, groups)
+        packs = [self._pack([self.tok(p, add_special_tokens=False).input_ids for p in prompts]) for prompts, _ in groups]
+        res = [None] * len(packs)
+        for idx in self._chunks([len(pk[0]) for pk in packs]):
+            L = max(len(packs[k][0]) for k in idx)
+            ids, pos, seg, rows, cols = self._host_rows(packs, idx, len(idx), L)
+            h = self._forward_masked(ids.to(self.dev), self._mask_from_seg(seg.to(self.dev)), pos.to(self.dev))
+            probs = self._readout(h[rows, cols], [x for k in idx for x in groups[k][1]])
+            j = 0
+            for k in idx:
+                n = len(groups[k][1]); res[k] = probs[j: j + n]; j += n
+        return res
+
+
+def load_mlx(model_dir, dtype="bfloat16", quant=None):
+    """basal checkpoint (Llama architecture, HF safetensors) -> mlx-lm Llama model with MLX weights.
+    quant: None | "q8" -- MLX affine 8-bit weights (group size 64) of the linear layers of the decoder blocks; the
+    embeddings and the LM head stay in `dtype`, as in the CUDA quantised modes."""
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx_lm.utils import load_model
+    cfg = json.loads((Path(model_dir) / "config.json").read_text())
+    if cfg.get("model_type") != "llama":
+        raise ValueError(f"MLX backend supports Llama-architecture checkpoints, got {cfg.get('model_type')!r}")
+    rope = cfg.get("rope_parameters") or {}
+    if rope.get("rope_type", "default") != "default" or cfg.get("rope_scaling"):
+        raise ValueError(f"MLX backend supports default RoPE only, got {rope or cfg.get('rope_scaling')}")
+    theta = float(rope.get("rope_theta", cfg.get("rope_theta", 10000.0)))
+    # transformers 5 stores rope_theta inside rope_parameters, which mlx-lm's Llama does not read (it would use 10000).
+    # Lazy: the weights are materialised once, after the dtype cast / quantisation (q8 never holds the bf16 copy).
+    model, _ = load_model(Path(model_dir), lazy=True, model_config={"rope_theta": theta})
+    model.set_dtype(getattr(mx, dtype))
+    if quant:
+        if quant != "q8":
+            raise ValueError(f"unknown MLX quantisation {quant!r} (q8)")
+        nn.quantize(model, group_size=64, bits=8,
+                    class_predicate=lambda path, m: isinstance(m, nn.Linear) and path.startswith("model.layers."))
+    mx.eval(model.parameters())
+    return model, theta
+
+
+class MLXBackend(GraphBackend):
+    """Apple Silicon through MLX (Metal). The same shared-prefix packing, token-budget batching and letter readout as
+    the CUDA fast path. The decoder runs on the mlx-lm Llama modules with explicit position ids (the option blocks
+    continue from the end of the prefix, which mlx-lm's offset-based RoPE cannot express) and a boolean block mask
+    built from the segment ids on the GPU. Apple GPUs are compute-bound on these prompts, so rows are padded only to
+    the longest packed group of the chunk (no shape buckets; mx.compile gave no speed-up)."""
+
+    def __init__(self, model_dir, dtype="bfloat16", quant=None):
+        import mlx.core as mx
+        self.mx = mx
+        self.tok = AutoTokenizer.from_pretrained(model_dir)
+        self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
+        self.prefill = PREFILL
+        self.shared = True
+        self.model, theta = load_mlx(model_dir, dtype, quant)
+        d = self.model.model.layers[0].self_attn.head_dim
+        self.inv_freq = 1.0 / theta ** (mx.arange(0, d, 2, dtype=mx.float32) / d)
+        mx.eval(self.inv_freq)  # MLX streams are per thread: nothing lazy may cross into the server's worker threads
+
+    def _rot(self, x, cos, sin):  # HF "rotate half" RoPE
+        d = x.shape[-1] // 2
+        x1, x2 = x[..., :d], x[..., d:]
+        return self.mx.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], -1)
+
+    def _forward_mlx(self, ids, pos, seg):
+        """ids / pos / seg [b, L] (seg: 0 = shared prefix, k > 0 = option block k, -1 = padding) -> final hidden states."""
+        mx, mm = self.mx, self.model.model
+        B, L = ids.shape
+        h = mm.embed_tokens(ids)
+        ang = pos[..., None].astype(mx.float32) * self.inv_freq
+        cos, sin = mx.cos(ang)[:, None].astype(h.dtype), mx.sin(ang)[:, None].astype(h.dtype)
+        si, sj = seg[:, :, None], seg[:, None, :]
+        allow = mx.tril(mx.ones((L, L), dtype=mx.bool_))[None] & (sj >= 0) & ((sj == 0) | (sj == si))
+        mask = (allow | mx.eye(L, dtype=mx.bool_)[None])[:, None]
+        for layer in mm.layers:
+            at = layer.self_attn
+            x = layer.input_layernorm(h)
+            q = at.q_proj(x).reshape(B, L, at.n_heads, -1).transpose(0, 2, 1, 3)
+            k = at.k_proj(x).reshape(B, L, at.n_kv_heads, -1).transpose(0, 2, 1, 3)
+            v = at.v_proj(x).reshape(B, L, at.n_kv_heads, -1).transpose(0, 2, 1, 3)
+            o = mx.fast.scaled_dot_product_attention(self._rot(q, cos, sin), self._rot(k, cos, sin), v,
+                                                     scale=at.scale, mask=mask)
+            h = h + at.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
+            h = h + layer.mlp(layer.post_attention_layernorm(h))
+        return mm.norm(h)
+
+    def _readout_mlx(self, h, lids):
+        import numpy as np
+        lg = np.array(self.model.lm_head(h).astype(self.mx.float32))
+        out = []
+        for m, ids in enumerate(lids):
+            x = lg[m, ids]
+            e = np.exp(x - x.max())
+            out.append((e / e.sum()).tolist())
+        return out
+
+    def run(self, prompts, ids_list, policy=None):
+        return [r[0] for r in self.run_shared([([p], [x]) for p, x in zip(prompts, ids_list)])]
+
+    def run_shared(self, groups, policy=None):
+        mx = self.mx
+        packs = [self._pack([self.tok(p, add_special_tokens=False).input_ids for p in prompts]) for prompts, _ in groups]
+        res = [None] * len(packs)
+        for idx in self._chunks([len(pk[0]) for pk in packs]):
+            ids, pos, seg, rows, cols = self._host_rows(packs, idx, len(idx), max(len(packs[k][0]) for k in idx))
+            h = self._forward_mlx(mx.array(ids.numpy(), dtype=mx.int32), mx.array(pos.numpy(), dtype=mx.int32),
+                                  mx.array(seg.numpy(), dtype=mx.int32))
+            probs = self._readout_mlx(h[mx.array(rows), mx.array(cols)], [x for k in idx for x in groups[k][1]])
             j = 0
             for k in idx:
                 n = len(groups[k][1]); res[k] = probs[j: j + n]; j += n
