@@ -117,7 +117,7 @@ probabilities to the fp32 PyTorch reference.
 | basal `gguf` F16 | 200 | 5.5 | 69 | 16.7 | 1.000 / 1.000 | **0.0006** / 0.004 |
 | basal `gguf` Q8_0 | 212 | 5.1 | 72 | 15.9 | 1.000 / 0.977 | 0.0039 / 0.038 |
 | basal `gguf` Q4_K_M | 222 | 4.9 | 76 | 14.3 | 0.955 / 0.955 | 0.0465 / 0.307 |
-| basal `vllm` on vllm-metal 0.30 ¹ | 211 | **7.2** | 81 | **21.2** | 0.977 / 0.977 | 0.0056 / 0.051 |
+| basal `vllm` on vllm-metal 0.30 ¹ | 210 | **6.9** | 80 | **21.4** | 0.977 / 0.977 | 0.0056 / 0.051 |
 | mlx-lm 0.31 Python API, KV prompt cache, orders one after the other ¹ | 261 | 3.7 | 94 | 10.7 | 1.000 / 0.977 | 0.0050 / 0.042 |
 | llama-cpp-python 0.3.35 F16, orders one after the other | 261 | 3.8 | 101 | 9.8 | 1.000 / 1.000 | 0.0005 / 0.005 |
 | mlx_lm.server 0.31 (`top_logprobs` 11) ¹ | 374 | 3.1 | 153 | 7.6 | 1.000 / 0.955 | 0.0053 / 0.031 |
@@ -145,10 +145,11 @@ paths stay at 1e-3–1e-2, and F16 through llama.cpp mostly below 1e-3. Items wh
 
 ![Per-item distance to fp32](figures/apple_fidelity_heatmap.png)
 
-Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurements in `docs/figures/apple_engines.json`.
-
 - **Fastest single decision**: llama.cpp (llama-server with token ids, basal `gguf`) and basal `mlx`, within 5%.
-  **Highest throughput**: vLLM's scheduler on vllm-metal — basal's `vllm` mode runs unchanged with the rope patch.
+  **Highest throughput**: vLLM's scheduler on vllm-metal. basal's `vllm` mode runs on it with the rope patch; it asks
+  for the letter ids with `logprob_token_ids`, because vllm-metal ignores `logprobs_mode="processed_logprobs"` and
+  returns the top-k of the whole vocabulary: with plain top-k the least likely option was missing (probability 0) on
+  14 of the 44 items of the 1.5B.
   **Closest to fp32**: llama.cpp F16.
 - Packing both option orders into one forward pass (basal `mlx` / `gguf`) is worth 25–30% against running them one
   after the other with a prompt cache (mlx-lm, llama-cpp-python rows).
@@ -156,6 +157,22 @@ Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurement
   logprobs in its API models; **mistral.rs** and **MLC-LLM** implement Llama without the q/k/v/o and MLP biases basal
   needs; **Swama**, **Exo** and Apple's Foundation Models framework expose no logprobs. **MTPLX** accelerates decoding
   with multi-token prediction, which a one-token decision does not use; plain Llama runs on its experimental AR path.
+
+#### Quality
+
+![Accuracy, log-loss and changed decisions per engine](figures/apple_quality.png)
+
+Against the gold labels, the 44 bundled examples cannot rank the engines: every engine gets 33–36 of 44 right with the
+4.5B and 31–33 with the 1.5B, and the 95% intervals are ±12 points wide. The engines with the rope bug even score
+36/44 and a lower log-loss on the 4.5B (apparently flatter probabilities, which help on the confidently wrong
+items), although they change the probabilities of almost every item. For a backend, quality therefore means
+faithfulness to the reference model on which accuracy, calibration temperatures and confidence thresholds were
+measured: the decisions it changes (right panel) and the TV distance above. The errors themselves belong to the model:
+the same items are wrong in every faithful engine.
+
+![Probability of the gold option per item](figures/apple_gold_prob_heatmap.png)
+
+Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurements in `docs/figures/apple_engines.json`.
 
 ## Notes per platform
 

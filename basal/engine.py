@@ -630,8 +630,9 @@ class GGUFBackend(GraphBackend):
 class VLLMBackend:
     """vLLM backend for ModelOpt FP8 / NVFP4 checkpoints. One generated token restricted to the option letters; with
     logprobs_mode="processed_logprobs" the log-probabilities are computed after that restriction, so the softmax over
-    the letters equals the readout of the other backends. vLLM's automatic prefix caching shares the state between the
-    two option orders."""
+    the letters equals the readout of the other backends. Where vLLM supports it, logprob_token_ids asks for exactly
+    the letter ids: vllm-metal ignores the logprobs mode and returns the top-k of the unrestricted vocabulary, which
+    can miss a letter. vLLM's automatic prefix caching shares the state between the two option orders."""
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096):
         from vllm import LLM
@@ -644,7 +645,10 @@ class VLLMBackend:
         from vllm import SamplingParams
         from vllm.inputs import TokensPrompt
         reqs = [TokensPrompt(prompt_token_ids=self.tok(p, add_special_tokens=False).input_ids) for p in prompts]
-        sps = [SamplingParams(max_tokens=1, temperature=0.0, logprobs=len(ids), allowed_token_ids=list(ids))
+        import inspect
+        exact = "logprob_token_ids" in inspect.signature(SamplingParams).parameters
+        sps = [SamplingParams(max_tokens=1, temperature=0.0, logprobs=len(ids), allowed_token_ids=list(ids),
+                              **(dict(logprob_token_ids=list(ids)) if exact else {}))
                for ids in ids_list]
         res = []
         for o, ids in zip(self.llm.generate(reqs, sps, use_tqdm=False), ids_list):
