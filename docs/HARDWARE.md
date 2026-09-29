@@ -127,12 +127,25 @@ probabilities to the fp32 PyTorch reference.
 | LM Studio, llama.cpp engine, F16 GGUF (chat with assistant prefill) ² | 211 | 5.4 | 81 | 16.2 | 0.955 / 0.977 | 0.0607 / 0.630 |
 
 ¹ These engines build the model with mlx-lm's Llama, which does not read `rope_parameters` (transformers 5) and falls
-back to `rope_theta` 10000 instead of 1e6: unpatched, mlx_lm.server gives a mean TV of 0.12 (max 0.72) and vllm-metal
-0.13 (max 0.73). They were run on a copy of the checkpoint whose `config.json` also has `"rope_theta": 1000000`
+back to `rope_theta` 10000 instead of 1e6: unpatched, the mean TV is 0.10–0.12 for mlx_lm.server and 0.10–0.13 for
+vllm-metal (4.5B–1.5B, max 0.73). They were run on a copy of the checkpoint whose `config.json` also has `"rope_theta": 1000000`
 (basal's own `mlx` backend reads the value itself). ² LM Studio (and Ollama with a GGUF import, and llama-server with
 text prompts) tokenize with the GGUF vocabulary, which splits basal prompts differently from the training tokenizer;
 see [GGUF.md](GGUF.md#other-llamacpp-front-ends-send-token-ids). ³ Imported from the patched copy of ¹ (not tested
 without).
+
+![Latency and throughput of every engine](figures/apple_latency_throughput.png)
+
+![Speed vs faithfulness](figures/apple_speed_vs_fidelity.png)
+
+Per item, the same comparison shows where the deviations come from: the rope bug (bottom rows) and the GGUF text
+tokenizer (LM Studio, llama-server with text) shift almost every item, Q4_K_M a few items strongly, the bf16 / 8-bit
+paths stay at 1e-3–1e-2, and F16 through llama.cpp mostly below 1e-3. Items where fp32 itself is nearly tied (e.g.
+`q-36` on the 1.5B) flip under any perturbation.
+
+![Per-item distance to fp32](figures/apple_fidelity_heatmap.png)
+
+Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurements in `docs/figures/apple_engines.json`.
 
 - **Fastest single decision**: llama.cpp (llama-server with token ids, basal `gguf`) and basal `mlx`, within 5%.
   **Highest throughput**: vLLM's scheduler on vllm-metal — basal's `vllm` mode runs unchanged with the rope patch.
