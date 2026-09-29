@@ -133,7 +133,7 @@ def fidelity_heatmap():
     norm = LogNorm(vmin=TV_FLOOR, vmax=1)
     for ax, model in zip(axes, MODELS):
         tv, flips, items = D["tv"][model], D["flip"][model], D["items"][model]
-        rows = sorted(tv, key=lambda k: np.mean(tv[k]))
+        rows = sorted(D["engine_keys"], key=lambda k: np.mean(tv[k]))
         cols = item_columns(items)
         m = np.array([[max(tv[k][i], TV_FLOOR) for i in cols] for k in rows])
         im = ax.imshow(m, aspect="auto", cmap="magma_r", norm=norm, interpolation="nearest")
@@ -167,7 +167,7 @@ def wilson(k, n, z=1.96):
 def quality_rows(model):
     """fp32 reference first, then the engines from the most to the least faithful (mean TV)."""
     tv = D["tv"][model]
-    return ["ref"] + sorted(tv, key=lambda k: np.mean(tv[k]))
+    return ["ref"] + sorted(D["engine_keys"], key=lambda k: np.mean(tv[k]))
 
 
 def quality_comparison():
@@ -250,6 +250,62 @@ def memory_vs_fidelity():
     fig.savefig(HERE / "apple_memory_vs_fidelity.png")
 
 
+FORMAT_COLORS = {"bf16": "#222222", "MLX affine": "#1f6fb4", "MLX microscaling": "#8e44ad", "oMLX oQ": "#2a9d55",
+                 "GGUF": "#e07b1f"}
+
+
+def format_legend(ax, **kw):
+    ax.legend(handles=[Patch(color=c, label=f) for f, c in FORMAT_COLORS.items()], title="format", frameon=False, **kw)
+
+
+def formats_size_vs_fidelity():
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+    for ax, model in zip(axes, ("1.5B", "4.5B")):
+        rows = D["formats"][model]
+        for r in rows:
+            ax.scatter(r["gb"], max(r["tv_mean"], TV_FLOOR), s=55, color=FORMAT_COLORS[r["family"]], zorder=3,
+                       edgecolor="white", linewidth=0.6)
+        ax.set_yscale("log")
+        ax.margins(x=0.15, y=0.2)
+        ax.set_xlabel("weights on disk (GB)")
+        ax.set_ylabel("mean total-variation distance to fp32 (log)")
+        ax.set_title(f"basal-1.0-{model}: {len(rows)} formats (all ~same speed, see table)")
+        ax.grid(alpha=0.25, zorder=0)
+        if model == "1.5B":
+            format_legend(ax, loc="upper right")
+    fig.suptitle(f"Quantised formats on {D['machine']}: size vs faithfulness (lower left is better)", fontsize=11)
+    fig.tight_layout()
+    fig.canvas.draw()
+    for ax, model in zip(axes, ("1.5B", "4.5B")):
+        place_labels(ax, [(r["gb"], max(r["tv_mean"], TV_FLOOR), r["label"])
+                          for r in sorted(D["formats"][model], key=lambda r: r["gb"])])
+    fig.savefig(HERE / "apple_formats_size_vs_fidelity.png")
+
+
+def formats_heatmap():
+    fig, axes = plt.subplots(2, 1, figsize=(13, 9.5), gridspec_kw=dict(height_ratios=[
+        len(D["formats"]["1.5B"]), len(D["formats"]["4.5B"])]))
+    norm = LogNorm(vmin=TV_FLOOR, vmax=1)
+    for ax, model in zip(axes, ("1.5B", "4.5B")):
+        tv, flips, items = D["tv"][model], D["flip"][model], D["items"][model]
+        rows = sorted(D["formats"][model], key=lambda r: r["tv_mean"])
+        cols = item_columns(items)
+        im = ax.imshow(np.array([[max(tv[r["key"]][i], TV_FLOOR) for i in cols] for r in rows]), aspect="auto",
+                       cmap="magma_r", norm=norm, interpolation="nearest")
+        for y, r in enumerate(rows):
+            for c, i in enumerate(cols):
+                if flips[r["key"]][i]:
+                    ax.text(c, y, "×", ha="center", va="center", color="#00c2ff", fontsize=9, fontweight="bold")
+        item_axis(ax, items, cols)
+        ax.set_yticks(range(len(rows)), [f"{r['label']}, {r['gb']:.1f} GB  ({r['tv_mean']:.4f})" for r in rows],
+                      fontsize=8)
+        ax.set_title(f"basal-1.0-{model}: per-item TV distance to fp32 by format (row mean in brackets; "
+                     f"× = top option differs from fp32)", pad=16)
+        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01, label="TV (log)")
+    fig.tight_layout()
+    fig.savefig(HERE / "apple_formats_heatmap.png")
+
+
 if __name__ == "__main__":
     speed_vs_fidelity()
     latency_throughput()
@@ -257,3 +313,5 @@ if __name__ == "__main__":
     memory_vs_fidelity()
     quality_comparison()
     gold_prob_heatmap()
+    formats_size_vs_fidelity()
+    formats_heatmap()

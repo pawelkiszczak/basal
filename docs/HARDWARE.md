@@ -124,7 +124,7 @@ probabilities to the fp32 PyTorch reference.
 | llama-server b11146 F16 (token ids, `n_probs` 20) | **191** | 5.1 | 79 | 13.2 | 1.000 / 1.000 | 0.0005 / 0.005 |
 | MTPLX 2.12, prompt-scoring lane (`echo`, `max_tokens` 0) ¹ | 339 | 2.9 | 129 | 8.0 | 0.977 / 0.977 | 0.0059 / 0.043 |
 | Ollama 0.34, safetensors import ³ | 280 | 3.3 | 105 | 9.0 | 1.000 / 0.977 | 0.0055 / 0.059 |
-| LM Studio, llama.cpp engine, F16 GGUF (chat with assistant prefill) ² | 211 | 5.4 | 81 | 16.2 | 0.955 / 0.977 | 0.0607 / 0.630 |
+| LM Studio, llama.cpp engine, F16 GGUF (chat with assistant prefill) ² | 211 | 5.8 | 80 | 16.5 | 0.955 / 0.977 | 0.0607 / 0.630 |
 
 ¹ These engines build the model with mlx-lm's Llama, which does not read `rope_parameters` (transformers 5) and falls
 back to `rope_theta` 10000 instead of 1e6: unpatched, the mean TV is 0.10–0.12 for mlx_lm.server and 0.10–0.13 for
@@ -171,6 +171,62 @@ measured: the decisions it changes (right panel) and the TV distance above. The 
 the same items are wrong in every faithful engine.
 
 ![Probability of the gold option per item](figures/apple_gold_prob_heatmap.png)
+
+#### Quantised formats: MLX, oMLX oQ, GGUF
+
+Pre-converted MLX checkpoints load directly in `--mode mlx` (the mlx-lm quantisation in their `config.json` is
+applied; copy `CALIBRATION.json` from the original repository into the directory so the temperatures apply):
+
+```bash
+python -m mlx_lm convert --hf-path <basal dir> --mlx-path basal-1.5B-q8 -q --q-bits 8 --q-group-size 64
+python -m mlx_lm convert --hf-path <basal dir> --mlx-path basal-1.5B-mxfp4 -q --q-mode mxfp4   # also nvfp4, mxfp8
+python -c "from omlx.oq import quantize_oq_streaming as q; q('<basal dir>', 'basal-1.5B-oQ6e', 6, enhanced=True)"
+basal-serve --mode mlx --model basal-1.5B-oQ6e
+```
+
+Other MLX runtimes (LM Studio, oMLX, mlx_lm.server) read `rope_theta` from `config.json` (see ¹ above), so convert
+from a copy of the checkpoint whose `config.json` has it. Measured like the engines above (M4 Max, cold prompts,
+cool-down; *TV*: mean / max total-variation distance to fp32, *changed*: decisions whose top option differs from fp32):
+
+| format | 1.5B GB | 1.5B ms | 1.5B TV | 1.5B changed | 4.5B GB | 4.5B ms | 4.5B TV | 4.5B changed |
+|---|---|---|---|---|---|---|---|---|
+| bf16 (`mlx`) | 3.19 | 67 | 0.0054 / 0.027 | 1 | 9.51 | 198 | 0.0044 / 0.033 | 0 |
+| GGUF F16 (`gguf`) | 3.20 | 69 | **0.0004** / 0.002 | 0 | 9.52 | 200 | **0.0005** / 0.008 | 0 |
+| GGUF Q8_0 | 1.70 | 72 | 0.0053 / 0.029 | 1 | 5.06 | 212 | 0.0040 / 0.039 | 0 |
+| MLX affine 8-bit (= oMLX oQ8) | 1.70 | 70 | 0.0093 / 0.041 | 0 | 5.06 | 202 | 0.0072 / 0.070 | 0 |
+| MLX mxfp8 | 1.65 | 72 | 0.0168 / 0.101 | 1 | – | – | – | – |
+| oMLX oQ6e | 1.34 | 73 | 0.0119 / 0.050 | 1 | 3.98 | 205 | 0.0116 / 0.118 | 0 |
+| oMLX oQ6 | 1.34 | 71 | 0.0180 / 0.184 | 1 | – | – | – | – |
+| MLX affine 6-bit | 1.30 | 72 | 0.0186 / 0.141 | 1 | – | – | – | – |
+| GGUF Q4_K_M | 0.97 | 76 | 0.0516 / 0.444 | 2 | 2.88 | 222 | 0.0467 / 0.306 | 2 |
+| oMLX oQ4e | 0.94 | 70 | 0.0639 / 0.275 | 3 | 2.80 | 207 | **0.0407** / 0.212 | 2 |
+| MLX nvfp4 | 0.90 | 71 | 0.0763 / 0.445 | 2 | – | – | – | – |
+| MLX mixed_4_6 | 0.97 | 70 | 0.0814 / 0.427 | 4 | – | – | – | – |
+| oMLX oQ4 | 0.94 | 71 | 0.0868 / 0.522 | 4 | – | – | – | – |
+| MLX affine 4-bit | 0.90 | 69 | 0.1125 / 0.686 | 5 | 2.68 | 200 | 0.0613 / 0.417 | 1 |
+| oMLX oQ3e | 0.74 | 69 | 0.1565 / 0.453 | 7 | – | – | – | – |
+| MLX mxfp4 | 0.85 | 71 | 0.2029 / 0.796 | 9 | 2.53 | 204 | 0.1003 / 0.529 | 4 |
+
+![Size vs faithfulness of the quantised formats](figures/apple_formats_size_vs_fidelity.png)
+
+- **No format is faster**: the Apple GPU is compute-bound on these prompts, so every format of a model runs within
+  15% of bf16. Quantisation only saves memory.
+- **8-bit**: GGUF Q8_0 stays at the bf16 level; the MLX formats deviate about twice as much (they also quantise the
+  embeddings and the LM head, which basal's runtime `mlx-q8` keeps in bf16). oQ8 gave exactly the probabilities of
+  MLX affine 8-bit (presumably its protection rules have nothing to protect in this dense Llama).
+- **6-bit**: the imatrix calibration of oQ6e cuts the worst-case deviation of oQ6 / affine 6-bit to about a third
+  (1.5B).
+- **4-bit** changes 1–9 of 44 decisions in every format and single probabilities by 0.2–0.8: the calibration of the
+  original no longer holds. oQ4e and GGUF Q4_K_M are the best 4-bit formats (oQ4e ahead on the 4.5B, Q4_K_M on the
+  1.5B); mxfp4 is the worst. 3-bit (oQ3e) is worse still.
+- **LM Studio's MLX runner** gives the same faithfulness as the format it runs (1.5B: bf16 0.0051, 8-bit 0.0107,
+  oQ4e 0.066 mean TV) at about twice the latency (122–138 ms): its API returns logprobs only on chat completions
+  (top 10, and only with `max_tokens` ≥ 2), so both option orders are separate requests. Its top-logprob list can
+  contain two tokens that print as the same letter (`B` and `▁B`): match the letter ids on the returned `bytes`.
+  **oMLX** runs all of these formats but returns no logprobs.
+- Not tried: DWQ, AWQ and GPTQ (mlx-lm), which need a calibration dataset and a training run.
+
+![Per-item distance to fp32 by format](figures/apple_formats_heatmap.png)
 
 Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurements in `docs/figures/apple_engines.json`.
 
