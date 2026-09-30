@@ -17,7 +17,7 @@ on a private 500-item sample of the Polish/English test split.
 | Desktop with unified memory (DGX Spark GB10) | `fp8` | memory-bandwidth-bound; FP8 halves latency |
 | Batched high-throughput serving on Blackwell | `vllm` + `-NVFP4` checkpoint | 3.2× throughput on the DGX Spark (the only machine where it was measured), but −3 accuracy points |
 | A100 and other GPUs without FP8 (not measured) | `fast` | the bf16 path runs on any sm80+ GPU |
-| Apple Silicon (M-series Mac) | `mlx` with the original checkpoint; `gguf` with the F16 GGUF for the closest match to fp32; 8-bit / oQ6e checkpoints on 16 GB Macs | compute-bound: every format runs at the same speed, quantised weights only save memory; published checkpoints in the [README](../README.md#apple-silicon-mlx--mps), details in [Apple Silicon](#apple-silicon) |
+| Apple Silicon (M-series Mac) | `mlx` with the original checkpoint; `gguf` with the F16 GGUF for the closest match to fp32; 8-bit / oQ6e checkpoints on 16 GB Macs | compute-bound: every format runs at the same speed, quantised weights only save memory; converted repos in the [README](../README.md#apple-silicon-mlx--mps) remain private until release |
 
 Add `--mode fast-exit` to let requests choose `"early_exit": "0.99"` (about 1.15× faster, agreement ≥ 0.99).
 
@@ -207,7 +207,7 @@ the same items are wrong in every faithful engine.
 
 #### Quantised formats: MLX, oMLX oQ, GGUF
 
-Published conversions: [MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-MLX-8bit) and
+Staged conversions (private until the publisher releases them): [MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-MLX-8bit) and
 [oQ6e](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-oQ6e) of the 4.5B,
 [MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-MLX-8bit) and
 [oQ6e](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-oQ6e) of the 1.5B (with `CALIBRATION.json`, for
@@ -247,7 +247,7 @@ cool-down; *TV*: mean / max total-variation distance to fp32, *changed*: decisio
 | oMLX oQ3e | 0.74 | 69 | 0.1565 / 0.453 | 7 | – | – | – | – |
 | MLX mxfp4 | 0.85 | 71 | 0.2029 / 0.796 | 9 | 2.53 | 204 | 0.1003 / 0.529 | 4 |
 
-![Size vs faithfulness of the quantised formats (ringed: published checkpoints)](figures/apple_formats_size_vs_fidelity.png)
+![Size vs faithfulness of the quantised formats (ringed: selected checkpoints, converted repos private)](figures/apple_formats_size_vs_fidelity.png)
 
 - **No format is faster**: the Apple GPU is compute-bound on these prompts, so every format of a model runs within
   15% of bf16. Quantisation only saves memory.
