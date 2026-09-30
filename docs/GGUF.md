@@ -19,13 +19,13 @@ hf download pawelkiszczak/basal-1.0-4.5B-GGUF basal-1.0-4.5B-F16.gguf --local-di
 
 ## Convert yourself
 
-The converter lives in the llama.cpp repository and needs transformers 5 (the pinned 4.x cannot read the tokenizer
-config of basal-1.0-1.5B):
+The converter lives in llama.cpp and needs transformers 5 to read basal-1.0-1.5B's tokenizer config. Its current
+`requirements-convert_hf_to_gguf.txt` pins transformers 4, so install the needed converter packages directly:
 
 ```bash
 git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/llama.cpp
-uv venv ~/gguf-env
-uv pip install --python ~/gguf-env -r ~/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt "transformers==5.17.0"
+uv venv --python 3.12 ~/gguf-env
+uv pip install --python ~/gguf-env 'numpy~=2.2.6' 'sentencepiece>=0.1.98,<0.3.0' 'protobuf>=4.21,<5' gguf 'transformers==5.17.0' 'torch==2.11.0'
 hf download Remek/basal-1.0-4.5B --local-dir basal-1.0-4.5B
 ~/gguf-env/bin/python ~/llama.cpp/convert_hf_to_gguf.py basal-1.0-4.5B --outtype f16  --outfile basal-1.0-4.5B-F16.gguf
 ~/gguf-env/bin/python ~/llama.cpp/convert_hf_to_gguf.py basal-1.0-4.5B --outtype q8_0 --outfile basal-1.0-4.5B-Q8_0.gguf
@@ -38,8 +38,9 @@ The attention and MLP biases of basal-1.0 are converted and used by llama.cpp's 
 ## Serve
 
 ```bash
-uv pip install -e ".[gguf]"          # llama-cpp-python; on macOS arm64 it builds with Metal
-# CUDA: CMAKE_ARGS="-DGGML_CUDA=on" uv pip install llama-cpp-python   (not tested with basal)
+uv pip install -e ".[gguf]"          # llama-cpp-python 0.3.35 builds with Metal on macOS arm64
+# For CUDA, use this INSTEAD of the line above (not tested with basal):
+# CMAKE_ARGS="-DGGML_CUDA=on" uv pip install -e ".[gguf]" --no-binary llama-cpp-python
 basal-serve --mode gguf --model Remek/basal-1.0-4.5B --gguf basal-1.0-4.5B-F16.gguf --port 8000
 basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 gguf@basal-1.0-4.5B-F16.gguf gguf@basal-1.0-4.5B-Q8_0.gguf
 ```

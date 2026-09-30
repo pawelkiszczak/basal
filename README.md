@@ -141,12 +141,13 @@ basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
 ### Apple Silicon (MLX / MPS)
 
 On a Mac with an M-series chip no CUDA index is needed: the PyPI torch wheel includes MPS, and the `mlx` extra adds
-[MLX](https://github.com/ml-explore/mlx). The Apple backends are not in the v1.0.1 tag yet; install from a clone:
+[MLX](https://github.com/ml-explore/mlx). Until these PRs merge into
+[`rkinas/basal`](https://github.com/rkinas/basal), install from the fork branch containing both backends:
 
 ```bash
-git clone https://github.com/rkinas/basal && cd basal
+git clone --branch feat/gguf-llamacpp https://github.com/pawelkiszczak/basal && cd basal
 uv venv --python 3.12 .venv && source .venv/bin/activate
-uv pip install -e ".[mlx]"
+uv pip install -e ".[mlx,gguf]"
 basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple Silicon: --mode mlx
 ```
 
@@ -162,13 +163,14 @@ how closely they follow the fp32 reference, see [docs/HARDWARE.md](docs/HARDWARE
 
 The MLX repositories include `CALIBRATION.json`, so `--model pawelkiszczak/basal-1.0-4.5B-MLX-8bit` is all the server
 needs; for GGUF, `--model` stays the original repository (tokenizer and calibration) and `--gguf` points to the
-downloaded file ([docs/GGUF.md](docs/GGUF.md)). 4-bit formats change some decisions and are not published.
+downloaded file ([docs/GGUF.md](docs/GGUF.md)). GGUF Q4_K_M is published but not recommended: it changes some
+decisions. The other measured 4-bit formats are not published.
 
 ![Published Apple Silicon checkpoints: memory vs faithfulness](docs/figures/apple_memory_vs_fidelity.png)
 
-- `mlx` (default when MLX is installed) and `mps` (PyTorch) both use the shared prefix and batching of `fast` and
-  start in about a second (nothing is compiled). Agreement with the fp32 reference on the 44 bundled examples: 1.000
-  for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.
+- `mlx` (default when MLX and mlx-lm are installed) and `mps` (PyTorch) both use the shared prefix and batching of
+  `fast`. Neither compiles; startup still includes model download and loading. Agreement with the fp32 reference on the
+  44 bundled examples: 1.000 for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.
 - **Memory.** The 4.5B model needs about 9 GB of weights in bf16; on a 16 GB Mac use one of the 8-bit or oQ6e
   checkpoints above, `--mode mlx-q8` (8-bit weights quantised at load time, 4.8 GB) or the 1.5B model.
 - **Speed** (M4 Max, both option orders, bundled examples, cooled GPU): 4.5B 198 ms per decision (`mlx`), 1.5B 67 ms;
@@ -179,6 +181,10 @@ downloaded file ([docs/GGUF.md](docs/GGUF.md)). 4-bit formats change some decisi
   [pawelkiszczak/basal-1.0-4.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF),
   [pawelkiszczak/basal-1.0-1.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF); see
   [docs/GGUF.md](docs/GGUF.md).
+- **Ollama**: `--mode ollama --ollama-model <name>` reads letter logprobs from a *safetensors import of the original
+  checkpoint*, not an MLX/GGUF conversion. Ollama takes text rather than token IDs; it can omit a letter from its
+  top-20 list, in which case basal reports an error instead of returning invented probabilities. See
+  [Ollama setup and limitations](docs/HARDWARE.md#ollama-safetensors-import).
 - `fast*`, `fp8`, `nvfp4` and `fast-exit` need CUDA; early exit is not available on Apple backends. `vllm` also runs
   on [vllm-metal](https://github.com/vllm-project/vllm-metal) with a patched `config.json`
   ([engine comparison](docs/HARDWARE.md#inference-engines-on-apple-silicon)).
@@ -312,6 +318,7 @@ for line in open("basal/examples/questions.jsonl"):
 | `mlx-q8` | `mlx` with 8-bit weights: about half the memory, not faster | Apple Silicon |
 | `mps` | PyTorch MPS + shared prefix + token-budget batching (no graphs) | Apple Silicon |
 | `gguf` | llama.cpp on a converted GGUF file (`--gguf`), shared prefix as llama.cpp sequences ([docs/GGUF.md](docs/GGUF.md)) | Apple Silicon (Metal), CUDA, CPU (`[gguf]` extra) |
+| `ollama` | Ollama safetensors import via raw text and next-token logprobs (two HTTP calls per decision; `--ollama-model`) | Apple Silicon or other Ollama hosts |
 | `eager` | plain PyTorch reference | any GPU (CUDA or Apple MPS) or CPU |
 
 - **Two option orders** (`--orders 2`, default): every question is asked with the options in original and reversed

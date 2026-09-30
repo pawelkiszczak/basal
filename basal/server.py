@@ -17,6 +17,7 @@ import torch
 
 from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, MLXBackend, MPSBackend, VLLMBackend,
                      resolve)
+from .ollama import OllamaBackend
 from .prompt import MAX_OPTIONS, lang_of, letter_ids, render
 
 RELEASE_DATE = "2026-10-01"
@@ -34,18 +35,35 @@ MODES = {
     "mlx-q8": ("mlx", "q8", False),         # "mlx" with 8-bit weights (less memory, not faster)
     "mps": ("mps", None, False),            # Apple Silicon: PyTorch MPS + shared prefix, no graphs
     "gguf": ("gguf", None, False),          # llama.cpp on a GGUF file (--gguf; Metal, CUDA or CPU) + shared prefix
+    "ollama": ("ollama", None, False),     # Ollama safetensors import; raw prompts + next-token logprobs
 }
 
 
 def default_mode():
-    """fast on CUDA, mlx on Apple Silicon with MLX installed, mps without it, eager otherwise."""
+    """fast on CUDA, MLX on Apple Silicon when mlx and mlx-lm are installed, MPS otherwise."""
     if torch.cuda.is_available():
         return "fast"
-    try:
-        import mlx.core  # noqa: F401
-        return "mlx"
-    except ImportError:
-        return "mps" if torch.backends.mps.is_available() else "eager"
+    if torch.backends.mps.is_available():
+        try:
+            import mlx.core  # noqa: F401
+            import mlx_lm  # noqa: F401
+            return "mlx"
+        except ImportError:
+            return "mps"
+    return "eager"
+
+
+def validate_quant(mode, quant):
+    """Reject quantisation overrides that the selected backend cannot apply."""
+    if quant is None:
+        return
+    kind = MODES[mode][0]
+    if quant == "q8" and kind == "mlx":
+        return
+    if quant in ("fp8", "nvfp4") and kind in ("graph", "exit"):
+        return
+    supported = "q8 only for MLX; fp8 and nvfp4 only for graph and exit modes"
+    raise SystemExit(f"--quant {quant} is not supported with --mode {mode} ({supported})")
 
 
 def _text(x):
@@ -110,6 +128,9 @@ def models_payload(name, mode, policies):
 
 class Server:
     def __init__(self, a):
+        validate_quant(a.mode, a.quant)
+        if a.mode == "ollama" and not a.ollama_model:
+            raise SystemExit("--mode ollama needs --ollama-model <name> (an Ollama safetensors import of --model)")
         md = resolve(a.model, a.revision)
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
         kind, quant, comp = MODES[a.mode]
@@ -129,6 +150,8 @@ class Server:
             if not a.gguf:
                 raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
             self.backend = GGUFBackend(md, a.gguf)
+        elif kind == "ollama":
+            self.backend = OllamaBackend(md, a.ollama_model, a.ollama_url)
         else:
             self.backend = GraphBackend(md, a.dtype, quant, compile=comp, shared=a.orders == 2)
         self.tok = self.backend.tok
@@ -230,7 +253,7 @@ def parser():
     ap.add_argument("--revision", default=None)
     ap.add_argument("--name", default=None, help="model name reported in responses (default: last part of --model)")
     ap.add_argument("--mode", choices=list(MODES), default=None,
-                    help="default: fast on CUDA, mlx on Apple Silicon (mps without MLX), eager otherwise")
+                    help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx or mlx-lm), eager otherwise")
     ap.add_argument("--quant", choices=["fp8", "nvfp4", "q8"], default=None,
                     help="override the quantisation of the mode (fp8 / nvfp4: CUDA modes, q8: mlx)")
     ap.add_argument("--dtype", default="bfloat16")
@@ -241,6 +264,8 @@ def parser():
     ap.add_argument("--no-calibration", dest="no_calibration", action="store_true")
     ap.add_argument("--gpu-memory", dest="gpu_memory", type=float, default=0.6, help="vLLM memory fraction")
     ap.add_argument("--gguf", default=None, help="GGUF weights for --mode gguf (converted from --model, see docs/GGUF.md)")
+    ap.add_argument("--ollama-model", default=None, help="Ollama safetensors import name for --mode ollama")
+    ap.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama API root for --mode ollama")
     ap.add_argument("--max-batch", dest="max_batch", type=int, default=64)
     ap.add_argument("--wait-ms", dest="wait_ms", type=float, default=0.0,
                     help="extra time to wait for more requests before a forward (default 0: adaptive batching)")
@@ -252,6 +277,7 @@ def parser():
 def main():
     a = parser().parse_args()
     a.mode = a.mode or default_mode()
+    validate_quant(a.mode, a.quant)
     from contextlib import asynccontextmanager
 
     import uvicorn

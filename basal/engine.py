@@ -551,7 +551,21 @@ class GGUFBackend(GraphBackend):
         self.cmodel = C.llama_model_load_from_file(str(gguf).encode(), mp)
         if not self.cmodel:
             raise ValueError(f"llama.cpp could not load {gguf}")
+        cfg = json.loads((Path(model_dir) / "config.json").read_text())
+        for name, llama_name in (("num_hidden_layers", "llama_model_n_layer"),
+                                 ("hidden_size", "llama_model_n_embd")):
+            expected = cfg.get(name)
+            if expected is None:
+                raise ValueError(f"{model_dir}/config.json is missing {name}")
+            actual = getattr(C, llama_name)(self.cmodel)
+            if actual != expected:
+                raise ValueError(f"{gguf}: {llama_name.removeprefix('llama_model_')} is {actual}, "
+                                 f"but {model_dir}/config.json specifies {name}={expected}")
         self.n_vocab = C.llama_vocab_n_tokens(C.llama_model_get_vocab(self.cmodel))
+        expected_vocab = cfg.get("vocab_size")
+        if expected_vocab is not None and self.n_vocab != expected_vocab:
+            raise ValueError(f"{gguf}: vocabulary is {self.n_vocab}, "
+                             f"but {model_dir}/config.json specifies vocab_size={expected_vocab}")
         if self.n_vocab < len(self.tok):
             raise ValueError(f"{gguf}: vocabulary of {self.n_vocab} tokens, tokenizer of {model_dir} has {len(self.tok)}")
         cp = C.llama_context_default_params()
@@ -603,7 +617,7 @@ class GGUFBackend(GraphBackend):
                 reads.append(n - len(t) + r)
             seq += orders
         b.n_tokens = n
-        C.llama_memory_clear(C.llama_get_memory(self.ctx), True)
+        C.llama_memory_clear(C.llama_get_memory(self.ctx), False)
         if C.llama_decode(self.ctx, b) != 0:
             raise RuntimeError("llama_decode failed")
         return np.stack([np.ctypeslib.as_array(C.llama_get_logits_ith(self.ctx, r), shape=(self.n_vocab,))

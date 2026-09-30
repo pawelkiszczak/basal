@@ -158,6 +158,39 @@ paths stay at 1e-3–1e-2, and F16 through llama.cpp mostly below 1e-3. Items wh
   needs; **Swama**, **Exo** and Apple's Foundation Models framework expose no logprobs. **MTPLX** accelerates decoding
   with multi-token prediction, which a one-token decision does not use; plain Llama runs on its experimental AR path.
 
+#### Ollama safetensors import
+
+Ollama 0.34.4 exposes next-token `logprobs` on `/api/generate`. basal's `--mode ollama` renders its normal
+prompt and asks Ollama for the top 20 tokens (`raw: true`, one generated token). It uses two HTTP calls for the
+two option orders and errors if any option letter is missing from the top-20 list; unlike `mlx` and `gguf`, Ollama
+cannot take the original tokenizer's token IDs as a prompt. The comparison row above used an **original
+safetensors import**, not a GGUF file or an MLX quantisation. These converted files must be run with their
+respective basal backends.
+
+Ollama's Llama loader needs `rope_theta` at the top level of `config.json`; the source model stores it under
+`rope_parameters`. Patch only a local copy for Ollama (the original model and weights remain unchanged):
+
+```bash
+hf download Remek/basal-1.0-1.5B --local-dir basal-1.0-1.5B
+python - <<'PY'
+import json
+from pathlib import Path
+p = Path("basal-1.0-1.5B/config.json")
+c = json.loads(p.read_text())
+c["rope_theta"] = c["rope_parameters"]["rope_theta"]
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+printf 'FROM %s\nPARAMETER num_ctx 4096\n' "$PWD/basal-1.0-1.5B" > Modelfile
+ollama create basal-1.5b -f Modelfile
+basal-serve --mode ollama --model Remek/basal-1.0-1.5B --ollama-model basal-1.5b
+```
+
+`--model` supplies the original tokenizer and calibration; `--ollama-model` names the running Ollama
+safetensors import. The server checks the Ollama model's architecture and vocabulary against `--model`.
+For a non-default Ollama host use `--ollama-url`. To benchmark it:
+`basal-bench --model Remek/basal-1.0-1.5B --modes mps ollama --ollama-model basal-1.5b`.
+The 44-item row above predates this packaged backend and comes from the equivalent raw Ollama API benchmark.
+
 #### Quality
 
 ![Accuracy, log-loss and changed decisions per engine](figures/apple_quality.png)

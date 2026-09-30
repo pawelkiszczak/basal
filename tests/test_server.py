@@ -1,13 +1,17 @@
 """Request handling of the HTTP server without a model: option names reach the prompt, and responses and the model
 list conform to the official System One OpenAPI schema (tests/data/systemone_openapi.json)."""
 import asyncio
+import builtins
 import json
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import jsonschema
 import pytest
 
-from basal.server import Server, models_payload, named_options, to_items
+import basal.bench as bench_module
+import basal.server as server_module
+from basal.server import Server, default_mode, models_payload, named_options, to_items
 
 SPEC = json.loads((Path(__file__).parent / "data/systemone_openapi.json").read_text())
 
@@ -45,6 +49,55 @@ class FakeServer(Server):
             return await self.decide(body)
         finally:
             w.cancel()
+
+
+@pytest.mark.parametrize(("mode", "quant"), [
+    ("eager", "fp8"),
+    ("fast", "q8"),
+    ("mps", "fp8"),
+    ("mlx", "nvfp4"),
+    ("vllm", "fp8"),
+    ("gguf", "q8"),
+])
+def test_server_rejects_quantisation_unsupported_by_mode(mode, quant, monkeypatch):
+    monkeypatch.setattr(server_module, "resolve", lambda *_: pytest.fail("model resolution must not run"))
+    with pytest.raises(SystemExit, match="not supported with --mode"):
+        Server(SimpleNamespace(mode=mode, quant=quant))
+
+
+def test_default_mode_falls_back_to_mps_without_mlx_lm(monkeypatch):
+    monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)
+    real_import = builtins.__import__
+
+    def import_without_mlx_lm(name, *args, **kwargs):
+        if name == "mlx.core":
+            return ModuleType(name)
+        if name == "mlx_lm":
+            raise ImportError("not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_mlx_lm)
+    assert default_mode() == "mps"
+
+
+def test_default_mode_prefers_cuda_over_mlx(monkeypatch):
+    monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)
+    assert default_mode() == "fast"
+
+
+def test_benchmark_mps_default_avoids_eager_fp32(monkeypatch):
+    monkeypatch.setattr(bench_module, "default_mode", lambda: "mlx")
+    monkeypatch.setattr(bench_module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(bench_module.torch.backends.mps, "is_available", lambda: True)
+    assert bench_module.default_modes() == ["mps", "mlx"]
+
+
+def test_benchmark_cuda_default_preserves_fp32_reference(monkeypatch):
+    monkeypatch.setattr(bench_module, "default_mode", lambda: "fast")
+    monkeypatch.setattr(bench_module.torch.cuda, "is_available", lambda: True)
+    assert bench_module.default_modes() == ["eager-fp32", "fast"]
 
 
 def test_named_options_show_keys_by_default():

@@ -1,6 +1,8 @@
 """GGUF backend: the shared prefix expressed as llama.cpp sequences (prefix tokens in the sequences of both option
 orders, all questions of a chunk in one llama_decode) gives the same letter probabilities as evaluating every option
 order on its own (tiny random Llama with attention and MLP biases written as GGUF)."""
+import json
+
 import pytest
 
 pytest.importorskip("llama_cpp")
@@ -25,6 +27,11 @@ class Tok:  # one character = one token, ids 3..63
 def model(tmp_path_factory):
     rng = np.random.default_rng(0)
     path = tmp_path_factory.mktemp("gguf") / "tiny.gguf"
+    model_dir = path.parent / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "model_type": "llama", "num_hidden_layers": L, "hidden_size": H, "vocab_size": V,
+    }))
     w = gguf.GGUFWriter(str(path), "llama")
     w.add_context_length(256); w.add_embedding_length(H); w.add_block_count(L); w.add_feed_forward_length(F)
     w.add_head_count(NH); w.add_head_count_kv(NKV); w.add_rope_freq_base(1e6); w.add_layer_norm_rms_eps(1e-6)
@@ -48,15 +55,33 @@ def model(tmp_path_factory):
         for n, o, d in (("ffn_gate", F, H), ("ffn_up", F, H), ("ffn_down", H, F)):
             t(f"blk.{i}.{n}.weight", o, d); t(f"blk.{i}.{n}.bias", o)
     w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
-    return path
+    return path, model_dir
 
 
 @pytest.fixture(scope="module")
 def backend(model):
     mp = pytest.MonkeyPatch()  # stand-in tokenizer instead of a Hugging Face model directory
+    gguf_path, model_dir = model
     mp.setattr("basal.engine.AutoTokenizer.from_pretrained", lambda _: Tok())
-    yield GGUFBackend("unused", model, n_gpu_layers=0)
+    yield GGUFBackend(model_dir, gguf_path, n_gpu_layers=0)
     mp.undo()
+
+
+def test_mismatched_architecture_fails_before_context_creation(model, tmp_path, monkeypatch):
+    import llama_cpp as C
+
+    gguf_path, _ = model
+    model_dir = tmp_path / "mismatched"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "model_type": "llama", "num_hidden_layers": L + 1, "hidden_size": H, "vocab_size": V,
+    }))
+    monkeypatch.setattr("basal.engine.AutoTokenizer.from_pretrained", lambda _: Tok())
+    monkeypatch.setattr(C, "llama_init_from_model",
+                        lambda *args: pytest.fail("context creation must follow architecture validation"))
+
+    with pytest.raises(ValueError, match="num_hidden_layers"):
+        GGUFBackend(model_dir, gguf_path, n_gpu_layers=0)
 
 
 IDS = [10, 20, 30]
