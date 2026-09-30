@@ -151,9 +151,8 @@ uv pip install -e ".[mlx,gguf]"
 basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple Silicon: --mode mlx
 ```
 
-Ready-made Apple Silicon checkpoints (the converted repos linked below are **private until their publisher releases
-them**; the original bf16 repos are public). Measured on an M4 Max; all run at about the same speed, but differ in
-memory and fidelity ([details](docs/HARDWARE.md#quantised-formats-mlx-omlx-oq-gguf)):
+Ready-made public Apple Silicon checkpoints (measured on an M4 Max; all run at about the same speed, but differ in
+memory and fidelity; see [details](docs/HARDWARE.md#quantised-formats-mlx-omlx-oq-gguf)):
 
 | use | 4.5B | 1.5B | start with |
 |---|---|---|---|
@@ -164,10 +163,10 @@ memory and fidelity ([details](docs/HARDWARE.md#quantised-formats-mlx-omlx-oq-gg
 
 The MLX repositories include `CALIBRATION.json`, so `--model pawelkiszczak/basal-1.0-4.5B-MLX-8bit` is all the server
 needs; for GGUF, `--model` stays the original repository (tokenizer and calibration) and `--gguf` points to the
-downloaded file ([docs/GGUF.md](docs/GGUF.md)). GGUF Q4_K_M is staged in a private repo but not recommended: it
-changes some decisions. The other measured 4-bit formats are not staged.
+downloaded file ([docs/GGUF.md](docs/GGUF.md)). GGUF Q4_K_M is available but not recommended: it changes some
+decisions. The other measured 4-bit formats are not published.
 
-![Selected Apple Silicon checkpoints: memory vs faithfulness](docs/figures/apple_memory_vs_fidelity.png)
+![Published Apple Silicon checkpoints: memory vs faithfulness](docs/figures/apple_memory_vs_fidelity.png)
 
 - `mlx` (default when MLX and mlx-lm are installed) and `mps` (PyTorch) both use the shared prefix and batching of
   `fast`. Neither compiles; startup still includes model download and loading. Agreement with the fp32 reference on the

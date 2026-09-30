@@ -233,15 +233,15 @@ def gold_prob_heatmap():
     fig.savefig(HERE / "apple_gold_prob_heatmap.png")
 
 
-# Selected checkpoints (original bf16 is public; converted repos are private until release); keys of D["formats"]
-SELECTED = {"basal-mlx", "basal-gguf:F16", "basal-gguf:Q8_0", "basal-gguf:Q4_K_M", "mlx-q8", "mlx-oQ6e"}
+# Checkpoints published on Hugging Face (README, "Ready-made public Apple Silicon checkpoints"); keys of D["formats"]
+PUBLISHED = {"basal-mlx", "basal-gguf:F16", "basal-gguf:Q8_0", "basal-gguf:Q4_K_M", "mlx-q8", "mlx-oQ6e"}
 
 
 def memory_vs_fidelity():
-    """Selected checkpoints of both models: memory vs faithfulness, latency in the labels."""
+    """Published checkpoints of both models: memory vs faithfulness, latency in the labels."""
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.8))
     for ax, model in zip(axes, ("1.5B", "4.5B")):
-        rows = [r for r in D["formats"][model] if r["key"] in SELECTED]
+        rows = [r for r in D["formats"][model] if r["key"] in PUBLISHED]
         for r in rows:
             ax.scatter(r["gb"], max(r["tv_mean"], TV_FLOOR), s=70, color=FORMAT_COLORS[r["family"]], zorder=3,
                        edgecolor="white", linewidth=0.6)
@@ -253,12 +253,12 @@ def memory_vs_fidelity():
         ax.grid(alpha=0.25)
         if model == "1.5B":
             format_legend(ax, families={r["family"] for r in rows}, loc="upper right", fontsize=8)
-    fig.suptitle("Apple Silicon checkpoints (conversions private until release): lower GB and TV are better; "
+    fig.suptitle("Published Apple Silicon checkpoints: lower GB and TV are better (lower left); "
                  "labels: ms per decision, lower is better", fontsize=11)
     fig.tight_layout()
     fig.canvas.draw()
     for ax, model in zip(axes, ("1.5B", "4.5B")):
-        rows = [r for r in D["formats"][model] if r["key"] in SELECTED]
+        rows = [r for r in D["formats"][model] if r["key"] in PUBLISHED]
         place_labels(ax, [(r["gb"], max(r["tv_mean"], TV_FLOOR),
                            f"{r['label']} · {r['ms']:.0f} ms")
                           for r in sorted(rows, key=lambda r: r["gb"])])
@@ -269,11 +269,11 @@ FORMAT_COLORS = {"bf16": "#222222", "MLX affine": "#1f6fb4", "MLX microscaling":
                  "GGUF": "#e07b1f"}
 
 
-def format_legend(ax, selected=False, families=None, **kw):
+def format_legend(ax, published=False, families=None, **kw):
     handles = [Patch(color=c, label=f) for f, c in FORMAT_COLORS.items() if families is None or f in families]
-    if selected:
+    if published:
         handles.append(plt.Line2D([], [], marker="o", color="w", markerfacecolor="#ccc", markeredgecolor="black",
-                                  markeredgewidth=1.6, markersize=9, label="selected (converted repos private)"))
+                                  markeredgewidth=1.6, markersize=9, label="published on Hugging Face"))
     ax.legend(handles=handles, title="format", frameon=False, **kw)
 
 
@@ -282,10 +282,10 @@ def formats_size_vs_fidelity():
     for ax, model in zip(axes, ("1.5B", "4.5B")):
         rows = D["formats"][model]
         for r in rows:
-            selected = r["key"] in SELECTED
-            ax.scatter(r["gb"], max(r["tv_mean"], TV_FLOOR), s=90 if selected else 55, color=FORMAT_COLORS[r["family"]],
-                       zorder=4 if selected else 3, edgecolor="black" if selected else "white",
-                       linewidth=1.6 if selected else 0.6)
+            published = r["key"] in PUBLISHED
+            ax.scatter(r["gb"], max(r["tv_mean"], TV_FLOOR), s=90 if published else 55, color=FORMAT_COLORS[r["family"]],
+                       zorder=4 if published else 3, edgecolor="black" if published else "white",
+                       linewidth=1.6 if published else 0.6)
         ax.set_yscale("log")
         ax.margins(x=0.15, y=0.2)
         ax.set_xlabel("weights on disk (GB)")
@@ -293,7 +293,7 @@ def formats_size_vs_fidelity():
         ax.set_title(f"basal-1.0-{model}: {len(rows)} formats (all ~same speed, see table)")
         ax.grid(alpha=0.25, zorder=0)
         if model == "1.5B":
-            format_legend(ax, selected=True, loc="upper right")
+            format_legend(ax, published=True, loc="upper right")
     fig.suptitle(f"Quantised formats on {D['machine']}: lower disk GB and TV are better (lower left)", fontsize=11)
     fig.tight_layout()
     fig.canvas.draw()
