@@ -69,6 +69,25 @@ def test_benchmark_cuda_default_preserves_fp32_reference(monkeypatch):
     assert bench_module.default_modes() == ["eager-fp32", "fast"]
 
 
+def test_benchmark_sync_and_memory_follow_backend_device(monkeypatch):
+    from types import SimpleNamespace
+    import math
+
+    calls = []
+    monkeypatch.setattr(bench_module.torch.mps, "synchronize", lambda: calls.append("mps"))
+    monkeypatch.setattr(bench_module.torch.mps, "driver_allocated_memory", lambda: 2**30)
+    cpu = SimpleNamespace(dev="cpu")
+    mps = SimpleNamespace(dev=bench_module.torch.device("mps"))
+    bench_module.timed(lambda: calls.append("work"), 1, cpu)
+    assert calls == ["work"]
+    assert math.isnan(bench_module.memory_gb(cpu))
+
+    calls.clear()
+    bench_module.timed(lambda: calls.append("work"), 1, mps)
+    assert calls == ["mps", "work", "mps"]
+    assert bench_module.memory_gb(mps) == 1.0
+
+
 def test_named_options_show_keys_by_default():
     assert named_options({"returns": "Returns", "it": "IT"}) == (["returns", "it"], ["returns: Returns", "it: IT"])
     assert named_options({"x": None, "y": "why"})[1] == ["x", "y: why"]

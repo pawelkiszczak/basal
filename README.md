@@ -174,7 +174,7 @@ changes some decisions. The other measured 4-bit formats are not staged.
   44 bundled examples: 1.000 for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.
 - **Memory.** The 4.5B model needs about 9 GB of weights in bf16; on a 16 GB Mac use one of the 8-bit or oQ6e
   checkpoints above, `--mode mlx-q8` (8-bit weights quantised at load time, 4.8 GB) or the 1.5B model.
-  When benchmarking the 4.5B on a 16 GB Mac, use `--modes mps mlx` instead of `eager-fp32` (roughly 18 GB of weights).
+  On a 16 GB Mac, benchmark with `--modes mps mlx` instead of `eager-fp32` (roughly 18 GB of weights).
 - **Speed** (M4 Max, both option orders, bundled examples, cooled GPU): 4.5B 198 ms per decision (`mlx`), 1.5B 67 ms;
   HTTP p50 208 ms for the 4.5B. Apple GPUs are compute-bound on these prompts, so quantised weights save memory but
   not time. See [docs/HARDWARE.md](docs/HARDWARE.md#apple-silicon).
@@ -364,9 +364,9 @@ basal-loadtest --url http://127.0.0.1:8000/v1/systemone
 | `lat2 ms` | median latency of one decision with **both** option orders at batch size 1 (what the server does by default) |
 | `lat1 ms` | the same with one option order |
 | `dec/s` | two-order decisions per second when 32 option-order passes are processed together |
-| `agree` | share of decisions whose top option equals the first mode's (use `eager-fp32` first) |
+| `agree` | share of decisions whose top option equals the first mode's. On Apple Silicon the default reference is bf16 `mps`, **not fp32**; for fp32 agreement, pass `--modes eager-fp32 mps mlx` if memory allows. Each JSON row records `reference_mode`. |
 | `acc` | accuracy against `gold` |
-| `GB` | peak GPU memory |
+| `GB` | CUDA/MLX peak allocation; MPS driver-held memory after the run; unavailable for CPU or backends without PyTorch/MLX memory tracking (GGUF, Ollama, vLLM) |
 
 `basal-loadtest` reports the median and p95 latency of sequential requests and the decisions per second with 32
 concurrent clients.

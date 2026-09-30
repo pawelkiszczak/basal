@@ -1,4 +1,4 @@
-"""Offline benchmark of a serving mode (no HTTP): latency, throughput, agreement with an fp32 reference, accuracy.
+"""Offline benchmark of serving modes (no HTTP): latency, throughput, agreement with the first mode, accuracy.
 
   basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 fast fp8              # bundled examples
   basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 fast --questions my_items.jsonl
@@ -8,7 +8,7 @@ Measured per mode (same definitions as in the technical report):
   lat1_ms  median latency of one decision with ONE option order at batch size 1
   lat2_ms  median latency of one decision with BOTH option orders at batch size 1 (what the server does by default)
   dec_s    two-order decisions per second when 32 option-order passes are processed together
-  agree    share of decisions whose top option equals the first mode's (use eager-fp32 first as the reference)
+  agree    share of decisions whose top option equals the first mode's (default on Apple Silicon: bf16 MPS, not fp32)
   acc      accuracy of the averaged two-order decision (if gold is given)
 """
 import argparse
@@ -90,22 +90,27 @@ def reset_memory():
 
 
 def memory_gb(be):
-    """Peak allocated memory (CUDA, MLX); for MPS the memory held by the Metal driver at the end of the run; not
-    measured for llama.cpp (GGUF), whose buffers torch and MLX do not see."""
-    if isinstance(be, GGUFBackend):
-        return float("nan")
+    """Peak allocated memory (CUDA, MLX); for MPS the memory held by the Metal driver at the end of the run."""
     if isinstance(be, MLXBackend):
         return be.mx.get_peak_memory() / 2**30
-    if torch.cuda.is_available():
-        return torch.cuda.max_memory_allocated() / 2**30
-    if torch.backends.mps.is_available():
-        return torch.mps.driver_allocated_memory() / 2**30
+    dev = getattr(be, "dev", None)
+    if dev is not None:
+        kind = torch.device(dev).type
+        if kind == "cuda":
+            return torch.cuda.max_memory_allocated() / 2**30
+        if kind == "mps":
+            return torch.mps.driver_allocated_memory() / 2**30
     return float("nan")
 
 
-def sync():
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+def sync(be):
+    dev = getattr(be, "dev", None)
+    if dev is not None:
+        kind = torch.device(dev).type
+        if kind == "cuda":
+            torch.cuda.synchronize()
+        elif kind == "mps":
+            torch.mps.synchronize()
 
 
 EXAMPLES = Path(__file__).resolve().parent / "examples"  # installed with the package
@@ -158,9 +163,9 @@ def timed(fn, reps, be=None):
     lat = []
     for _ in range(reps):
         cold(be)
-        sync(); t = time.perf_counter()
+        sync(be); t = time.perf_counter()
         fn()
-        sync(); lat.append(time.perf_counter() - t)
+        sync(be); lat.append(time.perf_counter() - t)
     return lat
 
 
@@ -190,8 +195,8 @@ def main():
     ap.add_argument("--ollama-model", default=None, help="Ollama safetensors import name for --modes ollama")
     ap.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama API root")
     ap.add_argument("--modes", nargs="+", default=None,
-                    help="default: eager-fp32 and serving mode on CUDA; MPS reference and serving mode on Apple Silicon; "
-                         "eager-fp32 and serving mode otherwise; "
+                    help="default: eager-fp32 and serving mode on CUDA; bf16 MPS reference and serving mode on Apple Silicon; "
+                         "eager-fp32 and serving mode otherwise; use --modes eager-fp32 mps mlx for fp32 agreement if memory fits; "
                          "eager-fp32, eager, fast, fast-nocompile, fp8, nvfp4, vllm, fast-exit@off|0.999|0.995|0.99|0.98, "
                          "Apple Silicon: mlx, mlx-q8, mps; llama.cpp: gguf, gguf@<file.gguf>; Ollama: ollama")
     ap.add_argument("--questions", nargs="+", default=DEFAULT_QUESTIONS,
@@ -213,7 +218,8 @@ def main():
         groups = groups_for(be.tok, qs)
         dec, r = measure(be, groups, min(a.lat_n, len(groups) - 5))
         top = [max(range(len(d)), key=d.__getitem__) for d in dec]
-        r = dict(mode=mode, gpu=device_name(), n=len(groups), load_s=round(load_s, 1), **r, mem_gb=memory_gb(be))
+        r = dict(mode=mode, reference_mode=a.modes[0], gpu=device_name(), n=len(groups), load_s=round(load_s, 1),
+                 **r, mem_gb=memory_gb(be))
         if all("gold" in g[0] for g in groups):
             r["acc"] = sum(t == g[0]["gold"] for t, g in zip(top, groups)) / len(groups)
         if ref is None:

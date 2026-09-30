@@ -47,6 +47,13 @@ basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 gguf@basal-1.0-4.5B-
 
 Early exit (`fast-exit`) is not available in this mode.
 
+The general `[test]` extra does not install the native llama.cpp build. To run the GGUF-specific tests, opt in:
+
+```bash
+uv pip install -e ".[test,gguf]" gguf
+pytest -q tests/test_gguf.py
+```
+
 For MLX-native checkpoints of the same models (8-bit, oQ6e; `--mode mlx`), see the
 [README](../README.md#apple-silicon-mlx--mps).
 
