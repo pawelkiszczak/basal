@@ -45,6 +45,16 @@ def build(mode, md, vllm_model=None):
     return GraphBackend(md, "bfloat16", quant, compile=comp, shared=True)
 
 
+def default_modes():
+    """Use MPS instead of a 4.5B fp32 reference when benchmarking on Apple Silicon."""
+    mode = default_mode()
+    if torch.cuda.is_available():
+        return ["eager-fp32", mode]
+    if torch.backends.mps.is_available():
+        return [mode] if mode == "mps" else ["mps", mode]
+    return ["eager-fp32", mode]
+
+
 def device_name():
     if torch.cuda.is_available():
         return torch.cuda.get_device_name(0)
@@ -163,8 +173,8 @@ def main():
     ap.add_argument("--model", default="Remek/basal-1.0-4.5B")
     ap.add_argument("--vllm-model", dest="vllm_model", default=None, help="checkpoint for --modes vllm (e.g. the NVFP4 repo)")
     ap.add_argument("--modes", nargs="+", default=None,
-                    help="default: eager-fp32 and the default serving mode of this machine (fast on CUDA, mlx on Apple "
-                         "Silicon); "
+                    help="default: eager-fp32 and serving mode on CUDA; MPS reference and serving mode on Apple Silicon; "
+                         "eager-fp32 and serving mode otherwise; "
                          "eager-fp32, eager, fast, fast-nocompile, fp8, nvfp4, vllm, fast-exit@off|0.999|0.995|0.99|0.98, "
                          "Apple Silicon: mlx, mlx-q8, mps")
     ap.add_argument("--questions", nargs="+", default=DEFAULT_QUESTIONS,
@@ -173,7 +183,7 @@ def main():
     ap.add_argument("--lat-n", dest="lat_n", type=int, default=100)
     ap.add_argument("--out", default=None, help="write results as JSON")
     a = ap.parse_args()
-    a.modes = a.modes or ["eager-fp32", default_mode()]
+    a.modes = a.modes or default_modes()
     md = resolve(a.model)
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)

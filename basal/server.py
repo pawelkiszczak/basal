@@ -36,14 +36,30 @@ MODES = {
 
 
 def default_mode():
-    """fast on CUDA, mlx on Apple Silicon with MLX installed, mps without it, eager otherwise."""
+    """fast on CUDA, MLX on Apple Silicon when mlx and mlx-lm are installed, MPS otherwise."""
     if torch.cuda.is_available():
         return "fast"
-    try:
-        import mlx.core  # noqa: F401
-        return "mlx"
-    except ImportError:
-        return "mps" if torch.backends.mps.is_available() else "eager"
+    if torch.backends.mps.is_available():
+        try:
+            import mlx.core  # noqa: F401
+            import mlx_lm  # noqa: F401
+            return "mlx"
+        except ImportError:
+            return "mps"
+    return "eager"
+
+
+def validate_quant(mode, quant):
+    """Reject quantisation overrides that the selected backend cannot apply."""
+    if quant is None:
+        return
+    kind = MODES[mode][0]
+    if quant == "q8" and kind == "mlx":
+        return
+    if quant in ("fp8", "nvfp4") and kind in ("graph", "exit"):
+        return
+    supported = "q8 only for MLX; fp8 and nvfp4 only for graph and exit modes"
+    raise SystemExit(f"--quant {quant} is not supported with --mode {mode} ({supported})")
 
 
 def _text(x):
@@ -108,6 +124,7 @@ def models_payload(name, mode, policies):
 
 class Server:
     def __init__(self, a):
+        validate_quant(a.mode, a.quant)
         md = resolve(a.model, a.revision)
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
         kind, quant, comp = MODES[a.mode]
@@ -224,7 +241,7 @@ def parser():
     ap.add_argument("--revision", default=None)
     ap.add_argument("--name", default=None, help="model name reported in responses (default: last part of --model)")
     ap.add_argument("--mode", choices=list(MODES), default=None,
-                    help="default: fast on CUDA, mlx on Apple Silicon (mps without MLX), eager otherwise")
+                    help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx or mlx-lm), eager otherwise")
     ap.add_argument("--quant", choices=["fp8", "nvfp4", "q8"], default=None,
                     help="override the quantisation of the mode (fp8 / nvfp4: CUDA modes, q8: mlx)")
     ap.add_argument("--dtype", default="bfloat16")
@@ -245,6 +262,7 @@ def parser():
 def main():
     a = parser().parse_args()
     a.mode = a.mode or default_mode()
+    validate_quant(a.mode, a.quant)
     from contextlib import asynccontextmanager
 
     import uvicorn

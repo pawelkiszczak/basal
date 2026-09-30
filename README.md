@@ -141,10 +141,11 @@ basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
 ### Apple Silicon (MLX / MPS)
 
 On a Mac with an M-series chip no CUDA index is needed: the PyPI torch wheel includes MPS, and the `mlx` extra adds
-[MLX](https://github.com/ml-explore/mlx). The Apple backends are not in the v1.0.1 tag yet; install from a clone:
+[MLX](https://github.com/ml-explore/mlx). The Apple backends are not in the v1.0.1 tag or the upstream default branch
+yet. Until [PR #1](https://github.com/rkinas/basal/pull/1) merges, install from the fork branch:
 
 ```bash
-git clone https://github.com/rkinas/basal && cd basal
+git clone --branch feat/apple-silicon-mlx-mps https://github.com/pawelkiszczak/basal && cd basal
 uv venv --python 3.12 .venv && source .venv/bin/activate
 uv pip install -e ".[mlx]"
 basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple Silicon: --mode mlx
@@ -154,11 +155,13 @@ basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple S
   start in about a second (nothing is compiled). Agreement with the fp32 reference on the 44 bundled examples: 1.000
   for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.
 - **Memory.** The 4.5B model needs about 9 GB of weights in bf16; on a 16 GB Mac use `--mode mlx-q8` (8-bit weights,
-  4.8 GB) or the 1.5B model.
+  4.8 GB) or the 1.5B model. Use `--modes mps mlx` when benchmarking the 4.5B on a 16 GB Mac:
+  the usual `eager-fp32` reference needs roughly 18 GB of weights.
 - **Speed** (M4 Max, both option orders, bundled examples): 4.5B 266 ms per decision (`mlx`), 1.5B 87 ms; HTTP p50
   208 ms for the 4.5B. Apple GPUs are compute-bound on these prompts, so 8-bit weights save memory but not time.
   See [docs/HARDWARE.md](docs/HARDWARE.md#apple-silicon).
 - `fast*`, `fp8`, `nvfp4`, `fast-exit` and `vllm` need CUDA; early exit is not available on Apple backends.
+  Quantisation overrides are backend-specific (`--quant q8` only with `mlx`, `--quant fp8` / `nvfp4` only with CUDA graph modes).
 
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
