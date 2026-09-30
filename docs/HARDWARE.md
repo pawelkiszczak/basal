@@ -17,7 +17,7 @@ on a private 500-item sample of the Polish/English test split.
 | Desktop with unified memory (DGX Spark GB10) | `fp8` | memory-bandwidth-bound; FP8 halves latency |
 | Batched high-throughput serving on Blackwell | `vllm` + `-NVFP4` checkpoint | 3.2× throughput on the DGX Spark (the only machine where it was measured), but −3 accuracy points |
 | A100 and other GPUs without FP8 (not measured) | `fast` | the bf16 path runs on any sm80+ GPU |
-| Apple Silicon (M-series Mac) | `mlx` (`mlx-q8` on 16 GB Macs) | compute-bound: bf16 is fastest, 8-bit weights halve memory at no speed gain; see [Apple Silicon](#apple-silicon) |
+| Apple Silicon (M-series Mac) | `mlx` with the original checkpoint; `gguf` with the F16 GGUF for the closest match to fp32; 8-bit / oQ6e checkpoints on 16 GB Macs | compute-bound: every format runs at the same speed, quantised weights only save memory; published checkpoints in the [README](../README.md#apple-silicon-mlx--mps), details in [Apple Silicon](#apple-silicon) |
 
 Add `--mode fast-exit` to let requests choose `"early_exit": "0.99"` (about 1.15× faster, agreement ≥ 0.99).
 
@@ -174,8 +174,15 @@ the same items are wrong in every faithful engine.
 
 #### Quantised formats: MLX, oMLX oQ, GGUF
 
-Pre-converted MLX checkpoints load directly in `--mode mlx` (the mlx-lm quantisation in their `config.json` is
-applied; copy `CALIBRATION.json` from the original repository into the directory so the temperatures apply):
+Published conversions: [MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-MLX-8bit) and
+[oQ6e](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-oQ6e) of the 4.5B,
+[MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-MLX-8bit) and
+[oQ6e](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-oQ6e) of the 1.5B (with `CALIBRATION.json`, for
+`--mode mlx --model <repo>`), and the GGUF files
+([4.5B](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF), [1.5B](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF)).
+The other formats below can be converted locally. Pre-converted MLX checkpoints load directly in `--mode mlx` (the
+mlx-lm quantisation in their `config.json` is applied; copy `CALIBRATION.json` from the original repository into the
+directory so the temperatures apply):
 
 ```bash
 python -m mlx_lm convert --hf-path <basal dir> --mlx-path basal-1.5B-q8 -q --q-bits 8 --q-group-size 64

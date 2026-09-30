@@ -7,7 +7,17 @@ Only the weights come from the GGUF file. The tokenizer, chat template and `CALI
 orders share their prefix as llama.cpp *sequences*: the prefix tokens belong to the sequences of both orders, each
 order's option block to its own sequence, and all questions of a batch go through one `llama_decode`.
 
-## Convert
+## Download
+
+Converted files (F16, Q8_0, Q4_K_M, measured below):
+[pawelkiszczak/basal-1.0-4.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF) and
+[pawelkiszczak/basal-1.0-1.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF).
+
+```bash
+hf download pawelkiszczak/basal-1.0-4.5B-GGUF basal-1.0-4.5B-F16.gguf --local-dir .
+```
+
+## Convert yourself
 
 The converter lives in the llama.cpp repository and needs transformers 5 (the pinned 4.x cannot read the tokenizer
 config of basal-1.0-1.5B):
@@ -35,6 +45,9 @@ basal-bench --model Remek/basal-1.0-4.5B --modes eager-fp32 gguf@basal-1.0-4.5B-
 ```
 
 Early exit (`fast-exit`) is not available in this mode.
+
+For MLX-native checkpoints of the same models (8-bit, oQ6e; `--mode mlx`), see the
+[README](../README.md#apple-silicon-mlx--mps).
 
 ## Which file
 

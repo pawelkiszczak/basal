@@ -150,16 +150,32 @@ uv pip install -e ".[mlx]"
 basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple Silicon: --mode mlx
 ```
 
+Ready-made Apple Silicon checkpoints (measured on an M4 Max; all run at the same speed, they differ in memory and in
+how closely they follow the fp32 reference, see [docs/HARDWARE.md](docs/HARDWARE.md#quantised-formats-mlx-omlx-oq-gguf)):
+
+| use | 4.5B | 1.5B | start with |
+|---|---|---|---|
+| default (bf16) | [Remek/basal-1.0-4.5B](https://huggingface.co/Remek/basal-1.0-4.5B) (9.5 GB) | [Remek/basal-1.0-1.5B](https://huggingface.co/Remek/basal-1.0-1.5B) (3.2 GB) | `--mode mlx --model <repo>` |
+| closest to fp32 | [GGUF F16](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF) (9.5 GB) | [GGUF F16](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF) (3.2 GB) | `--mode gguf --model Remek/basal-1.0-<size> --gguf <file>` |
+| half the memory | [MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-MLX-8bit) (5.1 GB) or [GGUF Q8_0](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF) (5.1 GB) | [MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-MLX-8bit) (1.7 GB) or [GGUF Q8_0](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF) (1.7 GB) | `--mode mlx --model <repo>` / `--mode gguf` |
+| least memory at the agreement of bf16 | [oQ6e](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-oQ6e) (4.0 GB) | [oQ6e](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-oQ6e) (1.3 GB) | `--mode mlx --model <repo>` |
+
+The MLX repositories include `CALIBRATION.json`, so `--model pawelkiszczak/basal-1.0-4.5B-MLX-8bit` is all the server
+needs; for GGUF, `--model` stays the original repository (tokenizer and calibration) and `--gguf` points to the
+downloaded file ([docs/GGUF.md](docs/GGUF.md)). 4-bit formats change some decisions and are not published.
+
 - `mlx` (default when MLX is installed) and `mps` (PyTorch) both use the shared prefix and batching of `fast` and
   start in about a second (nothing is compiled). Agreement with the fp32 reference on the 44 bundled examples: 1.000
   for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.
-- **Memory.** The 4.5B model needs about 9 GB of weights in bf16; on a 16 GB Mac use `--mode mlx-q8` (8-bit weights,
-  4.8 GB) or the 1.5B model.
-- **Speed** (M4 Max, both option orders, bundled examples): 4.5B 266 ms per decision (`mlx`), 1.5B 87 ms; HTTP p50
-  208 ms for the 4.5B. Apple GPUs are compute-bound on these prompts, so 8-bit weights save memory but not time.
-  See [docs/HARDWARE.md](docs/HARDWARE.md#apple-silicon).
-- **GGUF / llama.cpp**: `--mode gguf --gguf <file.gguf>` runs a converted checkpoint through llama.cpp (Metal here,
-  CUDA or CPU elsewhere); F16 is the closest to fp32 of all reduced-precision paths, Q8_0 halves the memory. See
+- **Memory.** The 4.5B model needs about 9 GB of weights in bf16; on a 16 GB Mac use one of the 8-bit or oQ6e
+  checkpoints above, `--mode mlx-q8` (8-bit weights quantised at load time, 4.8 GB) or the 1.5B model.
+- **Speed** (M4 Max, both option orders, bundled examples, cooled GPU): 4.5B 198 ms per decision (`mlx`), 1.5B 67 ms;
+  HTTP p50 208 ms for the 4.5B. Apple GPUs are compute-bound on these prompts, so quantised weights save memory but
+  not time. See [docs/HARDWARE.md](docs/HARDWARE.md#apple-silicon).
+- **GGUF / llama.cpp**: `--mode gguf --gguf <file.gguf>` runs a GGUF checkpoint through llama.cpp (Metal here, CUDA or
+  CPU elsewhere); F16 is the closest to fp32 of all reduced-precision paths, Q8_0 halves the memory. Files:
+  [pawelkiszczak/basal-1.0-4.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF),
+  [pawelkiszczak/basal-1.0-1.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF); see
   [docs/GGUF.md](docs/GGUF.md).
 - `fast*`, `fp8`, `nvfp4` and `fast-exit` need CUDA; early exit is not available on Apple backends. `vllm` also runs
   on [vllm-metal](https://github.com/vllm-project/vllm-metal) with a patched `config.json`
