@@ -141,27 +141,56 @@ basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
 ### Apple Silicon (MLX / MPS)
 
 On a Mac with an M-series chip no CUDA index is needed: the PyPI torch wheel includes MPS, and the `mlx` extra adds
-[MLX](https://github.com/ml-explore/mlx). The Apple backends are not in the v1.0.1 tag or the upstream default branch
-yet. Until [PR #1](https://github.com/rkinas/basal/pull/1) merges, install from the fork branch:
+[MLX](https://github.com/ml-explore/mlx). Both backends are on the fork's `main` branch, not yet in
+[`rkinas/basal`](https://github.com/rkinas/basal). Install from the fork:
 
 ```bash
-git clone --branch feat/apple-silicon-mlx-mps https://github.com/pawelkiszczak/basal && cd basal
+git clone --branch main https://github.com/pawelkiszczak/basal && cd basal
 uv venv --python 3.12 .venv && source .venv/bin/activate
-uv pip install -e ".[mlx]"
+uv pip install -e ".[mlx,gguf]"
 basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple Silicon: --mode mlx
 ```
 
-- `mlx` (default when MLX is installed) and `mps` (PyTorch) both use the shared prefix and batching of `fast` and
-  start in about a second (nothing is compiled). Agreement with the fp32 reference on the 44 bundled examples: 1.000
-  for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.
-- **Memory.** The 4.5B model needs about 9 GB of weights in bf16; on a 16 GB Mac use `--mode mlx-q8` (8-bit weights,
-  4.8 GB) or the 1.5B model. Use `--modes mps mlx` when benchmarking the 4.5B on a 16 GB Mac:
-  the usual `eager-fp32` reference needs roughly 18 GB of weights.
-- **Speed** (M4 Max, both option orders, bundled examples): 4.5B 266 ms per decision (`mlx`), 1.5B 87 ms; HTTP p50
-  208 ms for the 4.5B. Apple GPUs are compute-bound on these prompts, so 8-bit weights save memory but not time.
-  See [docs/HARDWARE.md](docs/HARDWARE.md#apple-silicon).
-- `fast*`, `fp8`, `nvfp4`, `fast-exit` and `vllm` need CUDA; early exit is not available on Apple backends.
-  Quantisation overrides are backend-specific (`--quant q8` only with `mlx`, `--quant fp8` / `nvfp4` only with CUDA graph modes).
+Ready-made Apple Silicon checkpoints (the converted repos linked below are **private until their publisher releases
+them**; the original bf16 repos are public). Measured on an M4 Max; all run at about the same speed, but differ in
+memory and fidelity ([details](docs/HARDWARE.md#quantised-formats-mlx-omlx-oq-gguf)):
+
+| use | 4.5B | 1.5B | start with |
+|---|---|---|---|
+| default (bf16) | [Remek/basal-1.0-4.5B](https://huggingface.co/Remek/basal-1.0-4.5B) (9.5 GB) | [Remek/basal-1.0-1.5B](https://huggingface.co/Remek/basal-1.0-1.5B) (3.2 GB) | `--mode mlx --model <repo>` |
+| closest to fp32 | [GGUF F16](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF) (9.5 GB) | [GGUF F16](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF) (3.2 GB) | `--mode gguf --model Remek/basal-1.0-<size> --gguf <file>` |
+| half the memory | [MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-MLX-8bit) (5.1 GB) or [GGUF Q8_0](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF) (5.1 GB) | [MLX 8-bit](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-MLX-8bit) (1.7 GB) or [GGUF Q8_0](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF) (1.7 GB) | `--mode mlx --model <repo>` / `--mode gguf` |
+| least memory at the agreement of bf16 | [oQ6e](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-oQ6e) (4.0 GB) | [oQ6e](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-oQ6e) (1.3 GB) | `--mode mlx --model <repo>` |
+
+The MLX repositories include `CALIBRATION.json`, so `--model pawelkiszczak/basal-1.0-4.5B-MLX-8bit` is all the server
+needs; for GGUF, `--model` stays the original repository (tokenizer and calibration) and `--gguf` points to the
+downloaded file ([docs/GGUF.md](docs/GGUF.md)). GGUF Q4_K_M is staged in a private repo but not recommended: it
+changes some decisions. The other measured 4-bit formats are not staged.
+
+![Selected Apple Silicon checkpoints: memory vs faithfulness](docs/figures/apple_memory_vs_fidelity.png)
+
+- `mlx` (default when MLX and mlx-lm are installed) and `mps` (PyTorch) both use the shared prefix and batching of
+  `fast`. Neither compiles; startup still includes model download and loading. Agreement with the fp32 reference on the
+  44 bundled examples: 1.000 for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.
+- **Memory.** The 4.5B model needs about 9 GB of weights in bf16; on a 16 GB Mac use one of the 8-bit or oQ6e
+  checkpoints above, `--mode mlx-q8` (8-bit weights quantised at load time, 4.8 GB) or the 1.5B model.
+  When benchmarking the 4.5B on a 16 GB Mac, use `--modes mps mlx` instead of `eager-fp32` (roughly 18 GB of weights).
+- **Speed** (M4 Max, both option orders, bundled examples, cooled GPU): 4.5B 198 ms per decision (`mlx`), 1.5B 67 ms;
+  HTTP p50 208 ms for the 4.5B. Apple GPUs are compute-bound on these prompts, so quantised weights save memory but
+  not time. See [docs/HARDWARE.md](docs/HARDWARE.md#apple-silicon).
+- **GGUF / llama.cpp**: `--mode gguf --gguf <file.gguf>` runs a GGUF checkpoint through llama.cpp (Metal here, CUDA or
+  CPU elsewhere); F16 is the closest to fp32 of all reduced-precision paths, Q8_0 halves the memory. Files:
+  [pawelkiszczak/basal-1.0-4.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF),
+  [pawelkiszczak/basal-1.0-1.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF); see
+  [docs/GGUF.md](docs/GGUF.md).
+- **Ollama**: `--mode ollama --ollama-model <name>` reads letter logprobs from a *safetensors import of the original
+  checkpoint*, not an MLX/GGUF conversion. Ollama takes text rather than token IDs; it can omit a letter from its
+  top-20 list, in which case basal reports an error instead of returning invented probabilities. See
+  [Ollama setup and limitations](docs/HARDWARE.md#ollama-safetensors-import).
+- `fast*`, `fp8`, `nvfp4` and `fast-exit` need CUDA; early exit is not available on Apple backends. `vllm` also runs
+  on [vllm-metal](https://github.com/vllm-project/vllm-metal) with a patched `config.json`
+  ([engine comparison](docs/HARDWARE.md#inference-engines-on-apple-silicon)).
+  Quantisation overrides are backend-specific (`--quant q8` for `mlx`; `--quant fp8` / `nvfp4` for CUDA graph modes).
 
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -291,6 +320,8 @@ for line in open("basal/examples/questions.jsonl"):
 | `mlx` *(default on Apple Silicon)* | MLX bf16 + shared prefix + token-budget batching | Apple Silicon (`[mlx]` extra) |
 | `mlx-q8` | `mlx` with 8-bit weights: about half the memory, not faster | Apple Silicon |
 | `mps` | PyTorch MPS + shared prefix + token-budget batching (no graphs) | Apple Silicon |
+| `gguf` | llama.cpp on a converted GGUF file (`--gguf`), shared prefix as llama.cpp sequences ([docs/GGUF.md](docs/GGUF.md)) | Apple Silicon (Metal), CUDA, CPU (`[gguf]` extra) |
+| `ollama` | Ollama safetensors import via raw text and next-token logprobs (two HTTP calls per decision; `--ollama-model`) | Apple Silicon or other Ollama hosts |
 | `eager` | plain PyTorch reference | any GPU (CUDA or Apple MPS) or CPU |
 
 - **Two option orders** (`--orders 2`, default): every question is asked with the options in original and reversed

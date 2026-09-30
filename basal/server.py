@@ -15,7 +15,9 @@ import time
 
 import torch
 
-from .engine import EagerBackend, ExitGraphBackend, GraphBackend, MLXBackend, MPSBackend, VLLMBackend, resolve
+from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, MLXBackend, MPSBackend, VLLMBackend,
+                     resolve)
+from .ollama import OllamaBackend
 from .prompt import MAX_OPTIONS, lang_of, letter_ids, render
 
 RELEASE_DATE = "2026-10-01"
@@ -32,6 +34,8 @@ MODES = {
     "mlx": ("mlx", None, False),            # Apple Silicon: MLX bf16 + shared prefix (recommended on Mac)
     "mlx-q8": ("mlx", "q8", False),         # "mlx" with 8-bit weights (less memory, not faster)
     "mps": ("mps", None, False),            # Apple Silicon: PyTorch MPS + shared prefix, no graphs
+    "gguf": ("gguf", None, False),          # llama.cpp on a GGUF file (--gguf; Metal, CUDA or CPU) + shared prefix
+    "ollama": ("ollama", None, False),     # Ollama safetensors import; raw prompts + next-token logprobs
 }
 
 
@@ -125,6 +129,8 @@ def models_payload(name, mode, policies):
 class Server:
     def __init__(self, a):
         validate_quant(a.mode, a.quant)
+        if a.mode == "ollama" and not a.ollama_model:
+            raise SystemExit("--mode ollama needs --ollama-model <name> (an Ollama safetensors import of --model)")
         md = resolve(a.model, a.revision)
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
         kind, quant, comp = MODES[a.mode]
@@ -140,6 +146,12 @@ class Server:
             self.backend = MLXBackend(md, a.dtype, quant)
         elif kind == "mps":
             self.backend = MPSBackend(md, a.dtype, shared=a.orders == 2)
+        elif kind == "gguf":
+            if not a.gguf:
+                raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
+            self.backend = GGUFBackend(md, a.gguf)
+        elif kind == "ollama":
+            self.backend = OllamaBackend(md, a.ollama_model, a.ollama_url)
         else:
             self.backend = GraphBackend(md, a.dtype, quant, compile=comp, shared=a.orders == 2)
         self.tok = self.backend.tok
@@ -251,6 +263,9 @@ def parser():
     ap.add_argument("--exit-heads", dest="exit_heads", default=None, help="exit heads dir (default: <model>/exit_heads)")
     ap.add_argument("--no-calibration", dest="no_calibration", action="store_true")
     ap.add_argument("--gpu-memory", dest="gpu_memory", type=float, default=0.6, help="vLLM memory fraction")
+    ap.add_argument("--gguf", default=None, help="GGUF weights for --mode gguf (converted from --model, see docs/GGUF.md)")
+    ap.add_argument("--ollama-model", default=None, help="Ollama safetensors import name for --mode ollama")
+    ap.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Ollama API root for --mode ollama")
     ap.add_argument("--max-batch", dest="max_batch", type=int, default=64)
     ap.add_argument("--wait-ms", dest="wait_ms", type=float, default=0.0,
                     help="extra time to wait for more requests before a forward (default 0: adaptive batching)")

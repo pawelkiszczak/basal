@@ -50,6 +50,25 @@ class FakeServer(Server):
             w.cancel()
 
 
+def test_default_mode_prefers_cuda_over_mlx(monkeypatch):
+    monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)
+    assert default_mode() == "fast"
+
+
+def test_benchmark_mps_default_avoids_eager_fp32(monkeypatch):
+    monkeypatch.setattr(bench_module, "default_mode", lambda: "mlx")
+    monkeypatch.setattr(bench_module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(bench_module.torch.backends.mps, "is_available", lambda: True)
+    assert bench_module.default_modes() == ["mps", "mlx"]
+
+
+def test_benchmark_cuda_default_preserves_fp32_reference(monkeypatch):
+    monkeypatch.setattr(bench_module, "default_mode", lambda: "fast")
+    monkeypatch.setattr(bench_module.torch.cuda, "is_available", lambda: True)
+    assert bench_module.default_modes() == ["eager-fp32", "fast"]
+
+
 def test_named_options_show_keys_by_default():
     assert named_options({"returns": "Returns", "it": "IT"}) == (["returns", "it"], ["returns: Returns", "it: IT"])
     assert named_options({"x": None, "y": "why"})[1] == ["x", "y: why"]
@@ -86,7 +105,8 @@ def test_model_list_conforms_to_official_schema():
     jsonschema.validate(models_payload("basal-1.0-4.5B", "fast", {"0.99": None}), schema("ModelMetadataList"))
 
 @pytest.mark.parametrize(("mode", "quant"), [
-    ("mlx", "fp8"), ("mps", "q8"), ("eager", "nvfp4"), ("fast", "q8"),
+    ("eager", "fp8"), ("fast", "q8"), ("mps", "fp8"), ("mlx", "nvfp4"),
+    ("vllm", "fp8"), ("gguf", "q8"), ("mlx", "fp8"), ("mps", "q8"), ("eager", "nvfp4"),
 ])
 def test_unsupported_quant_fails_before_model_loading(monkeypatch, mode, quant):
     monkeypatch.setattr(sys, "argv", ["basal-serve", "--mode", mode, "--quant", quant])
@@ -100,26 +120,6 @@ def test_default_mode_requires_both_mlx_packages_on_mps(monkeypatch):
     monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)
     monkeypatch.setitem(sys.modules, "mlx_lm", None)
     assert default_mode() == "mps"
-
-
-def test_default_mode_prefers_cuda_over_mlx(monkeypatch):
-    monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)
-    assert default_mode() == "fast"
-
-
-def test_benchmark_mps_default_avoids_eager_fp32(monkeypatch):
-    monkeypatch.setattr(bench_module, "default_mode", lambda: "mlx")
-    monkeypatch.setattr(bench_module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(bench_module.torch.backends.mps, "is_available", lambda: True)
-    assert bench_module.default_modes() == ["mps", "mlx"]
-
-
-def test_benchmark_cuda_default_preserves_fp32_reference(monkeypatch):
-    monkeypatch.setattr(bench_module, "default_mode", lambda: "fast")
-    monkeypatch.setattr(bench_module.torch.cuda, "is_available", lambda: True)
-    assert bench_module.default_modes() == ["eager-fp32", "fast"]
-
 
 def swapped_prompts_differ(crit_a, crit_b, t="choice"):
     q = lambda c: to_items("Customer selected shipping service B.", {"q": {"type": t, "instructions": "Which code?",
