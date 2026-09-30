@@ -73,7 +73,7 @@ call; *TV*: total-variation distance between the averaged two-order probabilitie
 - **Q4_K_M** changes about 5% of the decisions and moves single probabilities by up to 0.3–0.45: not recommended.
 - Weight quantisation does not make prefill faster here: Apple GPUs are compute-bound on these prompts.
 
-![Memory vs faithfulness of the MLX and GGUF variants](figures/apple_memory_vs_fidelity.png)
+![Published Apple Silicon checkpoints: memory vs faithfulness](figures/apple_memory_vs_fidelity.png)
 
 Per-item deviations of every variant and of other engines:
 [HARDWARE.md, inference engines on Apple Silicon](HARDWARE.md#inference-engines-on-apple-silicon).

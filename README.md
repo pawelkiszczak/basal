@@ -164,6 +164,8 @@ The MLX repositories include `CALIBRATION.json`, so `--model pawelkiszczak/basal
 needs; for GGUF, `--model` stays the original repository (tokenizer and calibration) and `--gguf` points to the
 downloaded file ([docs/GGUF.md](docs/GGUF.md)). 4-bit formats change some decisions and are not published.
 
+![Published Apple Silicon checkpoints: memory vs faithfulness](docs/figures/apple_memory_vs_fidelity.png)
+
 - `mlx` (default when MLX is installed) and `mps` (PyTorch) both use the shared prefix and batching of `fast` and
   start in about a second (nothing is compiled). Agreement with the fp32 reference on the 44 bundled examples: 1.000
   for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.

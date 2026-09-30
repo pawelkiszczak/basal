@@ -214,7 +214,7 @@ cool-down; *TV*: mean / max total-variation distance to fp32, *changed*: decisio
 | oMLX oQ3e | 0.74 | 69 | 0.1565 / 0.453 | 7 | – | – | – | – |
 | MLX mxfp4 | 0.85 | 71 | 0.2029 / 0.796 | 9 | 2.53 | 204 | 0.1003 / 0.529 | 4 |
 
-![Size vs faithfulness of the quantised formats](figures/apple_formats_size_vs_fidelity.png)
+![Size vs faithfulness of the quantised formats (ringed: published checkpoints)](figures/apple_formats_size_vs_fidelity.png)
 
 - **No format is faster**: the Apple GPU is compute-bound on these prompts, so every format of a model runs within
   15% of bf16. Quantisation only saves memory.

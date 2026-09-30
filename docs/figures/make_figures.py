@@ -38,6 +38,7 @@ def place_labels(ax, points):
     the markers."""
     from matplotlib.transforms import Bbox
     renderer = ax.figure.canvas.get_renderer()
+    frame = ax.get_window_extent(renderer)
     placed = [ax.get_legend().get_window_extent(renderer)] if ax.get_legend() else []
     marks = []
     for x, y, _ in points:
@@ -53,7 +54,8 @@ def place_labels(ax, points):
                             else None)
             t.update_positions(renderer)
             box = Text.get_window_extent(t, renderer).expanded(1.03, 1.25)  # the text only, not the leader line
-            if not any(box.overlaps(b) for b in placed if b is not marks[j]):
+            inside = frame.x0 <= box.x0 and box.x1 <= frame.x1 and frame.y0 <= box.y0 and box.y1 <= frame.y1
+            if inside and not any(box.overlaps(b) for b in placed if b is not marks[j]):
                 placed.append(box)
                 break
             t.remove()
@@ -231,22 +233,35 @@ def gold_prob_heatmap():
     fig.savefig(HERE / "apple_gold_prob_heatmap.png")
 
 
+# checkpoints published on Hugging Face (README, "Ready-made Apple Silicon checkpoints"); keys of D["formats"]
+PUBLISHED = {"basal-mlx", "basal-gguf:F16", "basal-gguf:Q8_0", "basal-gguf:Q4_K_M", "mlx-q8", "mlx-oQ6e"}
+
+
 def memory_vs_fidelity():
-    fig, ax = plt.subplots(figsize=(6.8, 4.3))
-    fmt = {"MLX": COLORS["basal"], "GGUF (llama.cpp)": COLORS["llama.cpp"]}
-    for p in D["memory_4.5B"]:
-        c = fmt["MLX"] if p["label"].startswith("mlx") else fmt["GGUF (llama.cpp)"]
-        ax.scatter(p["gb"], max(p["tv_mean"], TV_FLOOR), s=60, color=c, zorder=3)
-        ax.annotate(f"{p['label']} · {p['ms']:.0f} ms", (p["gb"], max(p["tv_mean"], TV_FLOOR)), xytext=(6, 2),
-                    textcoords="offset points", fontsize=8)
-    ax.legend(handles=[Patch(color=c, label=k) for k, c in fmt.items()], frameon=False, loc="upper right")
-    ax.set_yscale("log")
-    ax.set_xlim(2, 11.5)
-    ax.set_xlabel("weights in memory (GB; GGUF: file size)")
-    ax.set_ylabel("mean TV distance to fp32 (log)")
-    ax.set_title("basal-1.0-4.5B on Apple Silicon: memory vs faithfulness")
-    ax.grid(alpha=0.25)
+    """The published checkpoints of both models: memory vs faithfulness, latency in the labels."""
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.8))
+    for ax, model in zip(axes, ("1.5B", "4.5B")):
+        rows = [r for r in D["formats"][model] if r["key"] in PUBLISHED]
+        for r in rows:
+            ax.scatter(r["gb"], max(r["tv_mean"], TV_FLOOR), s=70, color=FORMAT_COLORS[r["family"]], zorder=3,
+                       edgecolor="white", linewidth=0.6)
+        ax.set_yscale("log")
+        ax.margins(x=0.2, y=0.25)
+        ax.set_xlabel("weights (GB)")
+        ax.set_ylabel("mean TV distance to fp32 (log)")
+        ax.set_title(f"basal-1.0-{model}")
+        ax.grid(alpha=0.25)
+        if model == "1.5B":
+            format_legend(ax, families={r["family"] for r in rows}, loc="upper right", fontsize=8)
+    fig.suptitle("Published Apple Silicon checkpoints: memory vs faithfulness (labels: ms per decision)",
+                 fontsize=11)
     fig.tight_layout()
+    fig.canvas.draw()
+    for ax, model in zip(axes, ("1.5B", "4.5B")):
+        rows = [r for r in D["formats"][model] if r["key"] in PUBLISHED]
+        place_labels(ax, [(r["gb"], max(r["tv_mean"], TV_FLOOR),
+                           f"{r['label']} · {r['ms']:.0f} ms")
+                          for r in sorted(rows, key=lambda r: r["gb"])])
     fig.savefig(HERE / "apple_memory_vs_fidelity.png")
 
 
@@ -254,8 +269,12 @@ FORMAT_COLORS = {"bf16": "#222222", "MLX affine": "#1f6fb4", "MLX microscaling":
                  "GGUF": "#e07b1f"}
 
 
-def format_legend(ax, **kw):
-    ax.legend(handles=[Patch(color=c, label=f) for f, c in FORMAT_COLORS.items()], title="format", frameon=False, **kw)
+def format_legend(ax, published=False, families=None, **kw):
+    handles = [Patch(color=c, label=f) for f, c in FORMAT_COLORS.items() if families is None or f in families]
+    if published:
+        handles.append(plt.Line2D([], [], marker="o", color="w", markerfacecolor="#ccc", markeredgecolor="black",
+                                  markeredgewidth=1.6, markersize=9, label="published on Hugging Face"))
+    ax.legend(handles=handles, title="format", frameon=False, **kw)
 
 
 def formats_size_vs_fidelity():
@@ -263,8 +282,9 @@ def formats_size_vs_fidelity():
     for ax, model in zip(axes, ("1.5B", "4.5B")):
         rows = D["formats"][model]
         for r in rows:
-            ax.scatter(r["gb"], max(r["tv_mean"], TV_FLOOR), s=55, color=FORMAT_COLORS[r["family"]], zorder=3,
-                       edgecolor="white", linewidth=0.6)
+            pub = r["key"] in PUBLISHED
+            ax.scatter(r["gb"], max(r["tv_mean"], TV_FLOOR), s=90 if pub else 55, color=FORMAT_COLORS[r["family"]],
+                       zorder=4 if pub else 3, edgecolor="black" if pub else "white", linewidth=1.6 if pub else 0.6)
         ax.set_yscale("log")
         ax.margins(x=0.15, y=0.2)
         ax.set_xlabel("weights on disk (GB)")
@@ -272,7 +292,7 @@ def formats_size_vs_fidelity():
         ax.set_title(f"basal-1.0-{model}: {len(rows)} formats (all ~same speed, see table)")
         ax.grid(alpha=0.25, zorder=0)
         if model == "1.5B":
-            format_legend(ax, loc="upper right")
+            format_legend(ax, published=True, loc="upper right")
     fig.suptitle(f"Quantised formats on {D['machine']}: size vs faithfulness (lower left is better)", fontsize=11)
     fig.tight_layout()
     fig.canvas.draw()
