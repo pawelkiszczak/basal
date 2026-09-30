@@ -141,11 +141,12 @@ basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
 ### Apple Silicon (MLX / MPS)
 
 On a Mac with an M-series chip no CUDA index is needed: the PyPI torch wheel includes MPS, and the `mlx` extra adds
-[MLX](https://github.com/ml-explore/mlx). Until these PRs merge into
-[`rkinas/basal`](https://github.com/rkinas/basal), install from the fork branch containing both backends:
+[MLX](https://github.com/ml-explore/mlx). These backends are on the fork's `dev` branch, not yet in
+[`rkinas/basal`](https://github.com/rkinas/basal). After the GGUF/Ollama PR merges into `dev`, install both from
+there; to try that PR before the merge, substitute `feat/gguf-llamacpp` for `dev`:
 
 ```bash
-git clone --branch feat/gguf-llamacpp https://github.com/pawelkiszczak/basal && cd basal
+git clone --branch dev https://github.com/pawelkiszczak/basal && cd basal
 uv venv --python 3.12 .venv && source .venv/bin/activate
 uv pip install -e ".[mlx,gguf]"
 basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple Silicon: --mode mlx

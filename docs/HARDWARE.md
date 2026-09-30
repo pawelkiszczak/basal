@@ -123,7 +123,7 @@ probabilities to the fp32 PyTorch reference.
 | mlx_lm.server 0.31 (`top_logprobs` 11) ¹ | 374 | 3.1 | 153 | 7.6 | 1.000 / 0.955 | 0.0053 / 0.031 |
 | llama-server b11146 F16 (token ids, `n_probs` 20) | **191** | 5.1 | 79 | 13.2 | 1.000 / 1.000 | 0.0005 / 0.005 |
 | MTPLX 2.12, prompt-scoring lane (`echo`, `max_tokens` 0) ¹ | 339 | 2.9 | 129 | 8.0 | 0.977 / 0.977 | 0.0059 / 0.043 |
-| Ollama 0.34, safetensors import ³ | 280 | 3.3 | 105 | 9.0 | 1.000 / 0.977 | 0.0055 / 0.059 |
+| basal `ollama` (Ollama 0.34.4, original safetensors import) ³ | 276 | 3.3 | 104 | 9.0 | 1.000 / 0.977 | 0.0055 / 0.059 |
 | LM Studio, llama.cpp engine, F16 GGUF (chat with assistant prefill) ² | 211 | 5.8 | 80 | 16.5 | 0.955 / 0.977 | 0.0607 / 0.630 |
 
 ¹ These engines build the model with mlx-lm's Llama, which does not read `rope_parameters` (transformers 5) and falls
@@ -161,11 +161,11 @@ paths stay at 1e-3–1e-2, and F16 through llama.cpp mostly below 1e-3. Items wh
 #### Ollama safetensors import
 
 Ollama 0.34.4 exposes next-token `logprobs` on `/api/generate`. basal's `--mode ollama` renders its normal
-prompt and asks Ollama for the top 20 tokens (`raw: true`, one generated token). It uses two HTTP calls for the
-two option orders and errors if any option letter is missing from the top-20 list; unlike `mlx` and `gguf`, Ollama
-cannot take the original tokenizer's token IDs as a prompt. The comparison row above used an **original
-safetensors import**, not a GGUF file or an MLX quantisation. These converted files must be run with their
-respective basal backends.
+prompt (including the leading BOS token) and asks Ollama for the top 20 tokens (`raw: true`, one generated token).
+It uses two HTTP calls for the two option orders and errors if any option letter is missing from the top-20 list;
+unlike `mlx` and `gguf`, Ollama cannot take the original tokenizer's token IDs as a prompt. The row and plots above
+measure the packaged backend with an **original safetensors import** on the 44 bundled items, including per-item
+probabilities for the quality plots; they do not describe a GGUF file or an MLX quantisation.
 
 Ollama's Llama loader needs `rope_theta` at the top level of `config.json`; the source model stores it under
 `rope_parameters`. Patch only a local copy for Ollama (the original model and weights remain unchanged):
@@ -189,7 +189,7 @@ basal-serve --mode ollama --model Remek/basal-1.0-1.5B --ollama-model basal-1.5b
 safetensors import. The server checks the Ollama model's architecture and vocabulary against `--model`.
 For a non-default Ollama host use `--ollama-url`. To benchmark it:
 `basal-bench --model Remek/basal-1.0-1.5B --modes mps ollama --ollama-model basal-1.5b`.
-The 44-item row above predates this packaged backend and comes from the equivalent raw Ollama API benchmark.
+The 44-item row and plots above measure the packaged `--mode ollama` backend, replacing the earlier raw-API timing.
 
 #### Quality
 

@@ -36,9 +36,6 @@ class OllamaBackend:
     def run(self, prompts, ids_list, policy=None):
         out = []
         for prompt, ids in zip(prompts, ids_list):
-            # Ollama otherwise prepends the BOS token a second time to raw text.
-            if self.tok.bos_token and prompt.startswith(self.tok.bos_token):
-                prompt = prompt[len(self.tok.bos_token):]
             want = {self.tok.convert_ids_to_tokens(i).replace("▁", " ").encode(): j
                     for j, i in enumerate(ids)}
             if len(want) != len(ids):

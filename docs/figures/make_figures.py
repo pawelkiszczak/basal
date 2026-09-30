@@ -17,7 +17,7 @@ from matplotlib.text import Text
 HERE = Path(__file__).parent
 D = json.loads((HERE / "apple_engines.json").read_text())
 MODELS = ("4.5B", "1.5B")
-COLORS = {"basal": "#1f6fb4", "llama.cpp": "#e07b1f", "mlx-lm based": "#2a9d55", "other": "#8a8a8a"}
+COLORS = {"basal": "#1f6fb4", "llama.cpp": "#e07b1f", "mlx-lm based": "#2a9d55"}
 TV_FLOOR = 1e-4  # TV below this is drawn at the floor of the log scale
 plt.rcParams.update({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False, "savefig.dpi": 160})
 # candidate label offsets (points): 8 directions at growing distance; labels further away get a leader line
@@ -77,7 +77,7 @@ def speed_vs_fidelity():
         ax.margins(x=0.18, y=0.2)
         ax.set_xlabel("ms per decision (both option orders, one request at a time)")
         ax.set_ylabel("mean total-variation distance to fp32 (log)")
-        ax.set_title(f"basal-1.0-{model}: lower left is better, marker area ~ decisions/s")
+        ax.set_title(f"basal-1.0-{model}: lower latency and TV are better (lower left)")
         ax.grid(alpha=0.25, zorder=0)
         if model == "4.5B":
             family_legend(ax, loc="upper right")
@@ -145,9 +145,9 @@ def fidelity_heatmap():
                     ax.text(c, r, "×", ha="center", va="center", color="#00c2ff", fontsize=9, fontweight="bold")
         item_axis(ax, items, cols)
         ax.set_yticks(range(len(rows)), [f"{D['labels'][k]}  ({np.mean(tv[k]):.4f})" for k in rows], fontsize=8)
-        ax.set_title(f"basal-1.0-{model}: per-item total-variation distance to fp32 (row mean in brackets; "
+        ax.set_title(f"basal-1.0-{model}: per-item TV to fp32, lower is better (row mean in brackets; "
                      f"× = top option differs from fp32)", pad=16)
-        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01, label="TV (log)")
+        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01, label="TV (log; lower is better)")
     fig.tight_layout()
     fig.savefig(HERE / "apple_fidelity_heatmap.png")
 
@@ -202,7 +202,7 @@ def quality_comparison():
     axes[0].set_title("accuracy vs gold labels\n95% interval, higher is better")
     axes[0].legend(frameon=False, loc="lower left", fontsize=8)
     axes[1].set_title("log-loss of the gold option\nbefore calibration, lower is better")
-    axes[2].set_title(f"decisions that differ from fp32\n(of {len(D['items']['4.5B'])} items)")
+    axes[2].set_title(f"decisions that differ from fp32 (lower is better)\n(of {len(D['items']['4.5B'])} items)")
     for ax in axes:
         ax.grid(axis="x", alpha=0.25)
     family_legend(axes[2], loc="center right", fontsize=8)
@@ -226,9 +226,9 @@ def gold_prob_heatmap():
         ax.axhline(0.5, color="white", linewidth=2)
         item_axis(ax, items, cols)
         ax.set_yticks(range(len(rows)), [f"{D['labels'][k]}  ({sum(ok[k])}/{len(items)})" for k in rows], fontsize=8)
-        ax.set_title(f"basal-1.0-{model}: probability of the gold option per item (correct answers in brackets; "
+        ax.set_title(f"basal-1.0-{model}: P(gold) per item, higher is better (correct in brackets; "
                      f"× = wrong top option)", pad=16)
-        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01, label="P(gold), before calibration")
+        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01, label="P(gold), uncalibrated; higher is better")
     fig.tight_layout()
     fig.savefig(HERE / "apple_gold_prob_heatmap.png")
 
@@ -253,8 +253,8 @@ def memory_vs_fidelity():
         ax.grid(alpha=0.25)
         if model == "1.5B":
             format_legend(ax, families={r["family"] for r in rows}, loc="upper right", fontsize=8)
-    fig.suptitle("Published Apple Silicon checkpoints: memory vs faithfulness (labels: ms per decision)",
-                 fontsize=11)
+    fig.suptitle("Published Apple Silicon checkpoints: lower GB and TV are better (lower left); "
+                 "labels: ms per decision, lower is better", fontsize=11)
     fig.tight_layout()
     fig.canvas.draw()
     for ax, model in zip(axes, ("1.5B", "4.5B")):
@@ -293,7 +293,7 @@ def formats_size_vs_fidelity():
         ax.grid(alpha=0.25, zorder=0)
         if model == "1.5B":
             format_legend(ax, published=True, loc="upper right")
-    fig.suptitle(f"Quantised formats on {D['machine']}: size vs faithfulness (lower left is better)", fontsize=11)
+    fig.suptitle(f"Quantised formats on {D['machine']}: lower disk GB and TV are better (lower left)", fontsize=11)
     fig.tight_layout()
     fig.canvas.draw()
     for ax, model in zip(axes, ("1.5B", "4.5B")):
@@ -319,9 +319,9 @@ def formats_heatmap():
         item_axis(ax, items, cols)
         ax.set_yticks(range(len(rows)), [f"{r['label']}, {r['gb']:.1f} GB  ({r['tv_mean']:.4f})" for r in rows],
                       fontsize=8)
-        ax.set_title(f"basal-1.0-{model}: per-item TV distance to fp32 by format (row mean in brackets; "
+        ax.set_title(f"basal-1.0-{model}: per-item TV to fp32 by format, lower is better (row mean in brackets; "
                      f"× = top option differs from fp32)", pad=16)
-        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01, label="TV (log)")
+        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01, label="TV (log; lower is better)")
     fig.tight_layout()
     fig.savefig(HERE / "apple_formats_heatmap.png")
 

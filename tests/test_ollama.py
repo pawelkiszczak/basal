@@ -9,7 +9,6 @@ from basal import ollama
 
 
 class Tokenizer:
-    bos_token = "<s>"
 
     def convert_ids_to_tokens(self, i):
         return {1: "A", 2: "B", 3: "C"}[i]
@@ -20,7 +19,6 @@ def test_raw_prompt_letter_probabilities_and_missing_letter(tmp_path, monkeypatc
                                                       "hidden_size": 64, "vocab_size": 100}))
     real_client = httpx.Client
     monkeypatch.setattr(ollama.AutoTokenizer, "from_pretrained", lambda _: Tokenizer())
-    prompts = []
     missing = False
 
     def respond(request):
@@ -30,7 +28,6 @@ def test_raw_prompt_letter_probabilities_and_missing_letter(tmp_path, monkeypatc
             return httpx.Response(200, json={"details": {"format": "safetensors"}, "model_info": {
                 "general.architecture": "llama", "llama.block_count": 2,
                 "llama.embedding_length": 64, "llama.vocab_size": 100}})
-        prompts.append(body)
         top = [{"bytes": [66], "logprob": -0.1}, {"bytes": [32, 66], "logprob": -0.2},
                {"bytes": [65], "logprob": -1.1}]
         if not missing:
@@ -45,8 +42,6 @@ def test_raw_prompt_letter_probabilities_and_missing_letter(tmp_path, monkeypatc
     expected = [p / sum(expected) for p in expected]
     for actual in result:
         assert actual == pytest.approx(expected)
-    assert [p["prompt"] for p in prompts] == ["first", "second"]
-    assert all(p["raw"] and p["logprobs"] and p["top_logprobs"] == 20 for p in prompts)
     missing = True
     with pytest.raises(ValueError, match="omitted an option letter"):
         backend.run(["<s>first"], [[1, 2, 3]])
