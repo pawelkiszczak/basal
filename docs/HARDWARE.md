@@ -17,6 +17,7 @@ on a private 500-item sample of the Polish/English test split.
 | Desktop with unified memory (DGX Spark GB10) | `fp8` | memory-bandwidth-bound; FP8 halves latency |
 | Batched high-throughput serving on Blackwell | `vllm` + `-NVFP4` checkpoint | 3.2× throughput on the DGX Spark (the only machine where it was measured), but −3 accuracy points |
 | A100 and other GPUs without FP8 (not measured) | `fast` | the bf16 path runs on any sm80+ GPU |
+| Apple Silicon (M-series Mac) | `mlx` (`mlx-q8` on 16 GB Macs) | compute-bound: bf16 is fastest, 8-bit weights halve memory at no speed gain; see [Apple Silicon](#apple-silicon) |
 
 Add `--mode fast-exit` to let requests choose `"early_exit": "0.99"` (about 1.15× faster, agreement ≥ 0.99).
 
@@ -66,6 +67,36 @@ RTX 5090: 28.0 ms; the earlier runs above: 18.9 and 27.3 ms). Agreement with fp3
 
 HTTP on H100 (`basal-serve --mode fast`): 7.7 ms p50, 147 decisions/s with 32 clients. NVFP4 on the DGX Spark: 16.5 ms
 but agreement 0.87 — not recommended. RTX 4090: the FP8 compilation stalled on our test machine; bf16 works.
+
+## Apple Silicon
+
+Apple M4 Max (40-core GPU, 128 GB), macOS 27, torch 2.14 (MPS), MLX 0.32.3, mlx-lm 0.31.3. Measured with `basal-bench`
+on the **44 bundled examples** (shorter prompts than the private 500-item sample above, so latencies are not directly
+comparable with the CUDA tables; between two runs on this machine latencies differed by up to 30%). Agreement with `eager-fp32`
+(PyTorch MPS, fp32) on the same machine; GB: peak memory (MLX: allocator peak, MPS: memory held by the Metal driver).
+
+| model | mode | 2 orders (ms) | 1 order (ms) | dec/s | agreement | accuracy | GB |
+|---|---|---|---|---|---|---|---|
+| basal-1.0-4.5B | `eager-fp32` | 542.6 | 326.5 | 1.2 | reference | 0.795 | 23.0 |
+| | `mps` (bf16) | 284.8 | 242.8 | 3.1 | 0.977 | 0.773 | 10.2 |
+| | `mlx` (bf16) | **265.9** | **216.4** | **3.3** | 1.000 | 0.795 | 10.1 |
+| | `mlx-q8` | 298.4 | 243.9 | 2.9 | 1.000 | 0.795 | 6.0 |
+| | HTTP `mlx` (p50 / p95) | 207.9 / 255.8 | – | 3.6 | – | – | – |
+| basal-1.0-1.5B | `eager-fp32` | 175.7 | 101.8 | 4.5 | reference | 0.727 | 10.2 |
+| | `mps` (bf16) | 98.2 | 79.5 | 9.7 | 0.977 | 0.750 | 4.2 |
+| | `mlx` (bf16) | **87.3** | **70.9** | **12.0** | 0.977 | 0.750 | 4.0 |
+| | `mlx-q8` | 94.8 | 76.3 | 8.6 | 0.977 | 0.750 | 2.6 |
+
+HTTP: `basal-loadtest` against `basal-serve --mode mlx` (default prompts of the tool, 32 concurrent clients).
+
+- **Compute-bound.** About 90% of the forward time is in the linear layers, which MLX runs at 10–12 TFLOPS in bf16 on
+  the M4 Max; bf16, fp16 and fp32 differ little, larger batches do not raise throughput, and `mx.compile` gave no
+  speed-up (so the `mlx` backend pads only to the longest prompt of a batch instead of to fixed shape buckets). Other
+  M-series chips were not measured; being compute-bound, latency should scale roughly with GPU core count and clock.
+- **8-bit weights** (`mlx-q8`, MLX affine, group 64, decoder layers only) cut the resident weights of the 4.5B from
+  8.9 to 4.8 GB (the checkpoint is loaded lazily, so the bf16 copy is never held) and are about 10% slower.
+- **4-bit weights** were tried and dropped: agreement fell to 0.86 on the 1.5B without any speed gain.
+- **Early exit** (`fast-exit`) and the `fp8` / `nvfp4` / `vllm` modes are CUDA-only.
 
 ## Notes per platform
 

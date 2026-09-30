@@ -138,6 +138,31 @@ basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
 - From a clone instead: `git clone https://github.com/rkinas/basal && cd basal && uv pip install -e ".[fp8]"`
   (after the torch line above).
 
+### Apple Silicon (MLX / MPS)
+
+On a Mac with an M-series chip no CUDA index is needed: the PyPI torch wheel includes MPS, and the `mlx` extra adds
+[MLX](https://github.com/ml-explore/mlx). The Apple backends are not in the v1.0.1 tag or the upstream default branch
+yet. Until [PR #1](https://github.com/rkinas/basal/pull/1) merges, install from the fork branch:
+
+```bash
+git clone --branch feat/apple-silicon-mlx-mps https://github.com/pawelkiszczak/basal && cd basal
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install -e ".[mlx]"
+basal-serve --model Remek/basal-1.0-4.5B --port 8000        # default on Apple Silicon: --mode mlx
+```
+
+- `mlx` (default when MLX is installed) and `mps` (PyTorch) both use the shared prefix and batching of `fast` and
+  start in about a second (nothing is compiled). Agreement with the fp32 reference on the 44 bundled examples: 1.000
+  for the 4.5B in `mlx` and `mlx-q8`, 0.977 (one item) for `mps` and for the 1.5B.
+- **Memory.** The 4.5B model needs about 9 GB of weights in bf16; on a 16 GB Mac use `--mode mlx-q8` (8-bit weights,
+  4.8 GB) or the 1.5B model. Use `--modes mps mlx` when benchmarking the 4.5B on a 16 GB Mac:
+  the usual `eager-fp32` reference needs roughly 18 GB of weights.
+- **Speed** (M4 Max, both option orders, bundled examples): 4.5B 266 ms per decision (`mlx`), 1.5B 87 ms; HTTP p50
+  208 ms for the 4.5B. Apple GPUs are compute-bound on these prompts, so 8-bit weights save memory but not time.
+  See [docs/HARDWARE.md](docs/HARDWARE.md#apple-silicon).
+- `fast*`, `fp8`, `nvfp4`, `fast-exit` and `vllm` need CUDA; early exit is not available on Apple backends.
+  Quantisation overrides are backend-specific (`--quant q8` only with `mlx`, `--quant fp8` / `nvfp4` only with CUDA graph modes).
+
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
   "state": "Klient: od wczoraj nie mogę zalogować się do bankowości internetowej, system pokazuje błąd hasła.",
@@ -257,13 +282,16 @@ for line in open("basal/examples/questions.jsonl"):
 
 | mode | what it does | GPUs |
 |---|---|---|
-| `fast` *(default)* | bf16 + `torch.compile` + CUDA graphs + shared prefix + token-budget batching | any CUDA GPU (sm80+) |
+| `fast` *(default on CUDA)* | bf16 + `torch.compile` + CUDA graphs + shared prefix + token-budget batching | any CUDA GPU (sm80+) |
 | `fast-nocompile` | same without compilation (start-up in seconds instead of minutes) | any CUDA GPU |
 | `fast-exit` | `fast` + trained early-exit heads, exit policy chosen **per request** | any CUDA GPU (4.5B only) |
 | `fp8` | `fast` with dynamic FP8 weights + activations (torchao) | Hopper, Blackwell (Ada: FP8 compilation stalled on an RTX 4090) |
 | `nvfp4` | `fast` with NVFP4 weights + activations (torchao, experimental) | Blackwell (B200/B300, RTX 50xx/PRO, GB10) |
 | `vllm` | vLLM with the ModelOpt **FP8 / NVFP4** checkpoints (native low-precision kernels) | Hopper / Blackwell |
-| `eager` | plain PyTorch reference | any GPU or CPU |
+| `mlx` *(default on Apple Silicon)* | MLX bf16 + shared prefix + token-budget batching | Apple Silicon (`[mlx]` extra) |
+| `mlx-q8` | `mlx` with 8-bit weights: about half the memory, not faster | Apple Silicon |
+| `mps` | PyTorch MPS + shared prefix + token-budget batching (no graphs) | Apple Silicon |
+| `eager` | plain PyTorch reference | any GPU (CUDA or Apple MPS) or CPU |
 
 - **Two option orders** (`--orders 2`, default): every question is asked with the options in original and reversed
   order and the probabilities are averaged; with the shared prefix this costs only ~8% more than one order.

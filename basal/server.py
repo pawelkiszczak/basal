@@ -15,21 +15,51 @@ import time
 
 import torch
 
-from .engine import EagerBackend, ExitGraphBackend, GraphBackend, VLLMBackend, resolve
+from .engine import EagerBackend, ExitGraphBackend, GraphBackend, MLXBackend, MPSBackend, VLLMBackend, resolve
 from .prompt import MAX_OPTIONS, lang_of, letter_ids, render
 
 RELEASE_DATE = "2026-10-01"
 
 MODES = {
     # mode: (backend, quantisation, compile)
-    "eager": ("eager", None, False),        # reference PyTorch forward, any GPU (or CPU)
+    "eager": ("eager", None, False),        # reference PyTorch forward, any GPU (CUDA, Apple MPS) or CPU
     "fast": ("graph", None, True),          # bf16 + torch.compile + CUDA graphs + shared prefix (recommended)
     "fast-nocompile": ("graph", None, False),  # same without torch.compile (faster start-up, ~1.4x slower on H100)
     "fast-exit": ("exit", None, True),      # "fast" + trained early exits, policy chosen per request
     "fp8": ("graph", "fp8", True),          # "fast" with torchao FP8 (Hopper / Blackwell)
     "nvfp4": ("graph", "nvfp4", True),      # "fast" with torchao NVFP4 (Blackwell, experimental)
     "vllm": ("vllm", None, False),          # vLLM, for the ModelOpt FP8 / NVFP4 checkpoints
+    "mlx": ("mlx", None, False),            # Apple Silicon: MLX bf16 + shared prefix (recommended on Mac)
+    "mlx-q8": ("mlx", "q8", False),         # "mlx" with 8-bit weights (less memory, not faster)
+    "mps": ("mps", None, False),            # Apple Silicon: PyTorch MPS + shared prefix, no graphs
 }
+
+
+def default_mode():
+    """fast on CUDA, MLX on Apple Silicon when mlx and mlx-lm are installed, MPS otherwise."""
+    if torch.cuda.is_available():
+        return "fast"
+    if torch.backends.mps.is_available():
+        try:
+            import mlx.core  # noqa: F401
+            import mlx_lm  # noqa: F401
+            return "mlx"
+        except ImportError:
+            return "mps"
+    return "eager"
+
+
+def validate_quant(mode, quant):
+    """Reject quantisation overrides that the selected backend cannot apply."""
+    if quant is None:
+        return
+    kind = MODES[mode][0]
+    if quant == "q8" and kind == "mlx":
+        return
+    if quant in ("fp8", "nvfp4") and kind in ("graph", "exit"):
+        return
+    supported = "q8 only for MLX; fp8 and nvfp4 only for graph and exit modes"
+    raise SystemExit(f"--quant {quant} is not supported with --mode {mode} ({supported})")
 
 
 def _text(x):
@@ -94,6 +124,7 @@ def models_payload(name, mode, policies):
 
 class Server:
     def __init__(self, a):
+        validate_quant(a.mode, a.quant)
         md = resolve(a.model, a.revision)
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
         kind, quant, comp = MODES[a.mode]
@@ -105,6 +136,10 @@ class Server:
                                             default_policy=a.early_exit)
         elif kind == "vllm":
             self.backend = VLLMBackend(md, a.dtype, mem=a.gpu_memory)
+        elif kind == "mlx":
+            self.backend = MLXBackend(md, a.dtype, quant)
+        elif kind == "mps":
+            self.backend = MPSBackend(md, a.dtype, shared=a.orders == 2)
         else:
             self.backend = GraphBackend(md, a.dtype, quant, compile=comp, shared=a.orders == 2)
         self.tok = self.backend.tok
@@ -205,8 +240,10 @@ def parser():
     ap.add_argument("--model", default="Remek/basal-1.0-4.5B", help="local directory or Hugging Face repo id")
     ap.add_argument("--revision", default=None)
     ap.add_argument("--name", default=None, help="model name reported in responses (default: last part of --model)")
-    ap.add_argument("--mode", choices=list(MODES), default="fast")
-    ap.add_argument("--quant", choices=["fp8", "nvfp4"], default=None, help="override the quantisation of the mode")
+    ap.add_argument("--mode", choices=list(MODES), default=None,
+                    help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx or mlx-lm), eager otherwise")
+    ap.add_argument("--quant", choices=["fp8", "nvfp4", "q8"], default=None,
+                    help="override the quantisation of the mode (fp8 / nvfp4: CUDA modes, q8: mlx)")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--orders", type=int, choices=[1, 2], default=2,
                     help="2 = ask in original and reversed option order and average (default, reduces order sensitivity)")
@@ -224,6 +261,8 @@ def parser():
 
 def main():
     a = parser().parse_args()
+    a.mode = a.mode or default_mode()
+    validate_quant(a.mode, a.quant)
     from contextlib import asynccontextmanager
 
     import uvicorn
