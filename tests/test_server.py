@@ -1,10 +1,9 @@
 """Request handling of the HTTP server without a model: option names reach the prompt, and responses and the model
 list conform to the official System One OpenAPI schema (tests/data/systemone_openapi.json)."""
 import asyncio
-import builtins
 import json
+import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
 
 import jsonschema
 import pytest
@@ -49,36 +48,6 @@ class FakeServer(Server):
             return await self.decide(body)
         finally:
             w.cancel()
-
-
-@pytest.mark.parametrize(("mode", "quant"), [
-    ("eager", "fp8"),
-    ("fast", "q8"),
-    ("mps", "fp8"),
-    ("mlx", "nvfp4"),
-    ("vllm", "fp8"),
-    ("gguf", "q8"),
-])
-def test_server_rejects_quantisation_unsupported_by_mode(mode, quant, monkeypatch):
-    monkeypatch.setattr(server_module, "resolve", lambda *_: pytest.fail("model resolution must not run"))
-    with pytest.raises(SystemExit, match="not supported with --mode"):
-        Server(SimpleNamespace(mode=mode, quant=quant))
-
-
-def test_default_mode_falls_back_to_mps_without_mlx_lm(monkeypatch):
-    monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)
-    real_import = builtins.__import__
-
-    def import_without_mlx_lm(name, *args, **kwargs):
-        if name == "mlx.core":
-            return ModuleType(name)
-        if name == "mlx_lm":
-            raise ImportError("not installed")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", import_without_mlx_lm)
-    assert default_mode() == "mps"
 
 
 def test_default_mode_prefers_cuda_over_mlx(monkeypatch):
@@ -135,6 +104,22 @@ def test_response_conforms_to_official_schema(q):
 def test_model_list_conforms_to_official_schema():
     jsonschema.validate(models_payload("basal-1.0-4.5B", "fast", {"0.99": None}), schema("ModelMetadataList"))
 
+@pytest.mark.parametrize(("mode", "quant"), [
+    ("eager", "fp8"), ("fast", "q8"), ("mps", "fp8"), ("mlx", "nvfp4"),
+    ("vllm", "fp8"), ("gguf", "q8"), ("mlx", "fp8"), ("mps", "q8"), ("eager", "nvfp4"),
+])
+def test_unsupported_quant_fails_before_model_loading(monkeypatch, mode, quant):
+    monkeypatch.setattr(sys, "argv", ["basal-serve", "--mode", mode, "--quant", quant])
+    monkeypatch.setattr(server_module, "resolve", lambda *_: pytest.fail("must reject before loading a model"))
+    with pytest.raises(SystemExit, match="not supported"):
+        server_module.main()
+
+
+def test_default_mode_requires_both_mlx_packages_on_mps(monkeypatch):
+    monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)
+    monkeypatch.setitem(sys.modules, "mlx_lm", None)
+    assert default_mode() == "mps"
 
 def swapped_prompts_differ(crit_a, crit_b, t="choice"):
     q = lambda c: to_items("Customer selected shipping service B.", {"q": {"type": t, "instructions": "Which code?",
