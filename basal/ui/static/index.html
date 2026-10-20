@@ -45,7 +45,7 @@
 <section class="view" id="models" data-page="models"><section class="card"><div class="tabs" role="tablist"><button id="suggestedTab" class="active" role="tab" aria-selected="true">Suggested</button><button id="allModelsTab" role="tab" aria-selected="false">All models</button></div><div id="suggested" role="tabpanel"><div class="empty">Loading suggestions…</div></div><div id="allModels" role="tabpanel" hidden><div class="controls" style="margin-bottom:12px"><label><input id="olderToggle" type="checkbox"> Older families</label><label><input id="notRunnableToggle" type="checkbox"> Show not runnable</label><label><input id="downloadedToggle" type="checkbox"> Downloaded only</label><button id="refreshModels">Refresh</button></div><div id="modelsTable" class="table-wrap"><div class="empty">Loading models…</div></div></div></section></section>
 <section class="view" id="manager" data-page="manager"><section class="card"><div class="field"><label for="modelsDir">Models directory</label><div class="directory-row"><div><input id="modelsDir" type="text" autocomplete="off"></div><button id="saveModelsDir" type="button">Save</button><button id="defaultModelsDir" type="button">Use default</button></div><div id="defaultModelsDirHint" class="directory-hint muted"></div><div id="modelsDirError" class="status-error manager-error" role="alert"></div></div><div class="disk-list"><div class="section-head"><h3>On disk</h3></div><div id="diskModels"><div class="empty">Loading models…</div></div><div id="diskTotal" class="disk-total"></div></div></section></section>
 <section class="view" id="playground" data-page="playground"><section class="card"><div class="playground-head"><select id="examples"><option value="">Load an example…</option></select><label><input id="editJsonToggle" type="checkbox"> Edit JSON</label></div><fieldset id="playgroundForm" disabled><div id="builder"><div class="field"><label for="stateInput">State</label><textarea id="stateInput" placeholder="Describe the state to evaluate"></textarea></div><div class="field"><div class="section-head"><h3>Questions</h3><button type="button" id="addQuestion">Add question</button></div><div id="questions" class="questions"></div></div></div><div class="field" id="mediaField" hidden><label for="mediaInput">Media</label><input id="mediaInput" type="file" multiple accept="image/*,audio/*"><div class="field" id="mediaOptions" hidden><label for="mediaDetail">Image detail</label><select id="mediaDetail"><option value="default">default</option><option value="high">high</option></select></div><div class="field"><label for="mediaLang">Language</label><select id="mediaLang"><option value="auto">auto</option><option value="pl">pl</option><option value="en">en</option></select></div><div id="mediaItems" class="media-items"></div><div id="mediaError" class="error-box" role="alert" hidden></div></div><div class="editjson" id="editJsonArea" hidden><label for="requestJson">Request JSON (sent as-is)</label><textarea id="requestJson" spellcheck="false"></textarea></div><button id="sendButton" class="primary" type="button" style="margin-top:12px">Send decision</button><div id="decideError" class="error-box" hidden></div><div id="results" class="results"></div><details id="rawDetails" hidden><summary>Raw response JSON</summary><pre id="rawResponse"></pre></details></fieldset><div id="playgroundHint" class="muted" style="margin-top:10px">Load a model to enable the playground.</div></section></section>
-<section class="view" id="api" data-page="api"><section class="card" id="apiServer"><div id="serveStatus" class="serve-status"><span class="serve-status-text suggestion-meta">Only this app can reach the model</span><label><input id="serveEnabled" type="checkbox"> Serve the API</label></div><div class="field"><label>Exposure</label><div class="tabs" role="group" aria-label="API server exposure"><button type="button" id="serveLoopback">This computer</button><button type="button" id="serveLan">Local network</button></div><p id="serveWarning" class="error-box" hidden>Local-network access without a required API key is not recommended.</p></div><div class="serve-fields"><div class="field"><label for="servePort">Port</label><input id="servePort" type="number" min="1024" max="65535"></div><div class="field"><label for="serveMaxLen">Max context length</label><input id="serveMaxLen" type="number" min="512" max="131072"><small>tokens; read by the vLLM and SGLang modes</small></div><div class="field"><label for="serveLog">Decision log (JSONL path, empty = off)</label><input id="serveLog" type="text" placeholder="~/basal-decisions.jsonl"></div><div class="field"><label for="serveCors">CORS origins (one per line)</label><textarea id="serveCors" placeholder="https://app.example.com"></textarea></div></div><div class="serve-options"><label><input id="serveRequireKey" type="checkbox"> Require an API key</label><label><input id="serveMcp" type="checkbox"> MCP at /mcp</label><label><input id="autoLoad" type="checkbox"> Load the last model when basal-ui starts</label><small id="mcpHint" class="muted"></small></div><div class="serve-actions"><button id="saveServe" class="primary" type="button">Save settings</button><button id="restartServe" type="button">Restart server</button><button id="copyServeUrl" class="ghost icon-button" data-tooltip="Copy endpoint" aria-label="Copy endpoint" type="button">Copy endpoint</button></div><div id="serveError" class="error-box" role="alert" hidden></div><h3>API keys</h3><div id="serveKeys"></div><div class="key-create"><input id="newKeyName" type="text" placeholder="Key name"><button id="createKey" type="button">Create key</button></div><div id="newKeySecret" class="secret-alert" hidden></div><div class="section-head"><h3>Connect</h3></div><div id="connectTabs" class="tabs connect-tabs" role="tablist" aria-label="Connection examples"><button type="button" data-connect="curl" class="active" role="tab" aria-selected="true">curl</button><button type="button" data-connect="python" role="tab" aria-selected="false">Python (basal)</button><button type="button" data-connect="typesafe" role="tab" aria-selected="false">TypeSafe SDK</button><button type="button" data-connect="openai" role="tab" aria-selected="false">OpenAI SDK</button><button type="button" data-connect="litellm" role="tab" aria-selected="false">LiteLLM</button><button type="button" data-connect="mcp" role="tab" aria-selected="false">MCP</button></div><div id="connectPanels"><div class="connect-panel" data-connect-panel="curl"><pre><code id="connectCurl"></code></pre></div><div class="connect-panel" data-connect-panel="python" hidden><pre><code id="connectPython"></code></pre></div><div class="connect-panel" data-connect-panel="typesafe" hidden><pre><code id="connectTypesafe"></code></pre></div><div class="connect-panel" data-connect-panel="openai" hidden><pre><code id="connectOpenai"></code></pre></div><div class="connect-panel" data-connect-panel="litellm" hidden><pre><code id="connectLitellm"></code></pre></div><div class="connect-panel" data-connect-panel="mcp" hidden><pre><code id="connectMcp"></code></pre><p id="mcpConnectHint" class="muted" hidden>Turn on MCP at /mcp and save settings to enable HTTP transport.</p></div></div><button id="copyServeConnect" class="ghost icon-button" data-tooltip="Copy snippet" aria-label="Copy snippet" type="button">Copy snippet</button></section></section>
+<section class="view" id="api" data-page="api"><section class="card" id="apiServer"><div id="serveStatus" class="serve-status"><span class="serve-status-text suggestion-meta">Only this app can reach the model</span><label><input id="serveEnabled" type="checkbox"> Serve the API</label></div><div class="field"><label>Exposure</label><div class="tabs" role="group" aria-label="API server exposure"><button type="button" id="serveLoopback">This computer</button><button type="button" id="serveLan">Local network</button></div><p id="serveWarning" class="error-box" hidden>Local-network access without a required API key is not recommended.</p></div><div class="serve-fields"><div class="field"><label for="servePort">Port</label><input id="servePort" type="number" min="1024" max="65535"></div><div class="field"><label for="serveMaxLen">Max context length</label><input id="serveMaxLen" type="number" min="512" max="131072"><small>tokens; read by the vLLM and SGLang modes</small></div><div class="field"><label for="serveLog">Decision log (JSONL path, empty = off)</label><input id="serveLog" type="text" placeholder="~/basal-decisions.jsonl"></div><div class="field"><label for="serveCors">CORS origins (one per line)</label><textarea id="serveCors" placeholder="https://app.example.com"></textarea></div></div><div class="serve-options"><label><input id="serveRequireKey" type="checkbox"> Require an API key</label><label><input id="serveMcp" type="checkbox"> MCP at /mcp</label><label><input id="autoLoad" type="checkbox"> Load the last model when basal-ui starts</label><small id="mcpHint" class="muted"></small></div><div class="serve-actions"><button id="saveServe" class="primary" type="button">Save settings</button><button id="restartServe" type="button">Restart server</button><button id="copyServeUrl" class="ghost icon-button" data-tooltip="Copy endpoint" aria-label="Copy endpoint" type="button">Copy endpoint</button></div><div id="serveError" class="error-box" role="alert" hidden></div><h3>API keys</h3><div id="serveKeys"></div><div class="key-create"><input id="newKeyName" type="text" placeholder="Key name"><button id="createKey" type="button">Create key</button></div><div id="newKeySecret" class="secret-alert" hidden></div><div class="section-head"><h3>Connect</h3></div><div id="connectTabs" class="tabs connect-tabs" role="tablist" aria-label="Connection examples"><button type="button" data-connect="curl" class="active" role="tab" aria-selected="true">curl</button><button type="button" data-connect="python" role="tab" aria-selected="false">Python (basal)</button><button type="button" data-connect="typesafe" role="tab" aria-selected="false">TypeSafe SDK</button><button type="button" data-connect="openai" role="tab" aria-selected="false">OpenAI SDK</button><button type="button" data-connect="litellm" role="tab" aria-selected="false">LiteLLM</button><button type="button" data-connect="mcp" role="tab" aria-selected="false">MCP</button></div><div id="connectPanels"><div class="connect-panel" data-connect-panel="curl"><pre><code id="connectCurl"></code></pre></div><div class="connect-panel" data-connect-panel="python" hidden><pre><code id="connectPython"></code></pre></div><div class="connect-panel" data-connect-panel="typesafe" hidden><pre><code id="connectTypesafe"></code></pre></div><div class="connect-panel" data-connect-panel="openai" hidden><pre><code id="connectOpenai"></code></pre></div><div class="connect-panel" data-connect-panel="litellm" hidden><pre><code id="connectLitellm"></code></pre></div><div class="connect-panel" data-connect-panel="mcp" hidden><pre><code id="connectMcp"></code></pre><p id="mcpConnectHint" class="muted" hidden>Turn on MCP at /mcp and save settings to enable HTTP transport.</p></div></div><p id="runningServerNote" class="muted" hidden>Snippets describe the running server; saved settings apply after Restart.</p><button id="copyServeConnect" class="ghost icon-button" data-tooltip="Copy snippet" aria-label="Copy snippet" type="button">Copy snippet</button></section></section>
 <dialog id="mediaLightbox" class="media-lightbox" aria-label="Image preview"><img id="mediaLightboxImage" alt=""><div class="media-lightbox-bar"><span id="mediaLightboxName"></span><small id="mediaLightboxSize"></small><button type="button" id="mediaLightboxClose">Close</button></div></dialog><dialog id="confirmDialog" class="confirm-dialog"><h3 id="confirmTitle"></h3><p id="confirmDescription" class="muted"></p><div class="dialog-actions"><button id="confirmCancel" type="button">Cancel</button><button id="confirmAccept" class="destructive" type="button">Delete</button></div></dialog><div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 </main></div>
 <script>
@@ -96,11 +96,15 @@ document.addEventListener('change',event=>{
 });
 document.addEventListener('keydown',event=>{
   if(event.key==='Enter'&&event.target.matches('input[type=checkbox][role=switch]')) {
-    event.preventDefault(); event.target.checked=!event.target.checked;
+    event.preventDefault(); setChecked(event.target,!event.target.checked);
     event.target.dispatchEvent(new Event('change',{bubbles:true}));
   }
 });
-document.querySelectorAll('input[type=checkbox]').forEach(input=>{input.setAttribute('role','switch');input.setAttribute('aria-checked',String(input.checked));});
+function setChecked(input, value) {
+  input.checked=Boolean(value);
+  input.setAttribute('aria-checked',String(input.checked));
+}
+document.querySelectorAll('input[type=checkbox]').forEach(input=>{input.setAttribute('role','switch');setChecked(input,input.checked);});
 document.querySelectorAll('.icon-button').forEach(button=>{
   const icon=button.id==='logsToggle'
     ?'<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h12v12H4zM7 8h6M7 11h6M7 14h3"/></svg>'
@@ -445,7 +449,7 @@ selectModelsTab(localStorage.getItem('basal-ui.tab')==='all'?'all':'suggested');
 $('#unloadButton').addEventListener('click',unloadModel);
 $('#footerUnload').addEventListener('click',unloadModel);
 async function unloadModel(){statusSequence++;try{await api('/api/unload',{method:'POST'});toast('Model unloaded');await refreshStatus();await loadModels();}catch(e){showStatusError(e.message);toast(e.message,'error');}}
-$('#restartButton').addEventListener('click',async()=>{const current=statusCache;if(!current?.model)return;toast('Model restart started');await loadModel(current.model,Boolean(current.media?.length));});
+$('#restartButton').addEventListener('click',restartModel);
 $('#logsToggle').addEventListener('click',()=>{const logs=$('#logs');logs.hidden=!logs.hidden;$('#logsToggle').setAttribute('aria-expanded',String(!logs.hidden));});
 $('#addQuestion').addEventListener('click',()=>addQuestion());
 $('#stateInput').addEventListener('input',syncRequest);
@@ -467,10 +471,12 @@ function connectionEndpoint() {
   return `http://${host}:${settings.port}`;
 }
 function renderConnect() {
-  const settings=serveData.settings, endpoint=connectionEndpoint(), name=statusCache?.serving?.model_name||statusCache?.model||'basal-model';
-  const key=settings.require_key?'<your key>':null, auth=key?` -H 'Authorization: Bearer ${key}'`:'';
+  const settings=serveData.settings, serving=statusCache?.serving;
+  const endpoint=connectionEndpoint(), name=serving?.model_name||statusCache?.model||'basal-model';
+  const requireKey=serving?serving.require_key:settings.require_key, mcp=serving?serving.mcp:settings.mcp;
+  const key=requireKey?'<your key>':null, auth=key?` -H 'Authorization: Bearer ${key}'`:'';
   const keyArg=key?`, api_key="${key}"`:'';
-  const mcpHttp=settings.mcp
+  const mcpHttp=mcp
     ?JSON.stringify({mcpServers:{basal:{url:`${endpoint}/mcp`,...(key?{headers:{Authorization:`Bearer ${key}`}}:{})}}},null,2)+'\n\n'
     :'';
   const snippets={
@@ -514,13 +520,15 @@ basal-mcp --url ${endpoint}${key?` --api-key ${key}`:''}`
   $('#connectOpenai').textContent=snippets.openai;
   $('#connectLitellm').textContent=snippets.litellm;
   $('#connectMcp').textContent=snippets.mcp;
-  $('#mcpConnectHint').hidden=Boolean(settings.mcp);
+  $('#mcpConnectHint').hidden=Boolean(mcp);
+  $('#runningServerNote').hidden=!statusCache?.restart_required;
   $('#connectTabs').querySelectorAll('[data-connect]').forEach(tab=>{
     const active=tab.dataset.connect===connectTab;
     tab.classList.toggle('active',active); tab.setAttribute('aria-selected',String(active));
   });
   document.querySelectorAll('[data-connect-panel]').forEach(panel=>{panel.hidden=panel.dataset.connectPanel!==connectTab;});
 }
+
 // the endpoint line of the API server card: where the API answers now, and whether saved settings await a restart
 function renderServeStatus(status) {
   const serving=status?.serving;
@@ -539,10 +547,10 @@ async function loadServe(){
   try{
     serveData=await api('/api/serve');
     const s=serveData.settings;
-    $('#serveEnabled').checked=s.enabled; $('#servePort').value=s.port; $('#serveRequireKey').checked=s.require_key;
+    setChecked($('#serveEnabled'),s.enabled); $('#servePort').value=s.port; setChecked($('#serveRequireKey'),s.require_key);
     $('#serveMaxLen').value=s.max_len; $('#serveCors').value=s.cors_origins.join('\n'); $('#serveLog').value=s.log_decisions;
-    $('#serveMcp').checked=s.mcp; $('#serveMcp').disabled=!serveData.mcp_available; $('#mcpHint').textContent=serveData.mcp_hint||'';
-    $('#autoLoad').checked=serveData.auto_load; serveHost=s.host;
+    setChecked($('#serveMcp'),s.mcp); $('#serveMcp').disabled=!serveData.mcp_available; $('#mcpHint').textContent=serveData.mcp_hint||'';
+    setChecked($('#autoLoad'),serveData.auto_load); serveHost=s.host;
     $('#serveLoopback').classList.toggle('active',serveHost==='127.0.0.1');
     $('#serveLan').classList.toggle('active',serveHost==='0.0.0.0');
     $('#serveWarning').hidden=s.host!=='0.0.0.0'||s.require_key;
@@ -583,12 +591,21 @@ $('#createKey').onclick=async()=>{
     $('#newKeyName').value=''; await loadServe(); toast('API key created');
   }catch(error){showServeError(error.message);toast(error.message,'error');}
 };
-$('#restartServe').onclick=async()=>{try{await api('/api/restart',{method:'POST'});toast('API server restarted');await refreshStatus();}catch(error){showServeError(error.message);toast(error.message,'error');}};
+$('#restartServe').onclick=restartModel;
+async function restartModel(){
+  try{await api('/api/restart',{method:'POST'});toast('Model restart started');await refreshStatus();}
+  catch(error){showServeError(error.message);showStatusError(error.message);toast(error.message,'error');}
+}
 async function copyText(text, success='Copied to clipboard') {
   try { await navigator.clipboard.writeText(text); }
   catch {
     const area=document.createElement('textarea'); area.value=text; area.style.position='fixed'; area.style.opacity='0';
-    document.body.append(area); area.select(); document.execCommand('copy'); area.remove();
+    document.body.append(area);
+    let copied=false;
+    try { area.select(); copied=document.execCommand('copy'); }
+    catch {}
+    finally { area.remove(); }
+    if(!copied) { toast('Copy failed — select the text and copy manually','error'); return; }
   }
   toast(success);
 }

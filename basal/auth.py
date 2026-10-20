@@ -13,15 +13,16 @@ class ApiKeys:
         self.path = os.fspath(path)
         self._lock = threading.Lock()
         self._signature = None
-        self._records = []
+        self._loaded_at = None
         self._usage = {}
         self._warned = False
 
     def _load(self):
         try:
             stat = os.stat(self.path)
-            signature = (stat.st_mtime_ns, stat.st_size)
-            if signature == self._signature:
+            signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+            now = time.monotonic()
+            if signature == self._signature and now - self._loaded_at <= 2:
                 return self._records
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -32,6 +33,7 @@ class ApiKeys:
                     or not isinstance(k.get("admin", False), bool) for k in records):
                 raise ValueError("invalid API key file")
             self._signature, self._records, self._warned = signature, records, False
+            self._loaded_at = now
             return records
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
             self._signature, self._records = None, []

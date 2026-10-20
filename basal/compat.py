@@ -12,7 +12,24 @@ def openai_error(status, message, code, param=None):
     return JSONResponse({"error": {"message": message, "type": typ, "param": param, "code": code}}, status_code=status)
 
 
+MAX_MEDIA_BYTES = 20 * 1024 * 1024  # basal/media.py MAX_BYTES
+
+
+def _decoded_size(encoded, status, what):
+    """Bytes a base64 string decodes to; the length bound is checked first so an oversized item never gets decoded."""
+    if len(encoded) * 3 // 4 > MAX_MEDIA_BYTES:
+        raise ValueError((status, "media item exceeds 20 MiB", "INVALID_REQUEST"))
+    try:
+        size = len(base64.b64decode(encoded, validate=True))
+    except Exception:
+        raise ValueError((status, f"{what} must be valid base64", "INVALID_REQUEST")) from None
+    if size > MAX_MEDIA_BYTES:
+        raise ValueError((status, "media item exceeds 20 MiB", "INVALID_REQUEST"))
+    return size
+
+
 def _data_url(value, status=400):
+    """(mime, base64 payload, decoded size) of a data URL; remote URLs are refused."""
     if not isinstance(value, str):
         raise ValueError((status, "media URL must be a data URL", "INVALID_REQUEST"))
     if value.startswith(("http://", "https://")):
@@ -20,36 +37,28 @@ def _data_url(value, status=400):
     match = re.fullmatch(r"data:([^;,]+);base64,(.+)", value, re.DOTALL)
     if not match:
         raise ValueError((status, "media must be a base64 data URL", "INVALID_REQUEST"))
-    try:
-        data = base64.b64decode(match.group(2), validate=True)
-    except (ValueError, Exception):
-        raise ValueError((status, "media data URL contains invalid base64", "INVALID_REQUEST")) from None
-    return match.group(1), match.group(2), len(data)
+    return match.group(1), match.group(2), _decoded_size(match.group(2), status, "media data URL")
 
 
 def systemone_media(body):
+    """The vLLM-style `images` / `audio` data-URL arrays folded into basal's `media` items, every item validated."""
     out = dict(body)
     media = list(out.get("media") or [])
+    for item in media:
+        if not isinstance(item, dict) or item.get("type") not in ("image", "audio") or not isinstance(item.get("data"), str):
+            raise ValueError((422, "invalid media item", "INVALID_REQUEST"))
+        _decoded_size(item["data"], 422, "media data")
     for field, kind in (("images", "image"), ("audio", "audio")):
         values = out.pop(field, [])
         if not isinstance(values, list):
             raise ValueError((422, f"{field} must be an array", "INVALID_REQUEST"))
         for value in values:
             mime, data, _ = _data_url(value, 422)
-            if (kind == "image" and not mime.startswith("image/")) or (kind == "audio" and not mime.startswith("audio/")):
+            if not mime.startswith(f"{kind}/"):
                 raise ValueError((422, f"{field} entries must have {kind} MIME types", "INVALID_REQUEST"))
             media.append({"type": kind, "data": data})
     if len(media) > 8:
         raise ValueError((422, "at most 8 media items", "INVALID_REQUEST"))
-    for item in media:
-        if not isinstance(item, dict) or item.get("type") not in ("image", "audio") or not isinstance(item.get("data"), str):
-            raise ValueError((422, "invalid media item", "INVALID_REQUEST"))
-        try:
-            size = len(base64.b64decode(item["data"], validate=True))
-        except Exception:
-            raise ValueError((422, "media data must be valid base64", "INVALID_REQUEST")) from None
-        if size > 20 * 1024 * 1024:
-            raise ValueError((422, "media item exceeds 20 MiB", "INVALID_REQUEST"))
     if media:
         out["media"] = media
     return out
@@ -146,7 +155,10 @@ def decision_body(body):
             levels = question.get("levels")
             if not isinstance(levels, list) or not 2 <= len(levels) <= 10 or any(not isinstance(x, dict) or not isinstance(x.get("label"), str) for x in levels):
                 raise ValueError((400, "levels must contain 2 to 10 labeled entries", "INVALID_REQUEST"))
-            criteria = {x["label"]: x.get("description") for x in levels} if any(x.get("description") is not None for x in levels) else [x["label"] for x in levels]
+            labels = [x["label"] for x in levels]
+            if len(set(labels)) != len(labels):
+                raise ValueError((400, "score level labels must be unique", "INVALID_REQUEST"))
+            criteria = {x["label"]: x.get("description") for x in levels} if any(x.get("description") is not None for x in levels) else labels
             score_keys = list(criteria) if isinstance(criteria, dict) else [str(i) for i in range(len(criteria))]
             converted[key] = {"type": "score", "instructions": instructions, "criteria": criteria}
             values[key] = {"labels": [x["label"] for x in levels], "keys": score_keys}

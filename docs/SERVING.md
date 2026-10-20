@@ -295,11 +295,11 @@ and compatibility details are in the [basal-serve HTTP API reference](API.md).
    refuses that key on its next request without unloading the model or restarting basal-serve.
 
 The default settings file is `~/.config/basal-ui/settings.json`; set `BASAL_UI_CONFIG` to change its path. Next to it,
-each running basal-ui writes the key file of its own basal-serve, `api-keys-<pid>.json`: the API keys from the settings
-plus that process's internal admin key, which basal-ui uses for its own requests (playground, key usage). All files are
-owner-only (`0600`) and hold SHA-256 hashes, never secrets. Two basal-ui instances may share one settings file: a key
-created or revoked in either is written into every running instance's key file, the files of exited instances are
-removed, and each instance deletes its own file when it quits.
+each running basal-ui writes its key file as `<settings stem>.keys-<pid>.json` (for example, `settings.keys-1234.json`):
+the API keys from the settings plus that process's internal admin key, which basal-ui uses for its own requests
+(playground, key usage). All files are owner-only (`0600`) and hold SHA-256 hashes, never secrets. Two basal-ui instances
+may share one settings file: a key created or revoked in either is written into every matching live instance's key file,
+the files of exited instances are removed, and each instance deletes its own file when it quits.
 
 **Auto-load.** Enable **Load the last model when basal-ui starts** to remember the last model that reached ready.
 On app startup, basal-ui resolves and loads that model and starts serving it using the current API server settings.

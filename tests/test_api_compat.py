@@ -130,6 +130,39 @@ def test_decision_score_limits(count):
     assert c.post("/v1/decisions", json={"input": "x", "questions": [question]}).status_code == 400
 
 
+
+def test_decision_score_level_labels_must_be_unique_and_described_levels_round_trip():
+    c, srv = client()
+    question = {"type": "score", "name": "rating", "instructions": "rate",
+                "levels": [{"label": "a"}, {"label": "a"}, {"label": "b"}]}
+    response = c.post("/v1/decisions", json={"input": "x", "questions": [question]})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert response.json()["error"]["message"] == "score level labels must be unique"
+
+    question["levels"] = [{"label": "low", "description": "Poor"},
+                          {"label": "high", "description": "Good"}]
+    response = c.post("/v1/decisions", json={"input": "x", "questions": [question]})
+    assert response.status_code == 200
+    assert [item["label"] for item in response.json()["answers"][0]["probabilities"]] == ["low", "high"]
+    assert [item["probability"] for item in response.json()["answers"][0]["probabilities"]] == [.5, .5]
+    assert srv.requests[-1]["questions"]["rating"]["criteria"] == {"low": "Poor", "high": "Good"}
+
+
+def test_systemone_oversized_alias_media_is_rejected_before_decoding(monkeypatch):
+    from basal import compat
+
+    def fail_decode(*args, **kwargs):
+        raise AssertionError("oversized media must be rejected before decoding")
+
+    monkeypatch.setattr(compat.base64, "b64decode", fail_decode)
+    encoded = "A" * ((20 * 1024 * 1024 * 4 // 3) + 4)
+    c, _ = client()
+    response = c.post("/v1/systemone", json={"state": "x", "questions": {"q": {"type": "choice",
+                     "criteria": {"a": "A", "b": "B"}}}, "images": [f"data:image/png;base64,{encoded}"]})
+    assert response.status_code == 422
+
+
 def test_decision_duplicates_unsupported_and_http_image():
     c, _ = client()
     base = {"input": "x", "questions": [{"type": "choice", "instructions": "choose", "choices": [{"value": True}, {"value": "true"}]}]}

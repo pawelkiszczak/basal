@@ -1,7 +1,7 @@
 """Persistent basal-ui settings: the models directory, the API server, its keys and the last model.
 
-Every change is a read-modify-write of one JSON file under a process-wide lock, written atomically (a private temp file
-renamed over the old one), so concurrent requests and the load thread never lose each other's changes. The file and
+Every change is a read-modify-write of one JSON file under a thread and inter-process lock, written atomically (a private
+temp file renamed over the old one), so concurrent requests and processes never lose each other's changes. The file and
 the basal-serve key file hold SHA-256 digests of API keys only and are readable by the owner alone (0600)."""
 import functools
 import hashlib
@@ -17,9 +17,10 @@ from huggingface_hub.constants import HF_HUB_CACHE
 
 DEFAULT_SERVE = {"enabled": False, "host": "127.0.0.1", "port": 8000, "require_key": False,
                  "max_len": 4096, "cors_origins": [], "log_decisions": "", "mcp": False}
-KEY_NAME = re.compile(r"[\w .-]{1,64}\Z")
+KEY_NAME = re.compile(r"[\w][\w .-]{0,63}\Z")
 _internal_sha256 = None
 _LOCK = threading.RLock()
+_LOCK_STATE = threading.local()
 
 SETTINGS_PATH = Path(os.environ.get("BASAL_UI_CONFIG", "~/.config/basal-ui/settings.json")).expanduser()
 
@@ -32,7 +33,29 @@ def _locked(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         with _LOCK:
-            return fn(*args, **kwargs)
+            depth = getattr(_LOCK_STATE, "depth", 0)
+            if depth:
+                _LOCK_STATE.depth = depth + 1
+                try:
+                    return fn(*args, **kwargs)
+                finally:
+                    _LOCK_STATE.depth -= 1
+            path = _settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                if os.name == "posix":
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                _LOCK_STATE.depth = 1
+                try:
+                    return fn(*args, **kwargs)
+                finally:
+                    _LOCK_STATE.depth = 0
+                    if os.name == "posix":
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
     return wrapper
 
 
@@ -119,6 +142,8 @@ def update_serve(patch: dict) -> dict:
         raise ValueError("log_decisions must be a path or empty")
     if log_path:
         path = Path(log_path).expanduser().resolve()
+        if path.is_dir():
+            raise ValueError("decision log path is a directory")
         if not path.parent.is_dir() or not os.access(path.parent, os.W_OK):
             raise ValueError(f"decision log directory is not writable: {path.parent}")
         value["log_decisions"] = str(path)
@@ -196,12 +221,12 @@ def delete_key(name: str) -> None:
     _sync_key_files(data)
 
 
-# Each basal-ui process gives its basal-serve its own key file, api-keys-<pid>.json next to the settings file: the
-# user's keys (shared, from the settings) plus that process's internal admin key. Two basal-ui instances on one
-# settings file therefore never overwrite each other's internal key, and a key created or revoked in either one is
-# written into every live instance's file, so revocation reaches every running basal-serve.
+# Each basal-ui process gives its basal-serve a settings-specific key file, <stem>.keys-<pid>.json next to the
+# settings file: the user's keys (shared, from the settings) plus that process's internal admin key. Two basal-ui
+# instances on one settings file therefore never overwrite each other's internal key, and key changes reach each file.
 def _keys_path(pid: int | None = None) -> Path:
-    return _settings_path().parent / f"api-keys-{os.getpid() if pid is None else pid}.json"
+    settings_path = _settings_path()
+    return settings_path.with_name(f"{settings_path.stem}.keys-{os.getpid() if pid is None else pid}.json")
 
 
 def _user_records(data: dict) -> list[dict]:
@@ -221,9 +246,10 @@ def _alive(pid: int) -> bool:
 
 def _sync_key_files(data: dict) -> None:
     """Rewrite every live instance's key file with the current user keys; drop the files of dead processes."""
-    for path in _settings_path().parent.glob("api-keys-*.json"):
+    settings_path = _settings_path()
+    for path in settings_path.parent.glob(f"{settings_path.stem}.keys-*.json"):
         try:
-            pid = int(path.stem.rsplit("-", 1)[1])
+            pid = int(path.stem.removeprefix(f"{settings_path.stem}.keys-"))
         except ValueError:
             continue
         if not _alive(pid):

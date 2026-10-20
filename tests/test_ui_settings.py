@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,6 +83,8 @@ def test_serve_settings_reject_invalid_fields_and_normalize_log_path(tmp_path, m
     for patch, field in invalid:
         with pytest.raises(ValueError, match=field):
             settings.update_serve(patch)
+    with pytest.raises(ValueError, match="decision log path is a directory"):
+        settings.update_serve({"log_decisions": str(tmp_path)})
     with pytest.raises(ValueError, match="decision log directory"):
         settings.update_serve({"log_decisions": str(tmp_path / "missing" / "decisions.jsonl")})
     log_path = tmp_path / "decisions.jsonl"
@@ -99,16 +103,20 @@ def test_mcp_setting_requires_available_extra(tmp_path, monkeypatch):
 
 def test_api_key_names_are_unique_validated_and_revocable(tmp_path, monkeypatch):
     monkeypatch.setenv("BASAL_UI_CONFIG", str(tmp_path / "settings.json"))
-    with pytest.raises(ValueError, match="name must"):
-        settings.create_key("")
-    with pytest.raises(ValueError, match="name must"):
-        settings.create_key("a" * 65)
+    for name in ("", "a" * 65, ".", "..", " x", ".hidden"):
+        with pytest.raises(ValueError, match="name must"):
+            settings.create_key(name)
+    record, _ = settings.create_key("a.b")
+    assert record["name"] == "a.b"
+    with pytest.raises(ValueError, match="already exists"):
+        settings.create_key("a.b")
+    settings.delete_key("a.b")
     record, _secret = settings.create_key("laptop")
     with pytest.raises(ValueError, match="already exists"):
         settings.create_key("laptop")
     assert settings.keys() == [{**record, "sha256": settings.load()["api_keys"][0]["sha256"]}]
     own = settings.keys_file("a" * 64)
-    assert own.name == f"api-keys-{os.getpid()}.json"
+    assert own.name == f"settings.keys-{os.getpid()}.json"
     first = own.read_text()
     settings.delete_key("laptop")
     second = own.read_text()
@@ -121,10 +129,12 @@ def test_key_changes_reach_every_live_instance_and_drop_dead_ones(tmp_path, monk
     """Two basal-ui processes share one settings file: each keeps its own internal key, both see revocations."""
     monkeypatch.setenv("BASAL_UI_CONFIG", str(tmp_path / "settings.json"))
     other, dead = os.getppid(), 2**22 + 12345  # a live process and a pid that is not running
-    other_file, dead_file = tmp_path / f"api-keys-{other}.json", tmp_path / f"api-keys-{dead}.json"
+    other_file, dead_file = (tmp_path / f"settings.keys-{other}.json",
+                             tmp_path / f"settings.keys-{dead}.json")
+    unrelated_file = tmp_path / "other.keys-999999.json"
+    unrelated_file.write_text(json.dumps({"keys": []}))
     other_internal = {"name": "basal-ui", "sha256": "b" * 64, "admin": True}
     other_file.write_text(json.dumps({"keys": [other_internal]}))
-    dead_file.write_text(json.dumps({"keys": []}))
     settings.keys_file("a" * 64)
     _record, _secret = settings.create_key("laptop")
     other_keys = json.loads(other_file.read_text())["keys"]
@@ -132,10 +142,11 @@ def test_key_changes_reach_every_live_instance_and_drop_dead_ones(tmp_path, monk
     assert not dead_file.exists()
     settings.delete_key("laptop")
     assert json.loads(other_file.read_text())["keys"] == [other_internal]
-    own = json.loads((tmp_path / f"api-keys-{os.getpid()}.json").read_text())["keys"]
+    own = json.loads((tmp_path / f"settings.keys-{os.getpid()}.json").read_text())["keys"]
     assert own == [{"name": "basal-ui", "sha256": "a" * 64, "admin": True}]
     settings.remove_keys_file()
-    assert not (tmp_path / f"api-keys-{os.getpid()}.json").exists() and other_file.exists()
+    assert not (tmp_path / f"settings.keys-{os.getpid()}.json").exists() and other_file.exists()
+    assert not dead_file.exists() and unrelated_file.exists()
 
 
 def test_auto_load_setting_requires_boolean(tmp_path, monkeypatch):
@@ -144,3 +155,41 @@ def test_auto_load_setting_requires_boolean(tmp_path, monkeypatch):
     assert settings.load()["auto_load"] is True
     with pytest.raises(ValueError, match="auto_load must be a boolean"):
         settings.set_auto_load("yes")
+
+
+def test_cross_process_settings_updates_do_not_lose_keys(tmp_path, monkeypatch):
+    config = tmp_path / "settings.json"
+    monkeypatch.setenv("BASAL_UI_CONFIG", str(config))
+    env = {**os.environ, "BASAL_UI_CONFIG": str(config)}
+    code = ("from basal.ui import settings\n"
+            "import sys\n"
+            "for i in range(20): settings.create_key(f'{sys.argv[1]}-{i}')")
+    workers = [subprocess.Popen([sys.executable, "-c", code, prefix], env=env)
+               for prefix in ("first", "second")]
+    assert [worker.wait(timeout=20) for worker in workers] == [0, 0]
+    assert len(settings.keys()) == 40
+
+
+def test_cross_process_revoke_is_not_undone_by_creates(tmp_path, monkeypatch):
+    config = tmp_path / "settings.json"
+    monkeypatch.setenv("BASAL_UI_CONFIG", str(config))
+    env = {**os.environ, "BASAL_UI_CONFIG": str(config)}
+    settings.create_key("revoke-me")
+    start = tmp_path / "start"
+    code = ("from basal.ui import settings\n"
+            "import pathlib, sys, time\n"
+            "start = pathlib.Path(sys.argv[1])\n"
+            "while not start.exists(): time.sleep(.001)\n"
+            "for i in range(100): settings.create_key(f'loop-{i}')\n")
+    creator = subprocess.Popen([sys.executable, "-c", code, str(start)], env=env)
+    revoker = subprocess.Popen(
+        [sys.executable, "-c",
+         "from basal.ui import settings\n"
+         "import pathlib, sys, time\n"
+         "start = pathlib.Path(sys.argv[1])\n"
+         "while not start.exists(): time.sleep(.001)\n"
+         "settings.delete_key('revoke-me')", str(start)], env=env)
+    start.touch()
+    assert creator.wait(timeout=30) == 0
+    assert revoker.wait(timeout=30) == 0
+    assert all(record["name"] != "revoke-me" for record in settings.keys())

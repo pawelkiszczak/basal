@@ -334,8 +334,11 @@ def test_api_serve_routes_validate_settings_and_hide_secrets(tmp_path, monkeypat
             assert client.put("/api/serve", json=patch).status_code == 400
         monkeypatch.setattr("basal.mcp_server.available", lambda: "install basal[mcp]")
         assert client.put("/api/serve", json={"mcp": True}).status_code == 400
-        monkeypatch.setattr("basal.mcp_server.available", lambda: None)
         assert client.put("/api/serve", json={"enabled": True, "port": 8123}).json()["settings"]["port"] == 8123
+        invalid_auto_load = client.put("/api/serve", json={"port": 9000, "auto_load": "yes"})
+        assert invalid_auto_load.status_code == 400
+        assert invalid_auto_load.json()["detail"] == "auto_load must be a boolean"
+        assert client.get("/api/serve").json()["settings"]["port"] == 8123
         created = client.post("/api/serve/keys", json={"name": "desk"})
         assert created.status_code == 201
         secret = created.json()["key"]
@@ -423,6 +426,120 @@ def test_auto_load_on_startup_and_unknown_model_is_skipped(tmp_path, monkeypatch
             time.sleep(0.01)
     assert runner.loads == []
 
+
+
+def test_auto_load_waiting_on_catalog_is_cancelled_during_shutdown(tmp_path, monkeypatch):
+    from basal.ui import settings
+
+    monkeypatch.setenv("BASAL_UI_CONFIG", str(tmp_path / "settings.json"))
+    settings.set_auto_load(True)
+    settings.remember_model("mini", False)
+    item = Variant("mini", "Remek/basal-2.0-mini", "basal-2.0", "mini", "bf16", "bf16", None, 100, False)
+    real_event = threading.Event
+    catalog_entered, release_catalog, shutdown_started = real_event(), real_event(), real_event()
+    auto_load_event = real_event()
+    set_auto_load_event = auto_load_event.set
+    auto_load_event.set = lambda: (shutdown_started.set(), set_auto_load_event())
+    event_count = 0
+
+    def event_factory():
+        nonlocal event_count
+        event_count += 1
+        return auto_load_event if event_count == 1 else real_event()
+
+    monkeypatch.setattr("basal.ui.app.threading.Event", event_factory)
+
+    def blocked_catalog(**_):
+        catalog_entered.set()
+        release_catalog.wait()
+        return [item], "test"
+
+    class RecordingRunner(FakeRunner):
+        def __init__(self):
+            super().__init__()
+            self.loads = []
+
+        def load(self, assessment, media=False):
+            self.loads.append((assessment.variant.id, media))
+            return super().load(assessment, media)
+
+    runner = RecordingRunner()
+    app = create_app(catalog_fn=blocked_catalog, runner=runner)
+    client = TestClient(app)
+    client.__enter__()
+    assert catalog_entered.wait(timeout=2)
+    def shutdown():
+        client.__exit__(None, None, None)
+
+    shutdown_thread = threading.Thread(target=shutdown)
+    shutdown_thread.start()
+    assert shutdown_started.wait(timeout=2)
+    release_catalog.set()
+    shutdown_thread.join(timeout=5)
+    assert not shutdown_thread.is_alive()
+    assert runner.loads == []
+
+
+def test_create_app_passes_settings_module_to_default_runner(monkeypatch):
+    from types import SimpleNamespace
+    import basal.ui.app as app_module
+
+    fake_settings = SimpleNamespace(models_dir=lambda: None)
+    captured = {}
+
+    def runner_factory(**kwargs):
+        captured.update(kwargs)
+        return FakeRunner()
+
+    monkeypatch.setattr(app_module, "Runner", runner_factory)
+    create_app(settings_mod=fake_settings)
+    assert captured["settings_mod"] is fake_settings
+
+
+def test_stale_overlapping_start_does_not_replace_last_ready_model(tmp_path, monkeypatch):
+    import io
+    from types import SimpleNamespace
+    from basal.ui import settings
+
+    monkeypatch.setenv("BASAL_UI_CONFIG", str(tmp_path / "settings.json"))
+    runner = Runner(settings_mod=settings)
+    old = SimpleNamespace(variant=Variant("old", "repo/old", "basal-2.0", "mini", "bf16", "bf16",
+                                          None, 100, False), mode="eager")
+    newer = SimpleNamespace(variant=Variant("newer", "repo/newer", "basal-2.0", "mini", "bf16", "bf16",
+                                            None, 100, False), mode="eager")
+    runner.gen = 1
+    runner.state, runner.model = "starting", "old"
+    monkeypatch.setattr(catalog, "is_downloaded", lambda *_: tmp_path)
+    monkeypatch.setattr(runner, "_build_command", lambda *args: ["fake"])
+
+    class Process:
+        stdout = io.StringIO("")
+        returncode = 0
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr("basal.ui.app.subprocess.Popen", lambda *args, **kwargs: Process())
+    old_health_entered, release_old_health = threading.Event(), threading.Event()
+
+    def healthy(*args, **kwargs):
+        if threading.current_thread().name == "old-start":
+            old_health_entered.set()
+            release_old_health.wait()
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr("basal.ui.app.httpx.get", healthy)
+    old_thread = threading.Thread(target=runner._start, args=(old, 1, False, tmp_path, None), name="old-start")
+    old_thread.start()
+    assert old_health_entered.wait(timeout=2)
+    runner.gen = 2
+    runner.state, runner.model = "starting", "newer"
+    runner._start(newer, 2, False, tmp_path, None)
+    assert settings.last_model()["id"] == "newer"
+    release_old_health.set()
+    old_thread.join(timeout=2)
+    assert not old_thread.is_alive()
+    assert settings.last_model()["id"] == "newer"
 
 def test_restart_required_tracks_settings_until_reload(tmp_path, monkeypatch):
     from basal.ui import settings

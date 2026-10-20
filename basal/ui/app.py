@@ -245,7 +245,10 @@ class Runner:
                                         time.sleep(0.5)
                             if error is not None:
                                 raise RuntimeError(f"could not read media capabilities from basal-serve: {error}")
-                        if self._update(gen, state="ready", media=media_kinds):
+                        with self.lock:
+                            if gen != self.gen:
+                                return
+                            self.state, self.media = "ready", media_kinds
                             self.settings_mod.remember_model(v.id, media)
                         return
                 except httpx.HTTPError:
@@ -354,11 +357,15 @@ def _byte_counter():
 
 def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, runner=None,
               settings_mod=settings, allowed_hosts=("127.0.0.1", "localhost", "::1")) -> FastAPI:
-    runner = runner or Runner(models_dir_fn=settings_mod.models_dir, platform_fn=lambda: hardware_fn().platform)
+    runner = runner or Runner(models_dir_fn=settings_mod.models_dir, platform_fn=lambda: hardware_fn().platform,
+                              settings_mod=settings_mod)
     allowed_hosts = tuple(allowed_hosts)
 
     def hw():
         return hardware_fn()
+
+    auto_load_stop = threading.Event()
+    auto_load_lock = threading.Lock()
 
     def _auto_load():
         last = settings_mod.last_model()
@@ -372,15 +379,23 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
                 raise ValueError(assessment.reason)
             if last.get("media") and assessment.media_mode is None:
                 raise ValueError(assessment.media_reason)
-            runner.load(assessment, media=last.get("media", False))
+            with auto_load_lock:
+                if not auto_load_stop.is_set():
+                    runner.load(assessment, media=last.get("media", False))
         except Exception as exc:
             print(f"basal-ui: auto-load skipped: {exc}", file=sys.stderr)
 
     @asynccontextmanager
     async def lifespan(_app):
+        auto_load_thread = None
         if settings_mod.load().get("auto_load") and settings_mod.last_model():
-            threading.Thread(target=_auto_load, daemon=True).start()
+            auto_load_thread = threading.Thread(target=_auto_load, daemon=True)
+            auto_load_thread.start()
         yield
+        with auto_load_lock:
+            auto_load_stop.set()
+        if auto_load_thread is not None:
+            auto_load_thread.join(timeout=5)
         runner.unload()
         settings_mod.remove_keys_file()
 
@@ -438,6 +453,8 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
     @app.put("/api/serve")
     def put_serve(body: dict = Body(...)):
         try:
+            if "auto_load" in body and not isinstance(body["auto_load"], bool):
+                raise ValueError("auto_load must be a boolean")
             patch = {k: v for k, v in body.items() if k != "auto_load"}
             if patch:
                 settings_mod.update_serve(patch)
