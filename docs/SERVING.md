@@ -1,7 +1,7 @@
 # Serving, batch inference and benchmarks
 
-Flags of `basal-serve`, inference on a JSONL file with `basal-run`, a look inside one decision with `basal-viz`, and
-benchmarking a GPU.
+Flags of `basal-serve`, inference on a JSONL file with `basal-run`, a browser app that picks and serves a model for
+your hardware (`basal-ui`), a look inside one decision with `basal-viz`, and benchmarking a GPU.
 
 ## Serving modes
 
@@ -205,6 +205,55 @@ basal-viz --model Remek/basal-2.0-mini --port 8080     # then open http://127.0.
 It runs `--mode mps` on Apple Silicon and `--mode eager` elsewhere (`--device`, `--orders 1|2`, `--calibration` as for
 `basal-serve`), and only the Llama-architecture models (basal-1.0, basal-1.5, basal-2.0; not basal-omni). It is meant
 for exploring, not serving: every question runs one extra forward per option order to record all layers.
+
+## Browser app: pick a model for your hardware and try it
+
+`basal-ui` is a local web app in the style of LM Studio: it detects the machine, lists every basal model on Hugging
+Face with what this machine can do with it, downloads the one you choose, starts `basal-serve` for it and gives you a
+playground for decisions.
+
+```bash
+uv pip install "basal[ui,mlx]"        # [ui] adds FastAPI; add the engine extra of your machine (mlx, gguf, fp8, vllm)
+basal-ui --port 7860                  # then open http://127.0.0.1:7860
+```
+
+- **Hardware.** NVIDIA GPU (name, compute capability, memory), Apple Silicon (MLX's recommended working set) or CPU
+  (60% of RAM), the engines installed (`mlx`, `llama-cpp-python`, `vllm`, `media`), and the memory available now
+  (free GPU memory on NVIDIA; free + inactive + speculative pages from `vm_stat` on macOS, which leaves out reclaimable
+  file cache; `MemAvailable` on Linux).
+- **All models.** Every `Remek/basal-*` repository and each `.gguf` file of a `-GGUF` repository, with weight size,
+  estimated memory (weights × 1.2 + 1 GB), fit against the budget and *fit now* against the available memory (*fits*
+  up to 85%, *tight* up to 100%), and the `basal-serve` mode it would run in, or why it cannot run here and which
+  extra fixes that. Offline, the list is what is in the models directory.
+- **Suggested** (the default tab): cards for the models that fit both the budget and the memory available now, a
+  comfortable fit before a tight one. *Recommended*: the basal-2.0 family in the format of the machine (after
+  [HARDWARE.md](HARDWARE.md#recommendation): FP8 on NVIDIA GPUs with compute capability 8.9+ other than data-centre
+  GPUs and the RTX 4090, bf16 there, `-MLX-8bit` on Apple Silicon, GGUF `Q8_0` on a CPU with `llama-cpp-python`,
+  else bf16), 4.5B if it fits now, else mini. *Best quality*: the largest tier that fits now. *Fastest*: mini.
+  *Multimodal*: the largest basal-omni checkpoint this machine can serve with media. Without a reading of the
+  available memory the budget fit stands in for it.
+- **Model manager**: the models directory (default: the Hugging Face cache, `HF_HUB_CACHE`) can be set to any
+  writable directory; downloads, the downloaded marks, serving and deletes all use it. The setting is kept in
+  `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
+  can be deleted; for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is
+  left. The directory cannot change, and the loaded model cannot be deleted, while a model is loaded.
+- **Load** downloads only what serving needs (the chosen `.gguf` file of a `-GGUF` repository; not the 4.5B's
+  `think/` model), then runs `basal-serve` as a subprocess on a free local port and shows its log. One model at a
+  time; loading another one stops the first.
+- **Load with media**, for the basal-omni-1.0 bf16 checkpoints (mini and max: images and audio; ultra: images; the
+  FP8, GGUF and MLX ports and basal-omni-1.1-max have no encoders): `basal-serve --mode eager --media on`, with
+  `--device mps` on Apple Silicon and `--device cpu` on a machine without a GPU. Needs the `basal[media]` extra
+  (pillow, soundfile, scipy, torchvision); the row says so when it is missing.
+- **Playground**: the bundled examples, a question builder (`choice`, `noul`, `score`) or the raw JSON request;
+  answers with calibrated probabilities, confidence and latency. Requests go to the model's `POST /v1/systemone`.
+  With a media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail` and
+  the audio `lang`.
+
+The app binds `127.0.0.1` by default and has no authentication. It answers only requests addressed to
+`127.0.0.1`, `localhost` or the `--host` given, and refuses changes (load, delete, settings) sent from other web
+origins, so a web page cannot drive it through the browser; `--host 0.0.0.0` lifts the host check and prints a
+warning. The NVIDIA, CPU and GGUF rules are covered by tests with simulated hardware; end to end it was run on Apple
+Silicon (MLX, and basal-omni-1.0-mini with an image on MPS).
 
 ## Benchmark your GPU
 

@@ -322,6 +322,7 @@ Each answer has a probability for every option, the chosen key and the confidenc
 | Apple Silicon in detail, CPU | [docs/INSTALL.md](docs/INSTALL.md#apple-silicon-mlx) |
 | images and audio (basal-omni) | [below](#images-and-audio-basal-omni-experimental) |
 | all seven engines compared | [docs/INSTALL.md](docs/INSTALL.md#engines) |
+| a browser app: hardware check, model suggestion, playground (`basal-ui`) | [docs/SERVING.md](docs/SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it) |
 | a JSONL file, serving flags, benchmarking your GPU | [docs/SERVING.md](docs/SERVING.md) |
 | Python client | [docs/INSTALL.md](docs/INSTALL.md#nvidia-gpu-the-basal-engine-recommended) |
 
