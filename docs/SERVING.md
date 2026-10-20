@@ -179,6 +179,11 @@ basal-ui --port 7860                  # then open http://127.0.0.1:7860
   basal-2.0 family; FP8 on NVIDIA GPUs with compute capability 8.9+ other than data-centre GPUs and the RTX 4090
   (bf16 there), `-MLX-8bit` on Apple Silicon, GGUF `Q8_0` on a CPU with `llama-cpp-python`, else bf16; 4.5B if it
   fits, else mini. *Best quality* is the largest tier that fits.
+- **Model manager**: the models directory (default: the Hugging Face cache, `HF_HUB_CACHE`) can be set to any
+  writable directory; downloads, the downloaded marks, serving and deletes all use it. The setting is kept in
+  `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
+  can be deleted; for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is
+  left. The directory cannot change, and the loaded model cannot be deleted, while a model is loaded.
 - **Load** downloads only what serving needs (the chosen `.gguf` file of a `-GGUF` repository; not the 4.5B's
   `think/` model), then runs `basal-serve` as a subprocess on a free local port and shows its log. One model at a
   time; loading another one stops the first.
