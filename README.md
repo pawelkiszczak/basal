@@ -374,8 +374,8 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --hos
 claude mcp add --transport http basal http://127.0.0.1:8000/mcp     # Claude Code; other hosts take the same URL
 ```
 
-No authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway in front. Details:
-[docs/MCP.md](docs/MCP.md).
+Without `--api-keys` there is no authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway in
+front; with `--api-keys` every request needs a key. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Documentation
 
