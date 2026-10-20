@@ -12,6 +12,7 @@
 .directory-row{display:flex;align-items:end;gap:10px;flex-wrap:wrap}.directory-row>div:first-child{flex:1 1 320px}.directory-row input{width:100%}.directory-hint{font:11px/1.5 var(--mono);overflow-wrap:anywhere;margin-top:7px}.manager-error{margin-top:8px}.disk-list{margin-top:18px}.disk-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line)}.disk-row:last-child{border-bottom:0}.disk-info{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.disk-total{font:11px/1.5 var(--mono);color:var(--muted);text-align:right;margin-top:8px}.button-small{min-height:32px;padding:5px 10px;font-size:12px}.button-outline{background:transparent}
 .prob.winner .bar span{background:var(--accent)}
 [hidden]{display:none!important}
+.media-items{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.media-item{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:4px;padding:5px 8px;font-size:12px}.media-item img{width:40px;height:40px;object-fit:cover;border-radius:3px}.media-item button{min-height:28px;padding:3px 8px}
 </style>
 </head>
 <body><main>
@@ -20,15 +21,15 @@
 <section id="recommendation" class="card recommend" hidden><div><div class="muted">Recommended for your <span id="recommendedDevice">device</span></div><strong id="recommendedText"></strong></div><button id="recommendedLoad" class="primary">Load recommended</button></section>
 <section class="card" id="manager"><div class="section-index">02 / MODEL MANAGER</div><div class="field"><label for="modelsDir">Models directory</label><div class="directory-row"><div><input id="modelsDir" type="text" autocomplete="off"></div><button id="saveModelsDir" class="button-outline button-small" type="button">Save</button><button id="defaultModelsDir" class="button-outline button-small" type="button">Use default</button></div><div id="defaultModelsDirHint" class="directory-hint muted"></div><div id="modelsDirError" class="status-error manager-error" role="alert"></div></div><div class="disk-list"><div class="section-head"><h3>On disk</h3></div><div id="diskModels"><div class="empty">Loading models…</div></div><div id="diskTotal" class="disk-total"></div></div></section>
 <section class="card"><div class="section-index">03 / MODELS</div><div class="section-head"><h2>Models</h2><div class="controls"><label><input id="olderToggle" type="checkbox"> Older families</label><label><input id="notRunnableToggle" type="checkbox"> Show not runnable</label><label><input id="downloadedToggle" type="checkbox"> Downloaded only</label><button id="refreshModels">Refresh</button></div></div><div id="models" class="table-wrap"><div class="empty">Loading models…</div></div></section>
-<section id="status" class="status" aria-live="polite"><div class="status-head"><span class="status-dot" id="statusDot"></span><span class="state-pill" id="stateLabel">idle</span><span class="spinner" id="startingSpinner" hidden></span><span class="status-model" id="statusModel">No model loaded</span><span id="statusMode" class="chip" hidden></span><div class="progress-wrap" id="progressWrap" hidden><div class="progress"><span id="progressBar"></span></div><small id="progressText"></small></div><span id="statusError" class="status-error"></span><button id="unloadButton" hidden>Unload</button><button id="logsToggle" aria-expanded="false">Logs</button></div><pre id="logs" class="logs" hidden></pre></section>
-<section class="card"><div class="section-index">04 / PLAYGROUND</div><div class="playground-head"><h2>Playground</h2><select id="examples"><option value="">Load an example…</option></select><label><input id="editJsonToggle" type="checkbox"> Edit JSON</label></div><fieldset id="playground" disabled><div id="builder"><div class="field"><label for="stateInput">State</label><textarea id="stateInput" placeholder="Describe the state to evaluate"></textarea></div><div class="field"><div class="section-head"><h3>Questions</h3><button type="button" id="addQuestion">Add question</button></div><div id="questions" class="questions"></div></div></div><div class="editjson" id="editJsonArea" hidden><label for="requestJson">Request JSON (sent as-is)</label><textarea id="requestJson" spellcheck="false"></textarea></div><button id="sendButton" class="primary" type="button" style="margin-top:12px">Send decision</button><div id="decideError" class="error-box" hidden></div><div id="results" class="results"></div><details id="rawDetails" hidden><summary>Raw response JSON</summary><pre id="rawResponse"></pre></details></fieldset><div id="playgroundHint" class="muted" style="margin-top:10px">Load a model to enable the playground.</div></section>
+<section id="status" class="status" aria-live="polite"><div class="status-head"><span class="status-dot" id="statusDot"></span><span class="state-pill" id="stateLabel">idle</span><span class="spinner" id="startingSpinner" hidden></span><span class="status-model" id="statusModel">No model loaded</span><span id="statusMode" class="chip" hidden></span><span id="statusMedia" class="chip" hidden></span><div class="progress-wrap" id="progressWrap" hidden><div class="progress"><span id="progressBar"></span></div><small id="progressText"></small></div><span id="statusError" class="status-error"></span><button id="unloadButton" hidden>Unload</button><button id="logsToggle" aria-expanded="false">Logs</button></div><pre id="logs" class="logs" hidden></pre></section>
+<section class="card"><div class="section-index">04 / PLAYGROUND</div><div class="playground-head"><h2>Playground</h2><select id="examples"><option value="">Load an example…</option></select><label><input id="editJsonToggle" type="checkbox"> Edit JSON</label></div><fieldset id="playground" disabled><div id="builder"><div class="field"><label for="stateInput">State</label><textarea id="stateInput" placeholder="Describe the state to evaluate"></textarea></div><div class="field"><div class="section-head"><h3>Questions</h3><button type="button" id="addQuestion">Add question</button></div><div id="questions" class="questions"></div></div></div><div class="field" id="mediaField" hidden><label for="mediaInput">Media</label><input id="mediaInput" type="file" multiple accept="image/*,audio/*"><div class="field" id="mediaOptions" hidden><label for="mediaDetail">Image detail</label><select id="mediaDetail"><option value="default">default</option><option value="high">high</option></select></div><div class="field"><label for="mediaLang">Language</label><select id="mediaLang"><option value="auto">auto</option><option value="pl">pl</option><option value="en">en</option></select></div><div id="mediaItems" class="media-items"></div><div id="mediaError" class="error-box" role="alert" hidden></div></div><div class="editjson" id="editJsonArea" hidden><label for="requestJson">Request JSON (sent as-is)</label><textarea id="requestJson" spellcheck="false"></textarea></div><button id="sendButton" class="primary" type="button" style="margin-top:12px">Send decision</button><div id="decideError" class="error-box" hidden></div><div id="results" class="results"></div><details id="rawDetails" hidden><summary>Raw response JSON</summary><pre id="rawResponse"></pre></details></fieldset><div id="playgroundHint" class="muted" style="margin-top:10px">Load a model to enable the playground.</div></section>
 </main>
 <script>
 'use strict';
 const $ = (s, root=document) => root.querySelector(s);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const gb = n => n == null ? '—' : `${(Number(n) / 1e9).toFixed(1)} GB`;
-let modelData = [], hw = null, examples = [], pollTimer = null;
+let modelData = [], hw = null, examples = [], pollTimer = null, loadedMedia = [], selectedMedia = [], mediaSelection = 0;
 async function api(path, options={}) {
   const response = await fetch(path, {headers:{'Content-Type':'application/json',...(options.headers||{})}, ...options});
   const text = await response.text(); let data;
@@ -71,11 +72,14 @@ function renderModels(data) {
       const classes = `fit-${m.fit || 'unknown'}`;
       const reason = !m.runnable && m.reason ? `<span class="reason" title="${esc(m.reason)}">${esc(m.reason)}</span>` : '';
       const badges = `${m.id===data.recommended?'<span class="badge rec">Recommended</span>':''}${m.id===data.best_quality?'<span class="badge best">Best quality</span>':''}${m.experimental?'<span class="badge experimental">Experimental</span>':''}`;
-      html += `<tr class="${m.runnable?'':'not-runnable'}"><td class="nowrap"><span class="model-name">${esc(m.tier)}</span>${reason}</td><td class="nowrap">${esc(m.label)}</td><td>${gb(m.weights_bytes)}</td><td>${gb(m.est_memory_bytes)}</td><td><span class="badge ${classes}">${esc(m.fit || 'unknown')}</span></td><td>${badges}</td><td>${m.downloaded?`✓${m.downloaded_bytes == null?'':` ${gb(m.downloaded_bytes)}`}`:''}</td><td>${m.runnable?`<button class="load-model" data-id="${esc(m.id)}">Load</button>`:'—'}</td></tr>`;
+      const mediaReason = !m.media_mode && (m.media || []).length ? `<small class="muted">${esc(m.media_reason || '')}</small>` : '';
+      const mediaButton = m.media_mode ? `<button class="load-media-model" data-id="${esc(m.id)}" title="${esc(mediaTitle(m.media || []))}">Load with media</button>` : '';
+      html += `<tr class="${m.runnable?'':'not-runnable'}"><td class="nowrap"><span class="model-name">${esc(m.tier)}</span>${reason}${mediaReason}</td><td class="nowrap">${esc(m.label)}</td><td>${gb(m.weights_bytes)}</td><td>${gb(m.est_memory_bytes)}</td><td><span class="badge ${classes}">${esc(m.fit || 'unknown')}</span></td><td>${badges}</td><td>${m.downloaded?`✓${m.downloaded_bytes == null?'':` ${gb(m.downloaded_bytes)}`}`:''}</td><td>${m.runnable?`<button class="load-model" data-id="${esc(m.id)}">Load</button>${mediaButton}`:'—'}</td></tr>`;
     }
   }
   $('#models').innerHTML = html + '</tbody></table>';
   document.querySelectorAll('.load-model').forEach(b => b.addEventListener('click', () => loadModel(b.dataset.id)));
+  document.querySelectorAll('.load-media-model').forEach(b => b.addEventListener('click', () => loadModel(b.dataset.id, true)));
 }
 function renderDiskModels() {
   const rows = modelData.filter(m => m.downloaded), total = rows.reduce((sum,m) => sum + (Number(m.downloaded_bytes) || 0),0);
@@ -108,11 +112,58 @@ async function loadModels(refresh=false) {
   try { renderModels(await api(`/api/models${refresh?'?refresh=1':''}`)); }
   catch (e) { $('#models').innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }
 }
-async function loadModel(id) {
-  try { await api('/api/load', {method:'POST', body:JSON.stringify({id})}); await refreshStatus(); }
+async function loadModel(id, media=false) {
+  clearSelectedMedia();
+  try { await api('/api/load', {method:'POST', body:JSON.stringify({id,media})}); await refreshStatus(); }
   catch (e) { showStatusError(e.message); }
 }
 function showStatusError(text) { $('#statusError').textContent = text || ''; }
+function mediaTitle(kinds) { return kinds.map(kind => kind === 'image' ? 'images' : kind === 'audio' ? 'audio' : kind).join(' and '); }
+function clearSelectedMedia() {
+  mediaSelection++;
+  selectedMedia.forEach(item => URL.revokeObjectURL(item.url));
+  selectedMedia = [];
+  $('#mediaInput').value = '';
+  renderSelectedMedia();
+}
+function renderSelectedMedia() {
+  $('#mediaItems').innerHTML = selectedMedia.map((item,index) => `<div class="media-item">${item.kind === 'image' ? `<img src="${esc(item.url)}" alt="${esc(item.file.name)}">` : ''}<span>${esc(item.file.name)}</span><button type="button" data-index="${index}" aria-label="Remove ${esc(item.file.name)}">Remove</button></div>`).join('');
+  $('#mediaItems').querySelectorAll('button').forEach(button => button.addEventListener('click', () => {
+    URL.revokeObjectURL(selectedMedia[Number(button.dataset.index)].url);
+    selectedMedia.splice(Number(button.dataset.index),1);
+    renderSelectedMedia(); syncRequest(true);
+  }));
+  $('#mediaOptions').hidden = !selectedMedia.some(item => item.kind === 'image');
+}
+function showMediaError(message='') {
+  $('#mediaError').textContent = message;
+  $('#mediaError').hidden = !message;
+}
+async function selectMedia(files) {
+  const selection = ++mediaSelection;
+  showMediaError();
+  if (files.length > 8) { showMediaError('at most 8 media items'); return; }
+  const supported = new Set(loadedMedia);
+  for (const file of files) {
+    if (file.size > 20 * 1024 * 1024) { showMediaError(`${file.name} is over 20 MiB`); return; }
+    const kind = file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : null;
+    if (!kind) { showMediaError(`${file.name} must be an image or audio file`); return; }
+    if (!supported.has(kind)) { showMediaError(`This model does not support ${kind}`); return; }
+  }
+  const readFile = file => new Promise((resolve,reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({file,kind:file.type.startsWith('image/')?'image':'audio',data:String(reader.result).split(',')[1]});
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+  try {
+    const filesData = await Promise.all(files.map(readFile));
+    if (selection !== mediaSelection) return;
+    selectedMedia.forEach(item => URL.revokeObjectURL(item.url));
+    selectedMedia = filesData.map(item => ({...item,url:URL.createObjectURL(item.file)}));
+    renderSelectedMedia(); syncRequest(true);
+  } catch (error) { if (selection === mediaSelection) showMediaError(error.message); }
+}
 function renderStatus(s) {
   $('#stateLabel').textContent = s.state || 'idle';
   const dot=$('#statusDot'); dot.className=`status-dot ${s.state==='ready'?'ready':s.state==='error'?'error':''}`;
@@ -120,6 +171,12 @@ function renderStatus(s) {
   $('#headerStatus').textContent=s.state==='ready'?'MODEL READY':s.state==='error'?'MODEL ERROR':'LOCAL DECISION ENGINE';
   $('#statusModel').textContent = s.model || 'No model loaded';
   $('#statusMode').textContent = s.mode || ''; $('#statusMode').hidden = !s.mode;
+  loadedMedia = Array.isArray(s.media) ? s.media : [];
+  const mediaChip = loadedMedia.map(kind => kind === 'image' ? 'images' : kind).join(' · ');
+  $('#statusMedia').textContent = mediaChip; $('#statusMedia').hidden = !loadedMedia.length;
+  $('#mediaField').hidden = !loadedMedia.length;
+  $('#mediaInput').accept = [loadedMedia.includes('image')?'image/*':'',loadedMedia.includes('audio')?'audio/*':''].filter(Boolean).join(',');
+  if (!loadedMedia.length) clearSelectedMedia();
   $('#startingSpinner').hidden = s.state !== 'starting';
   $('#progressWrap').hidden = s.state !== 'downloading';
   $('#unloadButton').hidden = !['ready','downloading','starting','error'].includes(s.state);
@@ -159,9 +216,13 @@ function parseQuestionCard(card) {
 }
 function buildRequest() {
   const questions={}; for(const card of document.querySelectorAll('.question')) { const [name,q]=parseQuestionCard(card); questions[name]=q; }
-  return {state:parseStructuredText($('#stateInput').value),questions};
+  const request = {state:parseStructuredText($('#stateInput').value),questions};
+  if (selectedMedia.length) request.media = selectedMedia.map(({kind,data}) => ({type:kind,data}));
+  if (selectedMedia.some(item => item.kind === 'image')) request.detail = $('#mediaDetail').value;
+  if ($('#mediaLang').value !== 'auto') request.lang = $('#mediaLang').value;
+  return request;
 }
-function syncRequest() { if(!$('#editJsonToggle').checked) $('#requestJson').value=JSON.stringify(buildRequest(),null,2); }
+function syncRequest(force=false) { if(force || !$('#editJsonToggle').checked) $('#requestJson').value=JSON.stringify(buildRequest(),null,2); }
 function addQuestion(name='question', q={type:'choice',instructions:'',criteria:{}}) {
   const card=document.createElement('div'); card.className='question';
   const type=['choice','noul','score'].includes(q.type)?q.type:'choice';
@@ -197,13 +258,16 @@ function renderResults(data, request) {
   const answers=data?.answers || data || {}; let html='';
   for(const [name,answer] of Object.entries(answers)) {
     const q=request.questions?.[name]||{}, probs=answer?.probabilities;
-    if(!answer || !probs || typeof probs!=='object') { html+=`<article class="answer"><h3>${esc(name)}</h3><pre>${esc(JSON.stringify(answer,null,2))}</pre></article>`; continue; }
+    const calibration = answer?.calibration === 'text' ? '<div class="answer-meta">calibration fitted on text</div>' : '';
+    if(!answer || !probs || typeof probs!=='object') { html+=`<article class="answer"><h3>${esc(name)}</h3>${calibration}<pre>${esc(JSON.stringify(answer,null,2))}</pre></article>`; continue; }
     const headline=resultHeadline(name,answer,q), type=answer.type||q.type||'unknown';
     const entries=Object.entries(probs).sort((a,b)=>Number(b[1])-Number(a[1]));
     const bars=entries.map(([k,v],i)=>{const p=Math.max(0,Math.min(1,Number(v)||0));return `<div class="prob ${i===0?'winner':''}"><span>${esc(k)}${q.criteria&&q.criteria[k]?` · ${esc(q.criteria[k])}`:''}</span><div class="bar"><span style="width:${p*100}%"></span></div><strong>${(p*100).toFixed(1)}%</strong></div>`;}).join('');
-    html+=`<article class="answer"><h3><span>${esc(name)}</span><span class="chip">${esc(type)}</span></h3>${headline?`<div class="headline">${esc(headline)}</div>`:''}<div class="answer-meta">Confidence: ${answer.confidence==null?'—':`${(Number(answer.confidence)*100).toFixed(1)}%`}</div>${bars}</article>`;
+    html+=`<article class="answer"><h3><span>${esc(name)}</span><span class="chip">${esc(type)}</span></h3>${headline?`<div class="headline">${esc(headline)}</div>`:''}<div class="answer-meta">Confidence: ${answer.confidence==null?'—':`${(Number(answer.confidence)*100).toFixed(1)}%`}</div>${calibration}${bars}</article>`;
   }
-  const u=data?.usage; const usage=u?`<div class="answer-meta">Latency: ${u.latency_ms??'—'} ms · Input tokens: ${u.input_tokens??'—'} · Questions: ${u.questions??'—'}</div>`:'';
+  const u=data?.usage, mediaUsage=u?.media;
+  const mediaSummary=mediaUsage?` · Media: ${mediaUsage.images??0} images, ${mediaUsage.audio??0} audio, ${mediaUsage.media_tokens??0} tokens`:'';
+  const usage=u?`<div class="answer-meta">Latency: ${u.latency_ms??'—'} ms · Input tokens: ${u.input_tokens??'—'} · Questions: ${u.questions??'—'}${mediaSummary}</div>`:'';
   $('#results').innerHTML=html ? usage+html : '<div class="empty">No answers returned.</div>';
   $('#rawResponse').textContent=JSON.stringify(data,null,2); $('#rawDetails').hidden=false;
 }
@@ -230,7 +294,11 @@ $('#unloadButton').addEventListener('click',async()=>{try{renderStatus(await api
 $('#logsToggle').addEventListener('click',()=>{const logs=$('#logs');logs.hidden=!logs.hidden;$('#logsToggle').setAttribute('aria-expanded',String(!logs.hidden));});
 $('#addQuestion').addEventListener('click',()=>addQuestion());
 $('#stateInput').addEventListener('input',syncRequest);
-$('#editJsonToggle').addEventListener('change',()=>{$('#editJsonArea').hidden=!$('#editJsonToggle').checked;$('#builder').hidden=$('#editJsonToggle').checked;if(!$('#editJsonToggle').checked) syncRequest();});
+$('#editJsonToggle').addEventListener('change',()=>{if($('#editJsonToggle').checked) syncRequest(true);else syncRequest();$('#editJsonArea').hidden=!$('#editJsonToggle').checked;$('#builder').hidden=$('#editJsonToggle').checked;});
+$('#mediaInput').addEventListener('change',event=>selectMedia(Array.from(event.target.files||[])));
+$('#mediaDetail').addEventListener('change',()=>syncRequest(true));
+$('#mediaLang').addEventListener('change',()=>syncRequest(true));
+window.addEventListener('beforeunload',()=>selectedMedia.forEach(item=>URL.revokeObjectURL(item.url)));
 addQuestion();
 $('#examples').addEventListener('change',e=>{const item=examples[Number(e.target.value)];if(item?.request)setRequest(item.request);else if(item)setRequest({state:item.state,questions:item.questions});});
 $('#sendButton').addEventListener('click',sendDecision);

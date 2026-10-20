@@ -35,6 +35,8 @@ def _ram() -> int | None:
 def detect() -> Hardware:
     ram = _ram()
     engines: set[str] = set()
+    if all(importlib.util.find_spec(name) is not None for name in ("PIL", "soundfile", "scipy", "torchvision")):
+        engines.add("media")
     try:
         import torch
         if torch.cuda.is_available():

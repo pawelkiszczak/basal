@@ -32,8 +32,9 @@ class Runner:
     """One model at a time: idle -> downloading -> starting -> ready, or error. Every load or stop starts a new
     generation; a background load that finds its generation outdated stops instead of touching the state."""
 
-    def __init__(self, models_dir_fn=settings.models_dir):
+    def __init__(self, models_dir_fn=settings.models_dir, platform_fn=lambda: hardware.detect().platform):
         self.models_dir_fn = models_dir_fn
+        self.platform_fn = platform_fn
         self.lock = threading.RLock()
         self.gen = 0
         self.process = None
@@ -43,6 +44,7 @@ class Runner:
     def _reset(self):
         self.state, self.model, self.mode = "idle", None, None
         self.command, self.progress, self.error, self.base_url = None, None, None, None
+        self.media_requested, self.media = False, []
 
     def status(self):
         with self.lock:
@@ -50,17 +52,20 @@ class Runner:
                 self.state = "error"
                 self.error = f"basal-serve exited ({self.process.returncode}): {self.logs[-1] if self.logs else ''}"
             return {"state": self.state, "model": self.model, "mode": self.mode, "command": self.command,
-                    "progress": self.progress, "error": self.error, "logs": list(self.logs)}
+                    "progress": self.progress, "error": self.error, "logs": list(self.logs),
+                    "media_requested": self.media_requested, "media": self.media}
 
-    def load(self, assessment):
+    def load(self, assessment, media=False):
         with self.lock:
             if self.state in ("downloading", "starting"):
                 raise RuntimeError("a model is already loading; unload it first")
             self._stop_locked()
-            self.state, self.model, self.mode = "downloading", assessment.variant.id, assessment.mode
+            self.state, self.model = "downloading", assessment.variant.id
+            self.mode = "eager" if media else assessment.mode
+            self.media_requested, self.media = media, []
             self.logs.clear()
             gen = self.gen
-        threading.Thread(target=self._start, args=(assessment, gen), daemon=True).start()
+        threading.Thread(target=self._start, args=(assessment, gen, media), daemon=True).start()
         return self.status()
 
     def _update(self, gen, **fields):
@@ -90,7 +95,7 @@ class Runner:
             raise path
         return Path(path)
 
-    def _start(self, assessment, gen):
+    def _start(self, assessment, gen, media=False):
         v = assessment.variant
         try:
             path = catalog.is_downloaded(v, self.models_dir_fn()) or self._download(v, gen)
@@ -99,7 +104,8 @@ class Runner:
             with socket.socket() as s:
                 s.bind(("127.0.0.1", 0))
                 port = s.getsockname()[1]
-            command = [sys.executable, "-m", "basal.server", *catalog.serve_args(v, path, assessment.mode),
+            command = [sys.executable, "-m", "basal.server",
+                       *catalog.serve_args(v, path, assessment.mode, self.platform_fn() if media else None),
                        "--host", "127.0.0.1", "--port", str(port)]
             with self.lock:
                 if gen != self.gen:
@@ -117,7 +123,16 @@ class Runner:
                                        f"{self.logs[-1] if self.logs else 'no output'}")
                 try:
                     if httpx.get(self.base_url + "/health", timeout=1).status_code == 200:
-                        self._update(gen, state="ready")
+                        media_kinds = []
+                        if media:
+                            try:
+                                response = httpx.get(self.base_url + "/v1/models", timeout=1)
+                                response.raise_for_status()
+                                models = response.json().get("models", [])
+                                media_kinds = models[0].get("media", []) if models else []
+                            except Exception:
+                                pass
+                        self._update(gen, state="ready", media=media_kinds)
                         return
                 except httpx.HTTPError:
                     pass
@@ -198,7 +213,7 @@ def _byte_counter():
 
 def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, runner=None,
               settings_mod=settings) -> FastAPI:
-    runner = runner or Runner(models_dir_fn=settings_mod.models_dir)
+    runner = runner or Runner(models_dir_fn=settings_mod.models_dir, platform_fn=lambda: hw().platform)
     hw_cache = []
 
     def hw():
@@ -256,6 +271,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
                 "models_dir": str(Path(cache_dir).resolve()), "models": [
             {**{k: getattr(a.variant, k) for k in fields}, "runnable": a.runnable, "reason": a.reason,
              "mode": a.mode, "est_memory_bytes": a.est_memory_bytes, "fit": a.fit,
+             "media": list(a.variant.media), "media_mode": a.media_mode, "media_reason": a.media_reason,
              "downloaded": on_disk[a.variant.id] is not None, "downloaded_bytes": on_disk[a.variant.id]}
             for a in assessed]}
 
@@ -278,11 +294,16 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
         variant = next((v for v in variants if v.id == body.get("id")), None)
         if variant is None:
             raise HTTPException(400, f"unknown model {body.get('id')!r}")
+        media = body.get("media", False)
+        if not isinstance(media, bool):
+            raise HTTPException(400, "media must be a boolean")
         assessment = catalog.assess(variant, hw())
-        if not assessment.runnable:
+        if not assessment.runnable and not media:
             raise HTTPException(400, assessment.reason)
+        if media and assessment.media_mode is None:
+            raise HTTPException(400, assessment.media_reason)
         try:
-            return runner.load(assessment)
+            return runner.load(assessment, media=media)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
 

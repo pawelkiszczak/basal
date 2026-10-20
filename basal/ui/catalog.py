@@ -19,6 +19,13 @@ CURRENT_TEXT_FAMILY = "basal-2.0"
 # compilation stalled there); FP8 on other GPUs with compute capability 8.9+
 _BF16_GPUS = ("A100", "H100", "H200", "H800", "B100", "B200", "B300", "GH200", "GB200", "4090")
 GIB = 1024**3
+# The basal-omni checkpoints that carry image / audio encoders (docs/OMNI.md); basal-omni-1.1-max is Gemma 4 Unified
+# without them, and the quantised ports drop them.
+MEDIA_KINDS = {
+    ("basal-omni-1.0", "mini"): ("image", "audio"),
+    ("basal-omni-1.0", "max"): ("image", "audio"),
+    ("basal-omni-1.0", "ultra"): ("image",),
+}
 
 
 @dataclass(frozen=True)
@@ -32,6 +39,7 @@ class Variant:
     gguf_file: str | None
     weights_bytes: int | None
     experimental: bool
+    media: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,8 @@ class Assessment:
     mode: str | None
     est_memory_bytes: int | None
     fit: str
+    media_mode: str | None
+    media_reason: str | None
 
 
 def parse_repo(repo_id: str) -> tuple[str, str, str] | None:
@@ -65,7 +75,8 @@ def _variants(repo: str, files: dict[str, int | None]) -> list[Variant]:
     family, tier, port = parse_repo(repo)
     def make(filename, size):
         return Variant(f"{repo}:{filename}" if filename else repo, repo, family, tier, port, _label(port, filename),
-                       filename, size, family.startswith("basal-omni-"))
+                       filename, size, family.startswith("basal-omni-"),
+                       MEDIA_KINDS.get((family, tier), ()) if port == "bf16" else ())
     if port == "GGUF":
         return [make(name, size) for name, size in files.items() if name.lower().endswith(".gguf")]
     sizes = [size for name, size in files.items() if name.endswith(".safetensors") and not _optional(name)]
@@ -153,6 +164,15 @@ def _mode(v: Variant, hw: Hardware) -> tuple[str | None, str | None]:
     return "eager", None
 
 
+def _media_mode(v: Variant, hw: Hardware) -> tuple[str | None, str | None]:
+    """("eager", None) when this machine can serve the variant with --media on, else (None, why not)."""
+    if not v.media:
+        return None, "this checkpoint has no image or audio encoder"
+    if "media" not in hw.engines:
+        return None, "images and audio need pillow, soundfile, scipy and torchvision: install basal[media]"
+    return "eager", None
+
+
 def assess(v: Variant, hw: Hardware) -> Assessment:
     mode, reason = _mode(v, hw)
     est = int(v.weights_bytes * 1.2) + GIB if v.weights_bytes is not None else None  # weights + runtime + KV cache
@@ -164,7 +184,8 @@ def assess(v: Variant, hw: Hardware) -> Assessment:
         fit = "tight"
     else:
         fit = "too_large"
-    return Assessment(v, mode is not None, reason, mode, est, fit)
+    media_mode, media_reason = _media_mode(v, hw)
+    return Assessment(v, mode is not None, reason, mode, est, fit, media_mode, media_reason)
 
 
 def preferred_format(hw: Hardware) -> str:
@@ -265,7 +286,12 @@ def delete(v: Variant, cache_dir: Path) -> int:
     return freed
 
 
-def serve_args(v: Variant, local_dir: Path, mode: str) -> list[str]:
+def serve_args(v: Variant, local_dir: Path, mode: str, media_platform: str | None = None) -> list[str]:
+    """basal-serve arguments; media_platform (the Hardware.platform) serves with images / audio: --mode eager
+    --media on, on the Apple GPU or the CPU where there is no CUDA."""
+    if media_platform:
+        args = ["--model", str(local_dir), "--mode", "eager", "--media", "on"]
+        return args + {"apple": ["--device", "mps"], "cpu": ["--device", "cpu"]}.get(media_platform, [])
     args = ["--model", str(local_dir), "--mode", mode]
     if v.port == "GGUF":
         args += ["--gguf", str(local_dir / v.gguf_file)]

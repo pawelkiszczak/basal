@@ -1,7 +1,7 @@
 import math
 from pathlib import Path
 
-from basal.ui.catalog import Variant, _label, _variants, assess, delete, download_kwargs, parse_repo, recommend, serve_args
+from basal.ui.catalog import Variant, _label, _media_mode, _variants, assess, delete, download_kwargs, parse_repo, recommend, serve_args
 from basal.ui.hardware import Hardware
 
 
@@ -14,6 +14,46 @@ def variant(repo="Remek/basal-2.0-4.5B", port=None, size=None, gguf=None):
     size = size if size is not None else int({"mini": 2, "4.5B": 8, "max": 12, "ultra": 16}.get(tier, 8) * 1024**3)
     return Variant(f"{repo}:{gguf}" if gguf else repo, repo, family, tier, port, _label(port, gguf), gguf, size,
                    family.startswith("basal-omni-"))
+
+
+
+def test_hardware_detects_media_engine(monkeypatch):
+    from basal.ui import hardware
+
+    find_spec = hardware.importlib.util.find_spec
+    packages = {"PIL", "soundfile", "scipy", "torchvision"}
+    monkeypatch.setattr(hardware.importlib.util, "find_spec",
+                        lambda name: object() if name in packages else find_spec(name))
+    assert "media" in hardware.detect().engines
+    monkeypatch.setattr(hardware.importlib.util, "find_spec",
+                        lambda name: None if name == "torchvision" else find_spec(name))
+    assert "media" not in hardware.detect().engines
+
+
+def test_media_kinds_and_mode_eligibility():
+    for tier, kinds in (("mini", ("image", "audio")), ("max", ("image", "audio")), ("ultra", ("image",))):
+        (v,) = _variants(f"Remek/basal-omni-1.0-{tier}", {})
+        assert v.media == kinds
+        (mlx,) = _variants(f"Remek/basal-omni-1.0-{tier}-MLX-8bit", {})
+        assert mlx.media == ()
+    for repo in ("Remek/basal-omni-1.1-max", "Remek/basal-omni-1.0-mini-MLX"):
+        (v,) = _variants(repo, {})
+        assert v.media == ()
+
+    v = _variants("Remek/basal-omni-1.0-mini", {})[0]
+    for platform in ("cuda", "apple", "cpu"):
+        assert _media_mode(v, hw(platform, engines=frozenset({"media"}))) == ("eager", None)
+        mode, reason = _media_mode(v, hw(platform, engines=frozenset()))
+        assert mode is None and "install basal[media]" in reason
+    assert _media_mode(_variants("Remek/basal-2.0-mini", {})[0], hw())[1] == \
+        "this checkpoint has no image or audio encoder"
+
+
+def test_media_serve_args_devices():
+    v = _variants("Remek/basal-omni-1.0-mini", {})[0]
+    for platform, device in (("cuda", []), ("apple", ["--device", "mps"]), ("cpu", ["--device", "cpu"])):
+        args = serve_args(v, Path("/model"), "mlx", media_platform=platform)
+        assert args == ["--model", "/model", "--mode", "eager", "--media", "on", *device]
 
 
 def test_parse_repo_contract_names():
