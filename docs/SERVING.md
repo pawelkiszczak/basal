@@ -170,15 +170,20 @@ basal-ui --port 7860                  # then open http://127.0.0.1:7860
 ```
 
 - **Hardware.** NVIDIA GPU (name, compute capability, memory), Apple Silicon (MLX's recommended working set) or CPU
-  (60% of RAM), and the engines installed (`mlx`, `llama-cpp-python`, `vllm`).
-- **Models.** Every `Remek/basal-*` repository and each `.gguf` file of a `-GGUF` repository, with weight size,
-  estimated memory (weights × 1.2 + 1 GB), fit (*fits* up to 85% of the budget, *tight* up to 100%), and the
-  `basal-serve` mode it would run in, or why it cannot run here and which extra fixes that. Offline, the list is
-  what is already in the Hugging Face cache.
-- **Recommendation**, after [HARDWARE.md](HARDWARE.md#recommendation) and the model advice in the README: the
-  basal-2.0 family; FP8 on NVIDIA GPUs with compute capability 8.9+ other than data-centre GPUs and the RTX 4090
-  (bf16 there), `-MLX-8bit` on Apple Silicon, GGUF `Q8_0` on a CPU with `llama-cpp-python`, else bf16; 4.5B if it
-  fits, else mini. *Best quality* is the largest tier that fits.
+  (60% of RAM), the engines installed (`mlx`, `llama-cpp-python`, `vllm`, `media`), and the memory available now
+  (free GPU memory on NVIDIA; free + inactive + speculative pages from `vm_stat` on macOS, which leaves out reclaimable
+  file cache; `MemAvailable` on Linux).
+- **All models.** Every `Remek/basal-*` repository and each `.gguf` file of a `-GGUF` repository, with weight size,
+  estimated memory (weights × 1.2 + 1 GB), fit against the budget and *fit now* against the available memory (*fits*
+  up to 85%, *tight* up to 100%), and the `basal-serve` mode it would run in, or why it cannot run here and which
+  extra fixes that. Offline, the list is what is in the models directory.
+- **Suggested** (the default tab): cards for the models that fit both the budget and the memory available now, a
+  comfortable fit before a tight one. *Recommended*: the basal-2.0 family in the format of the machine (after
+  [HARDWARE.md](HARDWARE.md#recommendation): FP8 on NVIDIA GPUs with compute capability 8.9+ other than data-centre
+  GPUs and the RTX 4090, bf16 there, `-MLX-8bit` on Apple Silicon, GGUF `Q8_0` on a CPU with `llama-cpp-python`,
+  else bf16), 4.5B if it fits now, else mini. *Best quality*: the largest tier that fits now. *Fastest*: mini.
+  *Multimodal*: the largest basal-omni checkpoint this machine can serve with media. Without a reading of the
+  available memory the budget fit stands in for it.
 - **Model manager**: the models directory (default: the Hugging Face cache, `HF_HUB_CACHE`) can be set to any
   writable directory; downloads, the downloaded marks, serving and deletes all use it. The setting is kept in
   `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
