@@ -144,6 +144,32 @@ your hardware (`basal-ui`), a look inside one decision with `basal-viz`, and ben
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md).
 
+## API access
+
+`basal-serve` is open by default. To require API keys, pass `--api-keys PATH` with a JSON file containing SHA-256
+digests (never plaintext secrets):
+
+```json
+{"keys": [{"name": "laptop", "sha256": "<64-character lowercase SHA-256 hex digest>", "admin": false}]}
+```
+
+Send the secret as `Authorization: Bearer <secret>` or `X-API-Key: <secret>`. `GET /health` remains open.
+`GET /v1/keys` requires an admin key and reports each key's in-memory `last_used` time. File changes take effect
+without restarting the server. MCP at `/mcp` uses the same authentication.
+
+`--cors-origins` accepts a comma-separated list of browser origins, for example
+`--cors-origins https://app.example,https://admin.example`. CORS is disabled by default; use `*` to allow all origins.
+Allowed preflight methods are GET, POST and OPTIONS.
+
+```bash
+basal-serve --model Remek/basal-2.0-mini --api-keys ./api-keys.json --cors-origins https://app.example
+```
+
+## HTTP API reference
+
+The full `basal-serve` HTTP contract, including System One and OpenAI Decisions requests, authentication, errors,
+media, and copy-ready client setups, is documented in [API.md](API.md).
+
 ## Inference on a JSONL file
 
 `basal-run` sends every line of a JSONL file to a running server (concurrently; the server batches the requests) and
@@ -217,6 +243,13 @@ uv pip install "basal[ui,mlx]"        # [ui] adds FastAPI; add the engine extra 
 basal-ui --port 7860                  # then open http://127.0.0.1:7860
 ```
 
+The left menu has one view per task, each with its own address (`#overview`, `#models`, `#manager`, `#playground`,
+`#api`), so the browser's back button and bookmarks work. **Overview** shows the hardware, the running model (state,
+logs, Unload / Restart, the serving URL), the recommended model for this machine and short summaries of the disk and
+the API server; **Models**, **Model manager**, **Playground** and **API server** hold the features below. The menu's
+footer always shows the model's state and an Unload button. Deleting a model or revoking a key asks for confirmation
+in a dialog, and actions report their outcome in a short notification. On a narrow window the menu becomes a top bar.
+
 - **Hardware.** NVIDIA GPU (name, compute capability, memory), Apple Silicon (MLX's recommended working set) or CPU
   (60% of RAM), the engines installed (`mlx`, `llama-cpp-python`, `vllm`, `media`), and the memory available now
   (free GPU memory on NVIDIA; free + inactive + speculative pages from `vm_stat` on macOS, which leaves out reclaimable
@@ -249,11 +282,98 @@ basal-ui --port 7860                  # then open http://127.0.0.1:7860
   With a media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail` and
   the audio `lang`.
 
-The app binds `127.0.0.1` by default and has no authentication. It answers only requests addressed to
-`127.0.0.1`, `localhost` or the `--host` given, and refuses changes (load, delete, settings) sent from other web
-origins, so a web page cannot drive it through the browser; `--host 0.0.0.0` lifts the host check and prints a
-warning. The NVIDIA, CPU and GGUF rules are covered by tests with simulated hardware; end to end it was run on Apple
-Silicon (MLX, and basal-omni-1.0-mini with an image on MPS).
+- **API server.** The API server card shares the currently loaded model through `basal-serve`. Its settings are saved in
+  `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` changes the path) and apply on the next model load or when
+  **Restart server** is used.
+
+### API server
+
+| Setting | Default | Effect |
+|---|---|---|
+| Serve the API | Off | Off, basal-serve listens only on an ephemeral loopback port for basal-ui. On, it uses the configured port and host. |
+| Exposure | This computer (`127.0.0.1`) | Local network binds `0.0.0.0`; use this only when remote clients need access. |
+| Port | `8000` | TCP port used when serving is enabled; valid range is 1024–65535. |
+| Require an API key | Off | Requires a named key on every API route except `/health`. Supports `Authorization: Bearer <key>` and `X-API-Key`. |
+| Max context length | `4096` | Passed only to vLLM and SGLang (`512`–`131072`). |
+| CORS origins | Empty | Optional allowed browser origins, one per line; `*` allows every origin. |
+| Decision log | Empty (off) | Appends decisions to the specified writable log file. |
+| MCP at `/mcp` | Off | Adds the MCP streamable-HTTP endpoint when the MCP extra is installed. |
+| Auto-load last model | Off | Starts the last successfully loaded model when basal-ui starts. |
+
+**Security.** The server is loopback-only by default. Local-network exposure is unauthenticated unless **Require an API
+key** is enabled; use a key before selecting **Local network**. Keys are generated with the `bsl_` prefix, stored as
+SHA-256 hashes in the settings file and keys file, and their plaintext is shown only once when created. Copy it then;
+it cannot be retrieved later. Revoking a key rewrites the live keys file and takes effect without restarting the model.
+The server also uses an internal admin key for basal-ui's own requests; its key-file record is not exposed in the UI.
+
+Changing serving settings while a model is running does not alter that process. The status line marks this as
+**Restart to apply**; press **Restart server** to reload the current model with the saved settings. The app checks the
+chosen bind port before starting, and reports a clear error if another process owns it.
+
+The **Connect** panel provides copy-ready examples for curl (both `/v1/systemone` and `/v1/decisions`), the
+`basal.client.Basal` Python client, TypeSafe and OpenAI SDKs, LiteLLM's `hosted_vllm` provider, and MCP. When
+authentication is disabled, examples omit API-key headers. Turn on MCP to use the streamable-HTTP endpoint at `/mcp`;
+the `basal-mcp` stdio bridge can also connect to the served endpoint. Full request and response shapes, error envelopes
+and compatibility details are in the [basal-serve HTTP API reference](API.md).
+
+### Serving a model from basal-ui
+
+1. Start basal-ui and load a model. In **API server**, turn on **Serve the API**.
+2. Choose **This computer** (`127.0.0.1`) for local clients. Choose **Local network** (`0.0.0.0`) only when another
+   device must connect; enable **Require an API key** first. An unauthenticated LAN listener is accessible to other
+   devices on that network.
+3. Set the port (default `8000`). Enable **Require an API key**, then save.
+4. Under **API keys**, enter a name such as `laptop`, choose **Create key**, and copy the displayed `bsl_...` secret.
+   It is shown once; basal-ui cannot display it again.
+5. The running model does not change settings in place. Click **Restart server**; wait for the serving URL to return.
+   The status line indicates `restart_required` / **Restart to apply** while saved settings differ from the running
+   process.
+6. Use **Connect** for a copy-ready client snippet. For example:
+
+   ```python
+   from basal.client import Basal
+   client = Basal("http://127.0.0.1:8000", api_key="<copied key>")
+   answers = client.decide("A user asks for a refund.", {
+       "route": {"type": "choice", "instructions": "Which team?",
+                 "criteria": {"billing": "Billing", "support": "Support"}}
+   })
+   ```
+
+7. To revoke access, choose **Revoke** beside the key and confirm. basal-ui rewrites the key file; the running server
+   refuses that key on its next request without unloading the model or restarting basal-serve.
+
+The default settings file is `~/.config/basal-ui/settings.json`; set `BASAL_UI_CONFIG` to change its path. Next to it,
+each running basal-ui writes its key file as `<settings stem>.keys-<pid>.json` (for example, `settings.keys-1234.json`):
+the API keys from the settings plus that process's internal admin key, which basal-ui uses for its own requests
+(playground, key usage). All files are owner-only (`0600`) and hold SHA-256 hashes, never secrets. Two basal-ui instances
+may share one settings file: a key created or revoked in either is written into every matching live instance's key file,
+the files of exited instances are removed, and each instance deletes its own file when it quits.
+
+**Auto-load.** Enable **Load the last model when basal-ui starts** to remember the last model that reached ready.
+On app startup, basal-ui resolves and loads that model and starts serving it using the current API server settings.
+With auto-load off, start basal-ui and load a model manually. A serving configuration change made while a model is
+running sets `restart_required`; restarting reloads that model with the saved settings. Changes to keys are different:
+they take effect live.
+
+**Troubleshooting.**
+
+- **Port in use:** choose another port, save, and restart. basal-ui checks the configured bind address before starting
+  the API server and reports `port <port> on <host> is in use`.
+- **401 Unauthorized:** check that **Require an API key** is on and send the copied secret as
+  `Authorization: Bearer <secret>` (or `X-API-Key: <secret>`). Revoked keys stop working immediately; create a new
+  key if the original is lost.
+- **CORS preflight returns 400:** add the browser page's exact origin (scheme and host, with any port) to **CORS
+  origins**, save, then restart the serving process. A foreign origin is rejected without an allow-origin header.
+- **MCP extra missing:** install `basal[mcp]` in the same environment as basal-ui and basal-serve, then enable MCP
+  and restart. The UI reports when the extra is unavailable.
+
+For API routes, request and response formats, authentication details and compatibility notes, see the
+[HTTP API reference](API.md). The Connect panel also includes TypeSafe, OpenAI, LiteLLM and MCP examples.
+
+The browser app binds `127.0.0.1` by default and refuses changes (load, delete, settings) sent from other web origins,
+so a web page cannot drive it through the browser; `--host 0.0.0.0` lifts the host check and prints a warning. The
+NVIDIA, CPU and GGUF rules are covered by tests with simulated hardware; end to end it was run on Apple Silicon (MLX,
+and basal-omni-1.0-mini with an image on MPS).
 
 ## Benchmark your GPU
 
