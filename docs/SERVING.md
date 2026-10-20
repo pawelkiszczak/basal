@@ -179,14 +179,25 @@ basal-ui --port 7860                  # then open http://127.0.0.1:7860
   basal-2.0 family; FP8 on NVIDIA GPUs with compute capability 8.9+ other than data-centre GPUs and the RTX 4090
   (bf16 there), `-MLX-8bit` on Apple Silicon, GGUF `Q8_0` on a CPU with `llama-cpp-python`, else bf16; 4.5B if it
   fits, else mini. *Best quality* is the largest tier that fits.
+- **Model manager**: the models directory (default: the Hugging Face cache, `HF_HUB_CACHE`) can be set to any
+  writable directory; downloads, the downloaded marks, serving and deletes all use it. The setting is kept in
+  `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
+  can be deleted; for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is
+  left. The directory cannot change, and the loaded model cannot be deleted, while a model is loaded.
 - **Load** downloads only what serving needs (the chosen `.gguf` file of a `-GGUF` repository; not the 4.5B's
   `think/` model), then runs `basal-serve` as a subprocess on a free local port and shows its log. One model at a
   time; loading another one stops the first.
+- **Load with media**, for the basal-omni-1.0 bf16 checkpoints (mini and max: images and audio; ultra: images; the
+  FP8, GGUF and MLX ports and basal-omni-1.1-max have no encoders): `basal-serve --mode eager --media on`, with
+  `--device mps` on Apple Silicon and `--device cpu` on a machine without a GPU. Needs the `basal[media]` extra
+  (pillow, soundfile, scipy, torchvision); the row says so when it is missing.
 - **Playground**: the bundled examples, a question builder (`choice`, `noul`, `score`) or the raw JSON request;
   answers with calibrated probabilities, confidence and latency. Requests go to the model's `POST /v1/systemone`.
+  With a media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail` and
+  the audio `lang`.
 
 The app binds `127.0.0.1` by default and has no authentication. The NVIDIA, CPU and GGUF rules are covered by tests
-with simulated hardware; end to end it was run on Apple Silicon (MLX).
+with simulated hardware; end to end it was run on Apple Silicon (MLX, and basal-omni-1.0-mini with an image on MPS).
 
 ## Benchmark your GPU
 
