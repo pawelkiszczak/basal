@@ -6,6 +6,10 @@
   deletes what is on disk, runs `basal-serve` for it and offers a playground for decisions, with images and audio
   for the basal-omni-1.0 checkpoints that have encoders.
   [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
+- The `basal-ui` can expose the loaded model as an API server, with optional named API keys, CORS, decision logging,
+  MCP and auto-load. [API server walkthrough](SERVING.md#serving-a-model-from-basal-ui)
+- **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
+  aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 
 # What is new in basal 2.3
 
