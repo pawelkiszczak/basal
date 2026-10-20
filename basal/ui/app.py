@@ -267,10 +267,10 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
                                      catalog.TIER_ORDER.get(a.variant.tier, 99), a.variant.port, a.variant.label))
         fields = ("id", "repo", "family", "tier", "port", "label", "gguf_file", "weights_bytes", "experimental")
         on_disk = {a.variant.id: catalog.downloaded_bytes(a.variant, cache_dir) for a in assessed}
-        return {"source": source, **catalog.recommend(assessed, hw()),
+        return {"source": source, "suggestions": catalog.suggest(assessed, hw()),
                 "models_dir": str(Path(cache_dir).resolve()), "models": [
             {**{k: getattr(a.variant, k) for k in fields}, "runnable": a.runnable, "reason": a.reason,
-             "mode": a.mode, "est_memory_bytes": a.est_memory_bytes, "fit": a.fit,
+             "mode": a.mode, "est_memory_bytes": a.est_memory_bytes, "fit": a.fit, "fit_now": a.fit_now,
              "media": list(a.variant.media), "media_mode": a.media_mode, "media_reason": a.media_reason,
              "downloaded": on_disk[a.variant.id] is not None, "downloaded_bytes": on_disk[a.variant.id]}
             for a in assessed]}

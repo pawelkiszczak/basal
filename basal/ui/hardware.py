@@ -3,6 +3,8 @@ from dataclasses import asdict, dataclass
 import importlib.util
 import os
 import platform as host_platform
+import re
+import subprocess
 import sys
 
 
@@ -14,6 +16,7 @@ class Hardware:
     system_ram_bytes: int | None
     cuda_capability: tuple[int, int] | None
     engines: frozenset[str]
+    available_bytes: int | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -22,10 +25,28 @@ class Hardware:
         return data
 
 
+def _available_bytes() -> int | None:
+    try:
+        if sys.platform == "darwin":
+            stats = subprocess.check_output(["vm_stat"], text=True)
+            page_size = int(re.search(r"page size of (\d+) bytes", stats).group(1))
+            pages = {
+                name: int(re.search(rf"^{name}:\s+(\d+)\.", stats, re.MULTILINE).group(1))
+                for name in ("Pages free", "Pages inactive", "Pages speculative")
+            }
+            return sum(pages.values()) * page_size
+        if sys.platform.startswith("linux"):
+            with open("/proc/meminfo") as meminfo:
+                available = re.search(r"^MemAvailable:\s+(\d+) kB$", meminfo.read(), re.MULTILINE)
+            return int(available.group(1)) * 1024
+    except Exception:
+        return None
+    return None
+
+
 def _ram() -> int | None:
     try:
         if sys.platform == "darwin":
-            import subprocess
             return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip())
         return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
     except (OSError, ValueError, AttributeError):
@@ -34,6 +55,7 @@ def _ram() -> int | None:
 
 def detect() -> Hardware:
     ram = _ram()
+    available = _available_bytes()
     engines: set[str] = set()
     if all(importlib.util.find_spec(name) is not None for name in ("PIL", "soundfile", "scipy", "torchvision")):
         engines.add("media")
@@ -42,12 +64,16 @@ def detect() -> Hardware:
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(0)
             capability = torch.cuda.get_device_capability(0)
+            try:
+                free = int(torch.cuda.mem_get_info(0)[0])
+            except Exception:
+                free = None
             engines.add("cuda")
             if importlib.util.find_spec("vllm"):
                 engines.add("vllm")
             if importlib.util.find_spec("llama_cpp"):
                 engines.add("gguf")
-            return Hardware("cuda", props.name, props.total_memory, ram, capability, frozenset(engines))
+            return Hardware("cuda", props.name, props.total_memory, ram, capability, frozenset(engines), free)
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             engines.add("mps")
     except (ImportError, RuntimeError):
@@ -64,8 +90,8 @@ def detect() -> Hardware:
             engines.add("mlx")
         if importlib.util.find_spec("llama_cpp"):
             engines.add("gguf")
-        return Hardware("apple", name, budget or int((ram or 0) * .7), ram, None, frozenset(engines))
+        return Hardware("apple", name, budget or int((ram or 0) * .7), ram, None, frozenset(engines), available)
     if importlib.util.find_spec("llama_cpp"):
         engines.add("gguf")
     return Hardware("cpu", host_platform.processor() or host_platform.machine(), int((ram or 0) * .6), ram, None,
-                    frozenset(engines))
+                    frozenset(engines), available)

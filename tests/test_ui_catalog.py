@@ -1,12 +1,14 @@
 import math
 from pathlib import Path
 
-from basal.ui.catalog import Variant, _label, _media_mode, _variants, assess, delete, download_kwargs, parse_repo, recommend, serve_args
+from basal.ui.catalog import Variant, _label, _media_mode, _variants, assess, delete, download_kwargs, parse_repo, serve_args, suggest
 from basal.ui.hardware import Hardware
 
 
-def hw(platform="cuda", name="H100", cap=(9, 0), engines=frozenset({"cuda"}), memory=80 * 1024**3):
-    return Hardware(platform, name, memory, memory, cap, engines)
+def hw(platform="cuda", name="H100", cap=(9, 0), engines=frozenset({"cuda"}), memory=80 * 1024**3,
+       available=None):
+    return Hardware(platform, name, memory, memory, cap, engines, available)
+
 
 def variant(repo="Remek/basal-2.0-4.5B", port=None, size=None, gguf=None):
     family, tier, parsed_port = parse_repo(repo)
@@ -14,7 +16,6 @@ def variant(repo="Remek/basal-2.0-4.5B", port=None, size=None, gguf=None):
     size = size if size is not None else int({"mini": 2, "4.5B": 8, "max": 12, "ultra": 16}.get(tier, 8) * 1024**3)
     return Variant(f"{repo}:{gguf}" if gguf else repo, repo, family, tier, port, _label(port, gguf), gguf, size,
                    family.startswith("basal-omni-"))
-
 
 
 def test_hardware_detects_media_engine(monkeypatch):
@@ -76,30 +77,55 @@ def test_assessment_runtime_engines_and_fit_boundaries():
     assert not assess(variant("Remek/basal-omni-1.0-mini", "bf16"), hw(platform="cpu", cap=None, engines=frozenset())).runnable
     size = 10 * 1024**3
     v = variant(size=size)
-    assert assess(v, hw(memory=math.ceil((size * 1.2 + 1024**3) / .85))).fit == "fits"
     budget = size * 1.2 + 1024**3
+    assert assess(v, hw(memory=math.ceil(budget / .85))).fit == "fits"
     assert assess(v, hw(memory=int(budget))).fit == "tight"
-    assert assess(Variant("unknown", "Remek/basal-2.0-4.5B", "basal-2.0", "4.5B", "bf16", "bf16", None, None, False), hw()).fit == "unknown"
+    assert assess(v, hw(memory=int(budget), available=math.ceil(budget / .85))).fit_now == "fits"
+    assert assess(v, hw(memory=int(budget), available=int(budget))).fit_now == "tight"
+    assert assess(v, hw(memory=int(budget), available=0)).fit_now == "too_large"
+    unknown = Variant("unknown", "Remek/basal-2.0-4.5B", "basal-2.0", "4.5B", "bf16", "bf16", None, None, False)
+    assert assess(unknown, hw()).fit == "unknown"
+    assert assess(v, hw()).fit_now == "unknown"
 
 
-def test_recommendations_by_hardware():
-    def choices(hw_, repos):
-        return recommend([assess(variant(repo, "MLX-8bit" if "MLX" in repo else "FP8" if "FP8" in repo else "bf16"), hw_) for repo in repos], hw_)
-    apple = hw("apple", "M4 Max", None, frozenset({"mlx"}), 24 * 1024**3)
-    assert choices(apple, ["Remek/basal-2.0-4.5B-MLX-8bit", "Remek/basal-2.0-max-MLX-8bit", "Remek/basal-2.0-mini-MLX-8bit"]) == {
-        "recommended": "Remek/basal-2.0-4.5B-MLX-8bit", "best_quality": "Remek/basal-2.0-max-MLX-8bit"}
-    small = hw("apple", "M4", None, frozenset({"mlx"}), 8 * 1024**3)
-    assert choices(small, ["Remek/basal-2.0-mini-MLX-8bit", "Remek/basal-2.0-4.5B-MLX-8bit"]) ["recommended"] == "Remek/basal-2.0-mini-MLX-8bit"
-    dc = hw("cuda", "H100", (9, 0), frozenset({"cuda"}), 200 * 1024**3)
-    assert choices(dc, ["Remek/basal-2.0-4.5B", "Remek/basal-2.0-4.5B-FP8"])["recommended"] == "Remek/basal-2.0-4.5B"
-    for name, cap, expected in (("RTX 5090", (12, 0), "FP8"), ("RTX 4090", (8, 9), "bf16")):
-        gpu = hw("cuda", name, cap, frozenset({"cuda"}), 100 * 1024**3)
-        result = choices(gpu, ["Remek/basal-2.0-4.5B", "Remek/basal-2.0-4.5B-FP8"])["recommended"]
-        assert result.endswith("FP8") if expected == "FP8" else result == "Remek/basal-2.0-4.5B"
-    cpu = hw("cpu", "CPU", None, frozenset(), 128 * 1024**3)
-    result = choices(cpu, ["Remek/basal-2.0-4.5B"])
-    assert result["recommended"] == "Remek/basal-2.0-4.5B"
-    assert "--device" in serve_args(variant(), Path("/model"), "eager")
+def test_suggestions_by_hardware_and_available_memory():
+    def choices(hw_, repos):  # built the way the catalog builds them, so basal-omni bf16 carries its media kinds
+        return suggest([assess(_variants(repo, {"model.safetensors": variant(repo).weights_bytes})[0], hw_)
+                        for repo in repos], hw_)
+
+    apple = hw("apple", "M4 Max", None, frozenset({"mlx"}), 24 * 1024**3, 6 * 1024**3)
+    repos = ["Remek/basal-2.0-4.5B-MLX-8bit", "Remek/basal-2.0-max-MLX-8bit",
+             "Remek/basal-2.0-mini-MLX-8bit"]
+    cards = choices(apple, repos)
+    assert cards[0]["slot"] == "recommended"
+    assert cards[0]["id"] == "Remek/basal-2.0-mini-MLX-8bit"
+
+    dc = hw("cuda", "H100", (9, 0), frozenset({"cuda"}), 80 * 1024**3, 70 * 1024**3)
+    cards = choices(dc, ["Remek/basal-2.0-mini", "Remek/basal-2.0-4.5B", "Remek/basal-2.0-max"])
+    assert [(card["slot"], card["id"]) for card in cards[:3]] == [
+        ("recommended", "Remek/basal-2.0-4.5B"),
+        ("best_quality", "Remek/basal-2.0-max"),
+        ("fastest", "Remek/basal-2.0-mini"),
+    ]
+    assert cards[0]["why"] == "4.5B in bf16: needs about 11.4 GB of 75.2 GB available"
+
+    omni = "Remek/basal-omni-1.0-mini"
+    without_media = choices(dc, [omni])
+    assert all(card["slot"] != "multimodal" for card in without_media)
+    media_hw = hw("cuda", "H100", (9, 0), frozenset({"cuda", "media"}), 80 * 1024**3, 70 * 1024**3)
+    media_cards = choices(media_hw, [omni])
+    assert media_cards == [{"slot": "multimodal", "id": omni,
+                            "why": "images and audio, served with --mode eager"}]
+
+
+def test_available_memory_parses_macos_vm_stat(monkeypatch):
+    from basal.ui import hardware
+
+    output = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+              "Pages free: 10.\nPages inactive: 20.\nPages speculative: 3.\n")
+    monkeypatch.setattr(hardware.sys, "platform", "darwin")
+    monkeypatch.setattr(hardware.subprocess, "check_output", lambda *args, **kwargs: output)
+    assert hardware._available_bytes() == 33 * 16384
 
 
 def test_gguf_launch_and_download_patterns():
@@ -126,12 +152,12 @@ def test_serving_mode_per_family_and_port():
 
 
 def test_cpu_with_llama_cpp_prefers_gguf_q8():
-    cpu = hw("cpu", "CPU", None, frozenset({"gguf"}), 64 * 1024**3)
+    cpu = hw("cpu", "CPU", None, frozenset({"gguf"}), 64 * 1024**3, 64 * 1024**3)
     repo = "Remek/basal-2.0-4.5B-GGUF"
     items = [assess(Variant(f"{repo}:{f}", repo, "basal-2.0", "4.5B", "GGUF", label, f, 5 * 1024**3, False), cpu)
              for f, label in (("basal-2.0-4.5B-Q5_K_M.gguf", "GGUF Q5_K_M"), ("basal-2.0-4.5B-Q8_0.gguf", "GGUF Q8_0"))]
     items.append(assess(variant(), cpu))
-    assert recommend(items, cpu)["recommended"] == f"{repo}:basal-2.0-4.5B-Q8_0.gguf"
+    assert suggest(items, cpu)[0]["id"] == f"{repo}:basal-2.0-4.5B-Q8_0.gguf"
 
 
 def test_delete_gguf_variants_removes_only_selected_file_then_repo(tmp_path):

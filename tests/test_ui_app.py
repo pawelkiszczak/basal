@@ -34,7 +34,9 @@ def test_model_api_sorting_load_validation_and_unready_decide():
         models = client.get("/api/models").json()
         assert models["source"] == "hub"
         assert [m["id"] for m in models["models"]] == ["mini", "large"]
-        assert set(("recommended", "best_quality", "models")) <= models.keys()
+        assert "suggestions" in models and "recommended" not in models and "best_quality" not in models
+        assert all("fit_now" in model for model in models["models"])
+        assert client.get("/api/hardware").json()["available_bytes"] is None
         assert client.post("/api/load", json={"id": "large"}).status_code == 400
         assert client.post("/api/decide", json={"state": "x", "questions": {}}).status_code == 409
 

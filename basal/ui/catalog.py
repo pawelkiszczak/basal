@@ -1,8 +1,8 @@
 """Hugging Face catalog of the basal models and hardware-aware model selection.
 
 Each repository of Remek/basal-* (and each .gguf file of a -GGUF repository) is one Variant. assess() says whether
-this machine can serve it with basal-serve, in which --mode, and whether it fits the memory budget; recommend()
-picks a model the way docs/HARDWARE.md (format per GPU class) and the README (start with 4.5B) advise.
+this machine can serve it in which --mode, and whether it fits the memory budget; suggest() selects model cards by fit
+and available memory.
 """
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -50,6 +50,7 @@ class Assessment:
     mode: str | None
     est_memory_bytes: int | None
     fit: str
+    fit_now: str
     media_mode: str | None
     media_reason: str | None
 
@@ -173,19 +174,23 @@ def _media_mode(v: Variant, hw: Hardware) -> tuple[str | None, str | None]:
     return "eager", None
 
 
+def _fit(est: int | None, budget: int | None) -> str:
+    if est is None or budget is None:
+        return "unknown"
+    if est <= 0.85 * budget:
+        return "fits"
+    if est <= budget:
+        return "tight"
+    return "too_large"
+
+
 def assess(v: Variant, hw: Hardware) -> Assessment:
     mode, reason = _mode(v, hw)
     est = int(v.weights_bytes * 1.2) + GIB if v.weights_bytes is not None else None  # weights + runtime + KV cache
-    if est is None or not hw.memory_bytes:
-        fit = "unknown"
-    elif est <= 0.85 * hw.memory_bytes:
-        fit = "fits"
-    elif est <= hw.memory_bytes:
-        fit = "tight"
-    else:
-        fit = "too_large"
+    fit = _fit(est, hw.memory_bytes) if hw.memory_bytes else "unknown"
+    fit_now = _fit(est, hw.available_bytes)
     media_mode, media_reason = _media_mode(v, hw)
-    return Assessment(v, mode is not None, reason, mode, est, fit, media_mode, media_reason)
+    return Assessment(v, mode is not None, reason, mode, est, fit, fit_now, media_mode, media_reason)
 
 
 def preferred_format(hw: Hardware) -> str:
@@ -202,22 +207,56 @@ def preferred_format(hw: Hardware) -> str:
     return "bf16"
 
 
-def recommend(items: list[Assessment], hw: Hardware) -> dict:
-    """{"recommended": id, "best_quality": id}: in the current text family (else the newest non-omni family) and the
-    preferred format, 4.5B if it fits, else mini; best quality = the largest tier that fits. A tight fit is used only
-    when nothing fits comfortably."""
-    usable = [a for a in items if a.runnable and a.fit != "too_large"]
-    families = sorted({a.variant.family for a in usable if not a.variant.experimental}, reverse=True)
-    if not families:
-        return {"recommended": None, "best_quality": None}
-    family = CURRENT_TEXT_FAMILY if CURRENT_TEXT_FAMILY in families else families[0]
-    pool = [a for a in usable if a.variant.family == family]
-    fmt = preferred_format(hw)
-    pool = [a for a in pool if a.variant.label == fmt] or pool
-    pool = [a for a in pool if a.fit == "fits"] or pool
-    by_tier = sorted(pool, key=lambda a: TIER_ORDER.get(a.variant.tier, -1))
-    recommended = next((a for a in by_tier if a.variant.tier == "4.5B"), None) or by_tier[0]
-    return {"recommended": recommended.variant.id, "best_quality": by_tier[-1].variant.id}
+def _gb(size: int | None) -> str:
+    return "—" if size is None else f"{size / 1_000_000_000:.1f} GB"
+
+
+def suggest(items: list[Assessment], hw: Hardware) -> list[dict]:
+    """Suggestion cards [{"slot", "id", "why"}] in slot order recommended, best_quality, fastest, multimodal; a slot is
+    left out when nothing qualifies. Only variants that fit both the memory budget and the memory available now are
+    candidates, and a comfortable fit wins over a tight one. Where the available memory is unknown, the budget fit
+    stands in for it."""
+    def now(a: Assessment) -> str:
+        return a.fit if a.fit_now == "unknown" else a.fit_now
+
+    def largest(pool: list[Assessment]) -> Assessment | None:
+        pool = [a for a in pool if now(a) == "fits"] or [a for a in pool if now(a) == "tight"]
+        return max(pool, key=lambda a: TIER_ORDER.get(a.variant.tier, -1), default=None)
+
+    fitting = [a for a in items if a.fit != "too_large" and now(a) != "too_large"]
+    text = [a for a in fitting if a.runnable and not a.variant.experimental]
+    families = sorted({a.variant.family for a in text}, reverse=True)
+    suggestions = []
+    if families:
+        family = CURRENT_TEXT_FAMILY if CURRENT_TEXT_FAMILY in families else families[0]
+        pool = [a for a in text if a.variant.family == family]
+        pool = [a for a in pool if a.variant.label == preferred_format(hw)] or pool
+        # one variant per tier, a comfortable fit over a tight one (GGUF repositories hold several per tier)
+        by_tier = {a.variant.tier: a for a in sorted(pool, key=lambda a: now(a) != "fits", reverse=True)}
+        smallest = by_tier[min(by_tier, key=lambda tier: TIER_ORDER.get(tier, 99))]
+        large = by_tier.get("4.5B")
+        recommended = large if large and now(large) == "fits" else by_tier.get("mini", smallest)
+        best = largest(pool)
+        best = best if best and now(best) == "fits" else None
+        fastest = by_tier.get("mini")
+        if recommended:
+            memory = (f"{_gb(hw.available_bytes)} available" if hw.available_bytes is not None
+                      else f"a {_gb(hw.memory_bytes)} budget")
+            suggestions.append({"slot": "recommended", "id": recommended.variant.id,
+                                "why": f"{recommended.variant.tier} in {recommended.variant.label}: needs about "
+                                       f"{_gb(recommended.est_memory_bytes)} of {memory}"})
+        if best and best is not recommended:
+            suggestions.append({"slot": "best_quality", "id": best.variant.id,
+                                "why": f"the largest tier that fits now: needs about {_gb(best.est_memory_bytes)}"})
+        if fastest and fastest not in (recommended, best):
+            suggestions.append({"slot": "fastest", "id": fastest.variant.id,
+                                "why": f"the smallest tier: needs about {_gb(fastest.est_memory_bytes)}"})
+    multimodal = largest([a for a in fitting if a.media_mode is not None])
+    if multimodal:
+        kinds = " and ".join({"image": "images"}.get(kind, kind) for kind in multimodal.variant.media)
+        suggestions.append({"slot": "multimodal", "id": multimodal.variant.id,
+                            "why": f"{kinds}, served with --mode {multimodal.media_mode}"})
+    return suggestions
 
 
 def _optional(name: str) -> bool:

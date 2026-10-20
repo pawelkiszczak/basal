@@ -13,14 +13,14 @@
 .prob.winner .bar span{background:var(--accent)}
 [hidden]{display:none!important}
 .media-items{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.media-item{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:4px;padding:5px 8px;font-size:12px}.media-item img{width:40px;height:40px;object-fit:cover;border-radius:3px}.media-item button{min-height:28px;padding:3px 8px}
+.tabs{display:flex;gap:8px;margin:12px 0}.tabs button.active{background:var(--ink);border-color:var(--ink);color:#fff}.suggestion-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px}.suggestion-card{border:1px solid var(--line);border-radius:5px;padding:16px;display:flex;flex-direction:column;gap:8px}.suggestion-card .eyebrow{font-size:11px}.suggestion-card h3{font-size:18px}.suggestion-card .why{font-size:13px;color:var(--muted);flex:1}.suggestion-card button{align-self:flex-start}.suggestion-meta{font:11px/1.6 var(--mono);color:var(--muted)}
 </style>
 </head>
 <body><main>
 <header><div class="brand">basal<span class="brand-dot">.</span></div><div class="eyebrow"><span class="status-dot" id="headerDot"></span><span id="headerStatus">LOCAL DECISION ENGINE</span></div></header>
-<section id="hardware" class="card hardware" aria-label="Hardware"><div><div class="section-index">01 / HARDWARE</div><div id="deviceName" class="hardware-name">Detecting hardware…</div><div id="engines" class="chips"></div></div><div class="hardware-grid"><div class="metric"><label>Platform</label><strong id="platform">—</strong></div><div class="metric"><label>Memory budget</label><strong id="memoryBudget">—</strong></div><div class="metric"><label>System RAM</label><strong id="systemRam">—</strong></div></div></section>
-<section id="recommendation" class="card recommend" hidden><div><div class="muted">Recommended for your <span id="recommendedDevice">device</span></div><strong id="recommendedText"></strong></div><button id="recommendedLoad" class="primary">Load recommended</button></section>
+<section id="hardware" class="card hardware" aria-label="Hardware"><div><div class="section-index">01 / HARDWARE</div><div id="deviceName" class="hardware-name">Detecting hardware…</div><div id="engines" class="chips"></div></div><div class="hardware-grid"><div class="metric"><label>Platform</label><strong id="platform">—</strong></div><div class="metric"><label>Memory budget</label><strong id="memoryBudget">—</strong></div><div class="metric"><label>Available now</label><strong id="availableMemory">—</strong></div><div class="metric"><label>System RAM</label><strong id="systemRam">—</strong></div></div></section>
 <section class="card" id="manager"><div class="section-index">02 / MODEL MANAGER</div><div class="field"><label for="modelsDir">Models directory</label><div class="directory-row"><div><input id="modelsDir" type="text" autocomplete="off"></div><button id="saveModelsDir" class="button-outline button-small" type="button">Save</button><button id="defaultModelsDir" class="button-outline button-small" type="button">Use default</button></div><div id="defaultModelsDirHint" class="directory-hint muted"></div><div id="modelsDirError" class="status-error manager-error" role="alert"></div></div><div class="disk-list"><div class="section-head"><h3>On disk</h3></div><div id="diskModels"><div class="empty">Loading models…</div></div><div id="diskTotal" class="disk-total"></div></div></section>
-<section class="card"><div class="section-index">03 / MODELS</div><div class="section-head"><h2>Models</h2><div class="controls"><label><input id="olderToggle" type="checkbox"> Older families</label><label><input id="notRunnableToggle" type="checkbox"> Show not runnable</label><label><input id="downloadedToggle" type="checkbox"> Downloaded only</label><button id="refreshModels">Refresh</button></div></div><div id="models" class="table-wrap"><div class="empty">Loading models…</div></div></section>
+<section class="card"><div class="section-index">03 / MODELS</div><div class="section-head"><h2>Models</h2></div><div class="tabs" role="tablist"><button id="suggestedTab" class="active" role="tab" aria-selected="true">Suggested</button><button id="allModelsTab" role="tab" aria-selected="false">All models</button></div><div id="suggested" role="tabpanel"><div class="empty">Loading suggestions…</div></div><div id="allModels" role="tabpanel" hidden><div class="controls" style="margin-bottom:12px"><label><input id="olderToggle" type="checkbox"> Older families</label><label><input id="notRunnableToggle" type="checkbox"> Show not runnable</label><label><input id="downloadedToggle" type="checkbox"> Downloaded only</label><button id="refreshModels">Refresh</button></div><div id="models" class="table-wrap"><div class="empty">Loading models…</div></div></div></section>
 <section id="status" class="status" aria-live="polite"><div class="status-head"><span class="status-dot" id="statusDot"></span><span class="state-pill" id="stateLabel">idle</span><span class="spinner" id="startingSpinner" hidden></span><span class="status-model" id="statusModel">No model loaded</span><span id="statusMode" class="chip" hidden></span><span id="statusMedia" class="chip" hidden></span><div class="progress-wrap" id="progressWrap" hidden><div class="progress"><span id="progressBar"></span></div><small id="progressText"></small></div><span id="statusError" class="status-error"></span><button id="unloadButton" hidden>Unload</button><button id="logsToggle" aria-expanded="false">Logs</button></div><pre id="logs" class="logs" hidden></pre></section>
 <section class="card"><div class="section-index">04 / PLAYGROUND</div><div class="playground-head"><h2>Playground</h2><select id="examples"><option value="">Load an example…</option></select><label><input id="editJsonToggle" type="checkbox"> Edit JSON</label></div><fieldset id="playground" disabled><div id="builder"><div class="field"><label for="stateInput">State</label><textarea id="stateInput" placeholder="Describe the state to evaluate"></textarea></div><div class="field"><div class="section-head"><h3>Questions</h3><button type="button" id="addQuestion">Add question</button></div><div id="questions" class="questions"></div></div></div><div class="field" id="mediaField" hidden><label for="mediaInput">Media</label><input id="mediaInput" type="file" multiple accept="image/*,audio/*"><div class="field" id="mediaOptions" hidden><label for="mediaDetail">Image detail</label><select id="mediaDetail"><option value="default">default</option><option value="high">high</option></select></div><div class="field"><label for="mediaLang">Language</label><select id="mediaLang"><option value="auto">auto</option><option value="pl">pl</option><option value="en">en</option></select></div><div id="mediaItems" class="media-items"></div><div id="mediaError" class="error-box" role="alert" hidden></div></div><div class="editjson" id="editJsonArea" hidden><label for="requestJson">Request JSON (sent as-is)</label><textarea id="requestJson" spellcheck="false"></textarea></div><button id="sendButton" class="primary" type="button" style="margin-top:12px">Send decision</button><div id="decideError" class="error-box" hidden></div><div id="results" class="results"></div><details id="rawDetails" hidden><summary>Raw response JSON</summary><pre id="rawResponse"></pre></details></fieldset><div id="playgroundHint" class="muted" style="margin-top:10px">Load a model to enable the playground.</div></section>
 </main>
@@ -42,6 +42,7 @@ function renderHardware(data) {
   $('#deviceName').textContent = data.device_name || 'Unknown device';
   $('#platform').textContent = data.platform || '—';
   $('#memoryBudget').textContent = gb(data.memory_bytes);
+  $('#availableMemory').textContent = gb(data.available_bytes);
   $('#systemRam').textContent = gb(data.system_ram_bytes);
   $('#engines').innerHTML = (data.engines || []).map(x => `<span class="chip">${esc(x)}</span>`).join('') || '<span class="muted">No engines detected</span>';
 }
@@ -52,34 +53,42 @@ function tierOrder(tier) { return ({mini:0,'1.5B':1,'4.5B':2,max:3,ultra:4})[tie
 function renderModels(data) {
   modelData = data.models || [];
   renderDiskModels();
+  const suggestions = data.suggestions || [];
+  renderSuggestions(suggestions);
+  const slots = new Map(suggestions.map(s => [s.id, s.slot]));
   const older = $('#olderToggle').checked, showBad = $('#notRunnableToggle').checked, downloadedOnly = $('#downloadedToggle').checked;
   const list = modelData.filter(m => (older || !['basal-1.0','basal-1.5'].includes(m.family)) && (showBad || m.runnable) && (!downloadedOnly || m.downloaded));
   list.sort((a,b) => familyOrder(b.family)-familyOrder(a.family) || tierOrder(a.tier)-tierOrder(b.tier) || a.port.localeCompare(b.port));
   const groups = new Map(); for (const m of list) { if (!groups.has(m.family)) groups.set(m.family, []); groups.get(m.family).push(m); }
-  const recommended = modelData.find(m => m.id === data.recommended);
-  const recSection = $('#recommendation');
-  if (recommended) {
-    recSection.hidden = false;
-    $('#recommendedDevice').textContent = hw?.device_name || 'device';
-    $('#recommendedText').textContent = `${recommended.family} ${recommended.tier} · ${recommended.label} · ${gb(recommended.weights_bytes)}`;
-    $('#recommendedLoad').onclick = () => loadModel(recommended.id);
-  } else recSection.hidden = true;
   if (!list.length) { $('#models').innerHTML = '<div class="empty">No models match these filters.</div>'; return; }
-  let html = '<table><thead><tr><th>Tier</th><th>Format</th><th>Size</th><th>Est. memory</th><th>Fit</th><th></th><th></th><th>Action</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Tier</th><th>Format</th><th>Size</th><th>Est. memory</th><th>Fit</th><th>Fit now</th><th></th><th></th><th>Action</th></tr></thead><tbody>';
   for (const [family, rows] of groups) {
-    html += `<tr class="family-row"><td colspan="8">${esc(family)}${family.startsWith('basal-omni-')?' <span class="badge experimental">Experimental</span>':''}</td></tr>`;
+    html += `<tr class="family-row"><td colspan="9">${esc(family)}${family.startsWith('basal-omni-')?' <span class="badge experimental">Experimental</span>':''}</td></tr>`;
     for (const m of rows) {
       const classes = `fit-${m.fit || 'unknown'}`;
+      const nowClasses = `fit-${m.fit_now || 'unknown'}`;
       const reason = !m.runnable && m.reason ? `<span class="reason" title="${esc(m.reason)}">${esc(m.reason)}</span>` : '';
-      const badges = `${m.id===data.recommended?'<span class="badge rec">Recommended</span>':''}${m.id===data.best_quality?'<span class="badge best">Best quality</span>':''}${m.experimental?'<span class="badge experimental">Experimental</span>':''}`;
+      const slot = slots.get(m.id);
+      const badges = `${slot?`<span class="badge ${slot==='recommended'?'rec':slot==='best_quality'?'best':''}">${esc(slot.replace('_',' '))}</span>`:''}${m.experimental?'<span class="badge experimental">Experimental</span>':''}`;
       const mediaReason = !m.media_mode && (m.media || []).length ? `<small class="muted">${esc(m.media_reason || '')}</small>` : '';
       const mediaButton = m.media_mode ? `<button class="load-media-model" data-id="${esc(m.id)}" title="${esc(mediaTitle(m.media || []))}">Load with media</button>` : '';
-      html += `<tr class="${m.runnable?'':'not-runnable'}"><td class="nowrap"><span class="model-name">${esc(m.tier)}</span>${reason}${mediaReason}</td><td class="nowrap">${esc(m.label)}</td><td>${gb(m.weights_bytes)}</td><td>${gb(m.est_memory_bytes)}</td><td><span class="badge ${classes}">${esc(m.fit || 'unknown')}</span></td><td>${badges}</td><td>${m.downloaded?`✓${m.downloaded_bytes == null?'':` ${gb(m.downloaded_bytes)}`}`:''}</td><td>${m.runnable?`<button class="load-model" data-id="${esc(m.id)}">Load</button>${mediaButton}`:'—'}</td></tr>`;
+      html += `<tr class="${m.runnable?'':'not-runnable'}"><td class="nowrap"><span class="model-name">${esc(m.tier)}</span>${reason}${mediaReason}</td><td class="nowrap">${esc(m.label)}</td><td>${gb(m.weights_bytes)}</td><td>${gb(m.est_memory_bytes)}</td><td><span class="badge ${classes}">${esc(m.fit || 'unknown')}</span></td><td><span class="badge ${nowClasses}">${esc(m.fit_now || 'unknown')}</span></td><td>${badges}</td><td>${m.downloaded?`✓${m.downloaded_bytes == null?'':` ${gb(m.downloaded_bytes)}`}`:''}</td><td>${m.runnable?`<button class="load-model" data-id="${esc(m.id)}">Load</button>${mediaButton}`:'—'}</td></tr>`;
     }
   }
   $('#models').innerHTML = html + '</tbody></table>';
   document.querySelectorAll('.load-model').forEach(b => b.addEventListener('click', () => loadModel(b.dataset.id)));
   document.querySelectorAll('.load-media-model').forEach(b => b.addEventListener('click', () => loadModel(b.dataset.id, true)));
+}
+function renderSuggestions(suggestions) {
+  if (!suggestions.length) { $('#suggested').innerHTML = '<div class="empty">Nothing fits the memory available now; free memory or use All models</div>'; return; }
+  const models = new Map(modelData.map(m => [m.id, m]));
+  $('#suggested').innerHTML = `<div class="suggestion-grid">${suggestions.map(s => {
+    const m = models.get(s.id);
+    if (!m) return '';
+    const media = s.slot === 'multimodal';
+    return `<article class="suggestion-card"><div class="eyebrow">${esc(s.slot.replace('_',' '))}</div><h3>${esc(m.family)} ${esc(m.tier)}</h3><div class="muted">${esc(m.label)}</div><div class="suggestion-meta">${gb(m.weights_bytes)} → ${gb(m.est_memory_bytes)} est. memory</div><div><span class="badge fit-${esc(m.fit_now || 'unknown')}">${esc(m.fit_now || 'unknown')}</span></div><div class="why">${esc(s.why)}</div>${m.downloaded?`<div class="suggestion-meta">✓ ${gb(m.downloaded_bytes)} downloaded</div>`:''}<button class="primary suggestion-load" data-id="${esc(m.id)}" data-media="${media}">${media?'Load with media':'Load'}</button></article>`;
+  }).join('')}</div>`;
+  document.querySelectorAll('.suggestion-load').forEach(b => b.addEventListener('click', () => loadModel(b.dataset.id,b.dataset.media==='true')));
 }
 function renderDiskModels() {
   const rows = modelData.filter(m => m.downloaded), total = rows.reduce((sum,m) => sum + (Number(m.downloaded_bytes) || 0),0);
@@ -109,12 +118,13 @@ async function saveModelsDir(value) {
 }
 async function loadModels(refresh=false) {
   $('#models').innerHTML = '<div class="empty">Loading models…</div>';
+  $('#suggested').innerHTML = '<div class="empty">Loading suggestions…</div>';
   try { renderModels(await api(`/api/models${refresh?'?refresh=1':''}`)); }
-  catch (e) { $('#models').innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }
+  catch (e) { $('#models').innerHTML = `<div class="error-box">${esc(e.message)}</div>`; $('#suggested').innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }
 }
 async function loadModel(id, media=false) {
   clearSelectedMedia();
-  try { await api('/api/load', {method:'POST', body:JSON.stringify({id,media})}); await refreshStatus(); }
+  try { await api('/api/load', {method:'POST', body:JSON.stringify({id,...(media?{media:true}:{})})}); await refreshStatus(); }
   catch (e) { showStatusError(e.message); }
 }
 function showStatusError(text) { $('#statusError').textContent = text || ''; }
@@ -283,13 +293,22 @@ $('#refreshModels').addEventListener('click',()=>loadModels(true));
 $('#downloadedToggle').addEventListener('change',rerenderFilters);
 $('#saveModelsDir').addEventListener('click',()=>saveModelsDir($('#modelsDir').value));
 $('#defaultModelsDir').addEventListener('click',()=>saveModelsDir(null));
-// Preserve server recommendation identifiers across local filtering toggles.
 let catalogData=null;
 const originalRenderModels=renderModels;
 renderModels=function(data){catalogData=data; originalRenderModels(data);};
 function rerenderFilters(){if(catalogData) originalRenderModels(catalogData);}
 $('#olderToggle').addEventListener('change',rerenderFilters);
 $('#notRunnableToggle').addEventListener('change',rerenderFilters);
+function selectModelsTab(tab) {
+  const suggested = tab === 'suggested';
+  $('#suggested').hidden = !suggested; $('#allModels').hidden = suggested;
+  $('#suggestedTab').classList.toggle('active',suggested); $('#suggestedTab').setAttribute('aria-selected',String(suggested));
+  $('#allModelsTab').classList.toggle('active',!suggested); $('#allModelsTab').setAttribute('aria-selected',String(!suggested));
+  localStorage.setItem('basal-ui.tab',tab);
+}
+$('#suggestedTab').addEventListener('click',()=>selectModelsTab('suggested'));
+$('#allModelsTab').addEventListener('click',()=>selectModelsTab('all'));
+selectModelsTab(localStorage.getItem('basal-ui.tab')==='all'?'all':'suggested');
 $('#unloadButton').addEventListener('click',async()=>{try{renderStatus(await api('/api/unload',{method:'POST'}));await loadModels();}catch(e){showStatusError(e.message);}});
 $('#logsToggle').addEventListener('click',()=>{const logs=$('#logs');logs.hidden=!logs.hidden;$('#logsToggle').setAttribute('aria-expanded',String(!logs.hidden));});
 $('#addQuestion').addEventListener('click',()=>addQuestion());
