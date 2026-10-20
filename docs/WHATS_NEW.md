@@ -1,3 +1,12 @@
+# Unreleased (fork)
+
+- **`basal-ui`**, a local browser app (extra `basal[ui]`): detects the hardware and the memory available now,
+  suggests models that fit (recommended, best quality, fastest, multimodal), lists every basal model with its fit and
+  serving mode, downloads the model into a directory of your choice, lists and
+  deletes what is on disk, runs `basal-serve` for it and offers a playground for decisions, with images and audio
+  for the basal-omni-1.0 checkpoints that have encoders.
+  [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
+
 # What is new in basal 2.4
 
 - **Qwen3.5 models in the fast engine** (`--mode fast`, `fast-nocompile`), such as basal-omni-pico (0.8B: 18 Gated
