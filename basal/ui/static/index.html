@@ -10,6 +10,8 @@
 :root{--paper:#f8f7f4;--white:#fff;--ink:#232824;--muted:#646b5e;--line:#dedfd8;--accent:#b94329;--accent-light:#f5e8e0;--omni:#655487;--omni-light:#efebf5;--mono:"IBM Plex Mono",monospace;--sans:Manrope,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--green:#53745a;--green-light:#edf2e9;--amber:#a46634;--amber-light:#fff8eb;--shadow:0 4px 12px #20292004;color-scheme:light}*{box-sizing:border-box}::selection{background:#edb29b}body{margin:0;background:var(--paper);color:var(--ink);font:400 16px/1.7 var(--sans);-webkit-font-smoothing:antialiased}main{max-width:1280px;margin:auto;padding:28px 40px 64px}header{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:26px}.brand{display:flex;align-items:center;gap:10px;line-height:1}.brand>span{font-size:30px;font-weight:750;letter-spacing:-1.7px}.brand-mark{width:25px;height:32px;color:var(--accent)}.brand-dot{color:var(--accent)}.eyebrow,.section-index{font:400 12px/1.5 var(--mono);letter-spacing:1.2px;text-transform:uppercase}.eyebrow{display:flex;align-items:center;gap:10px;color:var(--accent)}.status-dot{display:inline-block;width:6px;height:6px;background:#85897f;border-radius:50%;flex:none;box-shadow:0 0 0 4px #53745a0b}.status-dot.ready{background:#53745a}.status-dot.error{background:var(--accent);box-shadow:0 0 0 4px #b943290b}h1,h2,h3,p{margin:0}h1,h2,h3{font-weight:600;line-height:1.25}h2{font-size:clamp(26px,3vw,36px);letter-spacing:-1.9px}h3{font-size:20px;letter-spacing:-.55px}p,.muted,small{color:var(--muted)}.card{background:var(--white);border:1px solid var(--line);border-radius:10px;padding:20px;box-shadow:var(--shadow);margin-bottom:18px}.section-label{display:flex;align-items:center;gap:12px;margin-bottom:8px}.hardware{display:flex;align-items:center;justify-content:space-between;gap:20px}.hardware-name{font-weight:650;font-size:18px}.hardware-grid{display:flex;gap:24px;flex-wrap:wrap}.metric label{display:block;color:var(--muted);font:11px/1.5 var(--mono);text-transform:uppercase;letter-spacing:.05em}.metric strong{font-variant-numeric:tabular-nums}.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.chip,.badge{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:4px;padding:2px 8px;font:11px/1.5 var(--mono);white-space:nowrap}.badge.rec{background:var(--accent-light);border-color:#e9c4b7;color:var(--accent)}.badge.best{background:#f2eee3;border-color:#e2dbc8;color:#765b31}.badge.experimental{background:var(--omni-light);border-color:#dcd3e9;color:var(--omni)}.badge.fit-fits{background:var(--green-light);border-color:#d4e0d2;color:var(--green)}.badge.fit-tight{background:var(--amber-light);border-color:#f2a476;color:var(--amber)}.badge.fit-too_large{background:var(--accent-light);border-color:#e9c4b7;color:var(--accent)}.badge.fit-unknown{background:#f0f0ec;color:var(--muted)}.section-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px}.controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.controls label{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}button,select,input,textarea{font:inherit}button{min-height:40px;border:1px solid #d7d9d1;background:transparent;color:var(--ink);border-radius:5px;padding:10px 16px;font-size:13px;font-weight:650;cursor:pointer;transition:background .2s,border-color .2s,transform .2s,box-shadow .2s}button:hover{border-color:#a9b19f;background:#f0f0e9;transform:translateY(-2px)}button.primary{min-height:49px;padding:13px 22px;border-color:var(--accent);background:var(--accent);color:#fff;font-size:14px}button.primary:hover{background:#a83a22}.button-dark{background:var(--ink);border-color:var(--ink);color:#fff}button:disabled{opacity:.48;cursor:not-allowed}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;color:var(--muted);font:11px/1.5 var(--mono);text-transform:uppercase;letter-spacing:.04em;padding:9px 8px;border-bottom:1px solid var(--line)}td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle}tr:last-child td{border-bottom:0}.family-row td{padding-top:17px;padding-bottom:7px;font-weight:700;font-size:14px;border-bottom:0}.not-runnable{opacity:.58}.reason{display:block;font-size:11px;color:var(--accent);max-width:250px}.model-name{font-weight:650}.nowrap{white-space:nowrap}.status{position:sticky;top:0;z-index:4;background:#fffF;border:1px solid var(--line);box-shadow:var(--shadow);border-radius:8px;padding:10px 14px;margin-bottom:18px}.status-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.state-pill{font:12px var(--mono);text-transform:uppercase}.status-model{color:var(--muted);overflow-wrap:anywhere}.status-error{color:var(--accent);font-weight:650}.progress-wrap{display:flex;align-items:center;gap:10px;flex:1 1 300px}.progress{height:8px;background:#e7e8e1;border-radius:3px;overflow:hidden;flex:1}.progress>span{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}.logs{margin:8px 0 0;max-height:180px;overflow:auto;background:#232824;color:#f8f7f4;padding:10px;border-radius:4px;font:11px/1.5 var(--mono);white-space:pre-wrap}.spinner{display:inline-block;width:13px;height:13px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}fieldset{border:0;padding:0;margin:0;min-width:0}fieldset:disabled{opacity:.48}.playground-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.playground-head select{max-width:400px}.section-index{margin-bottom:10px}textarea,input[type=text],select{border:1px solid var(--line);border-radius:4px;background:var(--white);color:var(--ink);padding:8px}textarea{width:100%;min-height:90px;resize:vertical}#stateInput{min-height:115px;margin-top:6px}.field{margin:12px 0}.field>label,.question label{display:block;font-size:12px;font-weight:650;margin-bottom:5px}.questions{display:grid;gap:10px}.question{border:1px solid var(--line);border-radius:5px;padding:12px}.q-head{display:grid;grid-template-columns:minmax(120px,1fr) 145px auto;gap:8px;align-items:end}.q-options{margin-top:8px}.q-options textarea{min-height:72px}.q-instructions{margin-top:8px}.editjson{margin-top:12px}.error-box{color:var(--accent);background:var(--accent-light);border-radius:4px;padding:9px;margin-top:10px;white-space:pre-wrap}.results{margin-top:14px}.answer{border-top:1px solid var(--line);padding:12px 0}.answer h3{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.headline{font-weight:700;font-size:15px}.prob{display:grid;grid-template-columns:minmax(90px,180px) 1fr 55px;align-items:center;gap:9px;margin:5px 0;font-size:12px}.bar{height:9px;background:#e7e8e1;border-radius:3px;overflow:hidden}.bar span{display:block;background:#c9cabc;height:100%}.prob:first-of-type .bar span{background:var(--accent)}.answer-meta{font:11px/1.6 var(--mono);color:var(--muted);margin-top:7px}.answer pre{max-height:320px;overflow:auto;background:#f0f0ec;padding:10px;border-radius:4px}details summary{cursor:pointer;color:var(--muted);font:12px var(--mono)}details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.45 var(--mono)}.empty{color:var(--muted);padding:18px 4px;text-align:center}
 @media(max-width:900px){main{padding:20px 16px 48px}.hardware{align-items:flex-start;flex-direction:column}.table-wrap{overflow:auto}table{min-width:800px}.section-head{align-items:flex-start;flex-direction:column}.status{top:0}.q-head{grid-template-columns:minmax(90px,1fr) 120px auto}}
 .directory-row{display:flex;align-items:end;gap:10px;flex-wrap:wrap}.directory-row>div:first-child{flex:1 1 320px}.directory-row input{width:100%}.directory-hint{font:11px/1.5 var(--mono);overflow-wrap:anywhere;margin-top:7px}.manager-error{margin-top:8px}.disk-list{margin-top:18px}.disk-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line)}.disk-row:last-child{border-bottom:0}.disk-info{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.disk-total{font:11px/1.5 var(--mono);color:var(--muted);text-align:right;margin-top:8px}
+.serve-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 18px}.serve-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px 22px;align-items:start;margin:14px 0}.serve-fields>.field{margin:0}.serve-fields input,.serve-fields textarea{width:100%}.serve-fields textarea{min-height:42px;height:42px}.serve-fields small{display:block;margin-top:4px;font-size:12px}.serve-options{display:flex;flex-wrap:wrap;gap:10px 28px;margin:4px 0 6px}.serve-options label{display:flex;align-items:center;gap:8px;font-size:14px}.serve-options small{flex-basis:100%;font-size:12px}.serve-actions,.key-create{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0}.key-create input{max-width:300px}.key-secret{margin:12px 0}.connect-tabs{max-width:100%;overflow-x:auto}.connect-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;background:#f0efe9;border:1px solid var(--line);border-radius:6px;font:12px/1.6 var(--mono)}#serveKeys .disk-row button{flex:none}
+.mono{font-family:var(--mono);overflow-wrap:anywhere}.button-small{min-height:32px;padding:5px 10px;font-size:11px}
 .prob.winner .bar span{background:var(--accent)}
 [hidden]{display:none!important}
 .media-items{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-top:10px}.media-item{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:6px;background:var(--white);overflow:hidden;font-size:12px}.media-preview{display:block;width:100%;aspect-ratio:4/3;padding:0;border:0;border-bottom:1px solid var(--line);border-radius:0;background:var(--paper);cursor:zoom-in}.media-preview img{display:block;width:100%;height:100%;object-fit:contain}.media-audio{display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:4/3;border-bottom:1px solid var(--line);background:var(--paper);color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em}.media-meta{display:flex;align-items:center;gap:8px;padding:8px}.media-meta>span{flex:1;min-width:0}.media-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.media-meta small{display:block;color:var(--muted);font-family:var(--mono);font-size:11px}
@@ -27,6 +29,7 @@
 <section class="card"><div class="section-index">03 / MODELS</div><div class="section-head"><h2>Models</h2></div><div class="tabs" role="tablist"><button id="suggestedTab" class="active" role="tab" aria-selected="true">Suggested</button><button id="allModelsTab" role="tab" aria-selected="false">All models</button></div><div id="suggested" role="tabpanel"><div class="empty">Loading suggestions…</div></div><div id="allModels" role="tabpanel" hidden><div class="controls" style="margin-bottom:12px"><label><input id="olderToggle" type="checkbox"> Older families</label><label><input id="notRunnableToggle" type="checkbox"> Show not runnable</label><label><input id="downloadedToggle" type="checkbox"> Downloaded only</label><button id="refreshModels">Refresh</button></div><div id="models" class="table-wrap"><div class="empty">Loading models…</div></div></div></section>
 <section id="status" class="status" aria-live="polite"><div class="status-head"><span class="status-dot" id="statusDot"></span><span class="state-pill" id="stateLabel">idle</span><span class="spinner" id="startingSpinner" hidden></span><span class="status-model" id="statusModel">No model loaded</span><span id="statusMode" class="chip" hidden></span><span id="statusMedia" class="chip media" hidden></span><div class="progress-wrap" id="progressWrap" hidden><div class="progress"><span id="progressBar"></span></div><small id="progressText"></small></div><span id="statusError" class="status-error"></span><button id="unloadButton" hidden>Unload</button><button id="logsToggle" aria-expanded="false">Logs</button></div><pre id="logs" class="logs" hidden></pre></section>
 <section class="card"><div class="section-index">04 / PLAYGROUND</div><div class="playground-head"><h2>Playground</h2><select id="examples"><option value="">Load an example…</option></select><label><input id="editJsonToggle" type="checkbox"> Edit JSON</label></div><fieldset id="playground" disabled><div id="builder"><div class="field"><label for="stateInput">State</label><textarea id="stateInput" placeholder="Describe the state to evaluate"></textarea></div><div class="field"><div class="section-head"><h3>Questions</h3><button type="button" id="addQuestion">Add question</button></div><div id="questions" class="questions"></div></div></div><div class="field" id="mediaField" hidden><label for="mediaInput">Media</label><input id="mediaInput" type="file" multiple accept="image/*,audio/*"><div class="field" id="mediaOptions" hidden><label for="mediaDetail">Image detail</label><select id="mediaDetail"><option value="default">default</option><option value="high">high</option></select></div><div class="field"><label for="mediaLang">Language</label><select id="mediaLang"><option value="auto">auto</option><option value="pl">pl</option><option value="en">en</option></select></div><div id="mediaItems" class="media-items"></div><div id="mediaError" class="error-box" role="alert" hidden></div></div><div class="editjson" id="editJsonArea" hidden><label for="requestJson">Request JSON (sent as-is)</label><textarea id="requestJson" spellcheck="false"></textarea></div><button id="sendButton" class="primary" type="button" style="margin-top:12px">Send decision</button><div id="decideError" class="error-box" hidden></div><div id="results" class="results"></div><details id="rawDetails" hidden><summary>Raw response JSON</summary><pre id="rawResponse"></pre></details></fieldset><div id="playgroundHint" class="muted" style="margin-top:10px">Load a model to enable the playground.</div></section>
+<section class="card" id="apiServer"><div class="section-index">05 / API SERVER</div><div class="section-head"><h2>API server</h2><label><input id="serveEnabled" type="checkbox"> Serve the API</label></div><div id="serveStatus" class="serve-status suggestion-meta">Only this app can reach the model</div><div class="field"><label>Exposure</label><div class="tabs" role="group" aria-label="API server exposure"><button type="button" id="serveLoopback">This computer</button><button type="button" id="serveLan">Local network</button></div><p id="serveWarning" class="error-box" hidden>Local-network access without a required API key is not recommended.</p></div><div class="serve-fields"><div class="field"><label for="servePort">Port</label><input id="servePort" type="number" min="1024" max="65535"></div><div class="field"><label for="serveMaxLen">Max context length</label><input id="serveMaxLen" type="number" min="512" max="131072"><small>tokens; read by the vLLM and SGLang modes</small></div><div class="field"><label for="serveLog">Decision log (JSONL path, empty = off)</label><input id="serveLog" type="text" placeholder="~/basal-decisions.jsonl"></div><div class="field"><label for="serveCors">CORS origins (one per line)</label><textarea id="serveCors" placeholder="https://app.example.com"></textarea></div></div><div class="serve-options"><label><input id="serveRequireKey" type="checkbox"> Require an API key</label><label><input id="serveMcp" type="checkbox"> MCP at /mcp</label><label><input id="autoLoad" type="checkbox"> Load the last model when basal-ui starts</label><small id="mcpHint" class="muted"></small></div><div class="serve-actions"><button id="saveServe" class="primary" type="button">Save settings</button><button id="restartServe" type="button">Restart server</button><button id="copyServeUrl" type="button">Copy endpoint</button></div><div id="serveError" class="error-box" role="alert" hidden></div><h3>API keys</h3><div id="serveKeys"></div><div class="key-create"><input id="newKeyName" type="text" placeholder="Key name"><button id="createKey" type="button">Create key</button></div><div id="newKeySecret" class="error-box key-secret" hidden></div><div class="section-head"><h3>Connect</h3></div><div id="connectTabs" class="tabs connect-tabs" role="tablist" aria-label="Connection examples"><button type="button" data-connect="curl" class="active" role="tab" aria-selected="true">curl</button><button type="button" data-connect="python" role="tab" aria-selected="false">Python (basal)</button><button type="button" data-connect="typesafe" role="tab" aria-selected="false">TypeSafe SDK</button><button type="button" data-connect="openai" role="tab" aria-selected="false">OpenAI SDK</button><button type="button" data-connect="litellm" role="tab" aria-selected="false">LiteLLM</button><button type="button" data-connect="mcp" role="tab" aria-selected="false">MCP</button></div><div id="connectPanels"><div class="connect-panel" data-connect-panel="curl"><pre><code id="connectCurl"></code></pre></div><div class="connect-panel" data-connect-panel="python" hidden><pre><code id="connectPython"></code></pre></div><div class="connect-panel" data-connect-panel="typesafe" hidden><pre><code id="connectTypesafe"></code></pre></div><div class="connect-panel" data-connect-panel="openai" hidden><pre><code id="connectOpenai"></code></pre></div><div class="connect-panel" data-connect-panel="litellm" hidden><pre><code id="connectLitellm"></code></pre></div><div class="connect-panel" data-connect-panel="mcp" hidden><pre><code id="connectMcp"></code></pre><p id="mcpConnectHint" class="muted" hidden>Turn on MCP at /mcp and save settings to enable HTTP transport.</p></div></div><button id="copyServeConnect" type="button">Copy snippet</button></section>
 <dialog id="mediaLightbox" class="media-lightbox" aria-label="Image preview"><img id="mediaLightboxImage" alt=""><div class="media-lightbox-bar"><span id="mediaLightboxName"></span><small id="mediaLightboxSize"></small><button type="button" id="mediaLightboxClose">Close</button></div></dialog>
 </main>
 <script>
@@ -202,6 +205,7 @@ async function selectMedia(files) {
   } catch (error) { if (selection === mediaSelection) showMediaError(error.message); }
 }
 function renderStatus(s) {
+  statusCache=s;
   $('#stateLabel').textContent = s.state || 'idle';
   const dot=$('#statusDot'); dot.className=`status-dot ${s.state==='ready'?'ready':s.state==='error'?'error':''}`;
   $('#headerDot').className=`status-dot ${s.state==='ready'?'ready':s.state==='error'?'error':''}`;
@@ -233,7 +237,7 @@ async function refreshStatus() {
   const sequence = ++statusSequence;
   try {
     const status = await api('/api/status');
-    if (sequence === statusSequence) renderStatus(status);
+    if (sequence === statusSequence) { renderStatus(status); if (serveData) renderServeStatus(status); }
   } catch(e) {
     if (sequence === statusSequence) { showStatusError(e.message); pollTimer=setTimeout(refreshStatus,5000); }
   }
@@ -375,6 +379,135 @@ window.addEventListener('beforeunload',()=>selectedMedia.forEach(item=>URL.revok
 addQuestion();
 $('#examples').addEventListener('change',e=>{const item=examples[Number(e.target.value)];if(item?.request)setRequest(item.request);else if(item)setRequest({state:item.state,questions:item.questions});});
 $('#sendButton').addEventListener('click',sendDecision);
-(async()=>{try{renderHardware(await api('/api/hardware'));}catch(e){$('#deviceName').textContent=`Hardware unavailable: ${e.message}`;}await Promise.all([loadSettings(),loadModels(),loadExamples(),refreshStatus()]);})();
+let serveData=null, serveHost='127.0.0.1', statusCache=null, connectTab='curl';
+function connectionEndpoint() {
+  const settings=serveData.settings, serving=statusCache?.serving;
+  if (serving) return serving.url;
+  const host=settings.host==='0.0.0.0'?(serveData.lan_ip||location.hostname):'127.0.0.1';
+  return `http://${host}:${settings.port}`;
+}
+function renderConnect() {
+  const settings=serveData.settings, endpoint=connectionEndpoint(), name=statusCache?.serving?.model_name||statusCache?.model||'basal-model';
+  const key=settings.require_key?'<your key>':null, auth=key?` -H 'Authorization: Bearer ${key}'`:'';
+  const keyArg=key?`, api_key="${key}"`:'';
+  const mcpHttp=settings.mcp
+    ?JSON.stringify({mcpServers:{basal:{url:`${endpoint}/mcp`,...(key?{headers:{Authorization:`Bearer ${key}`}}:{})}}},null,2)+'\n\n'
+    :'';
+  const snippets={
+    curl:`curl -X POST ${endpoint}/v1/systemone -H 'Content-Type: application/json'${auth} -d '{"state":"...","questions":{"route":{"type":"choice","instructions":"Choose a route","criteria":{"sales":"sales","support":"support"}}}}'
+
+curl -X POST ${endpoint}/v1/decisions -H 'Content-Type: application/json'${auth} -d '{"model":"${name}","input":"...","questions":[{"type":"choice","name":"route","instructions":"Choose a route","choices":[{"value":"sales"},{"value":"support"}]}]}'`,
+    python:`from basal.client import Basal
+
+client = Basal("${endpoint}"${keyArg})
+answer = client.decide(
+    state="...",
+    questions={"route": {"type": "choice", "instructions": "Choose a route",
+                         "criteria": {"sales": "sales", "support": "support"}}},
+)
+print(answer)`,
+    typesafe:`export TYPESAFE_BASE_URL=${endpoint}
+export TYPESAFE_API_KEY=${key||'local'}
+export TYPESAFE_DEFAULT_MODEL=${name}
+export NO_PROXY=localhost,127.0.0.1`,
+    openai:`from openai import OpenAI
+
+client = OpenAI(base_url="${endpoint}/v1", api_key="${key||'local'}")
+decision = client.decisions.create(
+    model="${name}",
+    input="...",
+    questions=[{"type": "choice", "instructions": "Choose a route",
+                "choices": [{"value": "sales"}, {"value": "support"}]}],
+)`,
+    litellm:`model_list:
+  - model_name: ${name}
+    litellm_params:
+      model: hosted_vllm/${name}
+      api_base: ${endpoint}
+      api_key: ${key||'local'}`,
+    mcp:mcpHttp+`# stdio bridge
+basal-mcp --url ${endpoint}${key?` --api-key ${key}`:''}`
+  };
+  $('#connectCurl').textContent=snippets.curl;
+  $('#connectPython').textContent=snippets.python;
+  $('#connectTypesafe').textContent=snippets.typesafe;
+  $('#connectOpenai').textContent=snippets.openai;
+  $('#connectLitellm').textContent=snippets.litellm;
+  $('#connectMcp').textContent=snippets.mcp;
+  $('#mcpConnectHint').hidden=Boolean(settings.mcp);
+  $('#connectTabs').querySelectorAll('[data-connect]').forEach(tab=>{
+    const active=tab.dataset.connect===connectTab;
+    tab.classList.toggle('active',active); tab.setAttribute('aria-selected',String(active));
+  });
+  document.querySelectorAll('[data-connect-panel]').forEach(panel=>{panel.hidden=panel.dataset.connectPanel!==connectTab;});
+}
+// the endpoint line of the API server card: where the API answers now, and whether saved settings await a restart
+function renderServeStatus(status) {
+  const serving=status?.serving;
+  const restart=status?.restart_required?'<span class="badge fit-tight">Restart to apply</span>':'';
+  $('#serveStatus').innerHTML=serving
+    ?`<span class="mono">${esc(serving.url)}</span>${serving.require_key?'<span class="chip">key required</span>':''}${serving.mcp?'<span class="chip">mcp</span>':''}${restart}`
+    :`<span>Only this app can reach the model</span>${restart}`;
+  $('#restartServe').disabled=!status?.model||['downloading','starting'].includes(status.state);
+  renderConnect();
+}
+async function loadServe(){
+  try{
+    serveData=await api('/api/serve');
+    const s=serveData.settings;
+    $('#serveEnabled').checked=s.enabled; $('#servePort').value=s.port; $('#serveRequireKey').checked=s.require_key;
+    $('#serveMaxLen').value=s.max_len; $('#serveCors').value=s.cors_origins.join('\n'); $('#serveLog').value=s.log_decisions;
+    $('#serveMcp').checked=s.mcp; $('#serveMcp').disabled=!serveData.mcp_available; $('#mcpHint').textContent=serveData.mcp_hint||'';
+    $('#autoLoad').checked=serveData.auto_load; serveHost=s.host;
+    $('#serveLoopback').classList.toggle('active',serveHost==='127.0.0.1');
+    $('#serveLan').classList.toggle('active',serveHost==='0.0.0.0');
+    $('#serveWarning').hidden=s.host!=='0.0.0.0'||s.require_key;
+    renderServeStatus(statusCache);
+    $('#serveKeys').innerHTML=serveData.keys.map(k=>`<div class="disk-row"><span class="disk-info">${esc(k.name)} · ${esc(k.prefix)} · created ${esc(new Date(k.created*1000).toLocaleString())} · last used ${k.last_used?esc(new Date(k.last_used*1000).toLocaleString()):'never'}</span><button class="button-small" type="button" data-revoke="${esc(k.name)}">Revoke</button></div>`).join('')||'<p class="muted">No API keys created.</p>';
+    $('#serveKeys').querySelectorAll('[data-revoke]').forEach(button=>button.addEventListener('click',async()=>{
+      if(confirm(`Revoke ${button.dataset.revoke}?`)){
+        try{await api(`/api/serve/keys/${encodeURIComponent(button.dataset.revoke)}`,{method:'DELETE'});await loadServe();}
+        catch(error){showServeError(error.message);}
+      }
+    }));
+    $('#serveError').hidden=true;
+    renderConnect();
+  }catch(error){showServeError(error.message);}
+}
+function showServeError(message) { $('#serveError').textContent=message; $('#serveError').hidden=!message; }
+$('#serveLoopback').onclick=()=>{serveHost='127.0.0.1';$('#serveWarning').hidden=true;$('#serveLoopback').classList.add('active');$('#serveLan').classList.remove('active');};
+$('#serveLan').onclick=()=>{serveHost='0.0.0.0';$('#serveWarning').hidden=$('#serveRequireKey').checked;$('#serveLan').classList.add('active');$('#serveLoopback').classList.remove('active');};
+$('#serveRequireKey').addEventListener('change',()=>{$('#serveWarning').hidden=serveHost!=='0.0.0.0'||$('#serveRequireKey').checked;if(serveData)renderConnect();});
+$('#connectTabs').querySelectorAll('[data-connect]').forEach(button=>button.addEventListener('click',()=>{connectTab=button.dataset.connect;renderConnect();}));
+$('#saveServe').onclick=async()=>{
+  try{
+    await api('/api/serve',{method:'PUT',body:JSON.stringify({
+      enabled:$('#serveEnabled').checked,host:serveHost,port:Number($('#servePort').value),
+      require_key:$('#serveRequireKey').checked,max_len:Number($('#serveMaxLen').value),
+      cors_origins:$('#serveCors').value.split('\n').map(value=>value.trim()).filter(Boolean),
+      log_decisions:$('#serveLog').value,mcp:$('#serveMcp').checked,auto_load:$('#autoLoad').checked
+    })});
+    showServeError(''); await loadServe(); await refreshStatus();
+  }catch(error){showServeError(error.message);}
+};
+$('#createKey').onclick=async()=>{
+  try{
+    const key=await api('/api/serve/keys',{method:'POST',body:JSON.stringify({name:$('#newKeyName').value})});
+    $('#newKeySecret').innerHTML=`<code>${esc(key.key)}</code><p>Copy it now: it is not shown again.</p><button type="button" id="copyNewKey">Copy key</button>`;
+    $('#newKeySecret').hidden=false; $('#copyNewKey').onclick=()=>copyText(key.key);
+    $('#newKeyName').value=''; await loadServe();
+  }catch(error){showServeError(error.message);}
+};
+$('#restartServe').onclick=async()=>{try{await api('/api/restart',{method:'POST'});await refreshStatus();}catch(error){showServeError(error.message);}};
+async function copyText(text) {
+  try{await navigator.clipboard.writeText(text);}
+  catch{
+    const area=document.createElement('textarea'); area.value=text; area.style.position='fixed'; area.style.opacity='0';
+    document.body.append(area); area.select(); document.execCommand('copy'); area.remove();
+  }
+}
+$('#copyServeUrl').onclick=()=>copyText(connectionEndpoint());
+$('#copyServeConnect').onclick=()=>copyText($(`[data-connect-panel="${connectTab}"] code`).textContent);
+ (async()=>{try{renderHardware(await api('/api/hardware'));}catch(e){$('#deviceName').textContent=`Hardware unavailable: ${e.message}`;}await Promise.all([loadSettings(),loadModels(),loadExamples(),refreshStatus(),loadServe()]);})();
 </script>
 </body></html>
