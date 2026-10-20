@@ -346,17 +346,18 @@ def test_api_serve_routes_validate_settings_and_hide_secrets(tmp_path, monkeypat
         assert listing["keys"][0]["name"] == "desk"
         assert "sha256" not in str(listing) and secret not in str(listing)
         assert client.delete("/api/serve/keys/missing").status_code == 404
-        settings.keys_file("a" * 64)
-        api_keys = __import__("json").loads((tmp_path / "api-keys.json").read_text())["keys"]
+        key_file = settings.keys_file("a" * 64)
+        api_keys = __import__("json").loads(key_file.read_text())["keys"]
         assert {entry["name"] for entry in api_keys} == {"desk", "basal-ui"}
-        assert (tmp_path / "api-keys.json").stat().st_mode & 0o777 == 0o600
+        assert key_file.stat().st_mode & 0o777 == 0o600
         saved = settings.load()
         assert "sha256" in saved["api_keys"][0] and secret not in (tmp_path / "settings.json").read_text()
         saved_settings = client.put("/api/serve", json={"cors_origins": ["https://example.com"]}).json()
         assert saved_settings["settings"]["cors_origins"] == ["https://example.com"]
         assert client.delete("/api/serve/keys/desk").json() == {"deleted": "desk"}
-        revoked = __import__("json").loads((tmp_path / "api-keys.json").read_text())["keys"]
+        revoked = __import__("json").loads(key_file.read_text())["keys"]
         assert [entry["name"] for entry in revoked] == ["basal-ui"]
+    assert not key_file.exists()  # basal-ui removes its own key file when it exits
 
 
 def test_restart_requires_ready_model_and_reloads_media(tmp_path, monkeypatch):

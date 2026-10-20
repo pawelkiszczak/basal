@@ -179,7 +179,7 @@ def create_key(name: str) -> tuple[dict, str]:
               "prefix": secret[:8], "created": int(time.time())}
     data["api_keys"] = [*records, record]
     save(data)
-    _rewrite_keys_file(data)
+    _sync_key_files(data)
     return {k: v for k, v in record.items() if k != "sha256"}, secret
 
 
@@ -193,22 +193,64 @@ def delete_key(name: str) -> None:
         raise ValueError(f"unknown API key {name!r}")
     data["api_keys"] = remaining
     save(data)
-    _rewrite_keys_file(data)
+    _sync_key_files(data)
+
+
+# Each basal-ui process gives its basal-serve its own key file, api-keys-<pid>.json next to the settings file: the
+# user's keys (shared, from the settings) plus that process's internal admin key. Two basal-ui instances on one
+# settings file therefore never overwrite each other's internal key, and a key created or revoked in either one is
+# written into every live instance's file, so revocation reaches every running basal-serve.
+def _keys_path(pid: int | None = None) -> Path:
+    return _settings_path().parent / f"api-keys-{os.getpid() if pid is None else pid}.json"
+
+
+def _user_records(data: dict) -> list[dict]:
+    return [{"name": record["name"], "sha256": record["sha256"], "admin": False}
+            for record in data.get("api_keys", [])]
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _sync_key_files(data: dict) -> None:
+    """Rewrite every live instance's key file with the current user keys; drop the files of dead processes."""
+    for path in _settings_path().parent.glob("api-keys-*.json"):
+        try:
+            pid = int(path.stem.rsplit("-", 1)[1])
+        except ValueError:
+            continue
+        if not _alive(pid):
+            path.unlink(missing_ok=True)
+            continue
+        if pid == os.getpid():
+            internal = [{"name": "basal-ui", "sha256": _internal_sha256, "admin": True}] if _internal_sha256 else []
+        else:
+            try:
+                internal = [r for r in json.loads(path.read_text())["keys"] if r.get("admin")]
+            except (OSError, ValueError, KeyError, TypeError):
+                internal = []
+        _write_private(path, json.dumps({"keys": _user_records(data) + internal}, indent=2))
 
 
 @_locked
 def keys_file(internal_sha256: str) -> Path:
-    """Write the basal-serve key file (format: basal/auth.py) with the user's keys and this app's own admin key."""
+    """This process's basal-serve key file (format: basal/auth.py): the user's keys and this app's own admin key."""
     global _internal_sha256
     _internal_sha256 = internal_sha256
-    return _rewrite_keys_file(load())
-
-
-def _rewrite_keys_file(data: dict) -> Path:
-    path = _settings_path().parent / "api-keys.json"
-    records = [{"name": record["name"], "sha256": record["sha256"], "admin": False}
-               for record in data.get("api_keys", [])]
-    if _internal_sha256 is not None:
-        records.append({"name": "basal-ui", "sha256": _internal_sha256, "admin": True})
+    path = _keys_path()
+    records = _user_records(load()) + [{"name": "basal-ui", "sha256": internal_sha256, "admin": True}]
     _write_private(path, json.dumps({"keys": records}, indent=2))
     return path
+
+
+@_locked
+def remove_keys_file() -> None:
+    """Called when basal-ui exits: its basal-serve is gone, so is its key file."""
+    _keys_path().unlink(missing_ok=True)

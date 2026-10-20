@@ -1,3 +1,5 @@
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -105,13 +107,35 @@ def test_api_key_names_are_unique_validated_and_revocable(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="already exists"):
         settings.create_key("laptop")
     assert settings.keys() == [{**record, "sha256": settings.load()["api_keys"][0]["sha256"]}]
-    settings.keys_file("a" * 64)
-    first = (tmp_path / "api-keys.json").read_text()
+    own = settings.keys_file("a" * 64)
+    assert own.name == f"api-keys-{os.getpid()}.json"
+    first = own.read_text()
     settings.delete_key("laptop")
-    second = (tmp_path / "api-keys.json").read_text()
+    second = own.read_text()
     assert "laptop" in first and "laptop" not in second
     with pytest.raises(ValueError, match="unknown API key"):
         settings.delete_key("laptop")
+
+
+def test_key_changes_reach_every_live_instance_and_drop_dead_ones(tmp_path, monkeypatch):
+    """Two basal-ui processes share one settings file: each keeps its own internal key, both see revocations."""
+    monkeypatch.setenv("BASAL_UI_CONFIG", str(tmp_path / "settings.json"))
+    other, dead = os.getppid(), 2**22 + 12345  # a live process and a pid that is not running
+    other_file, dead_file = tmp_path / f"api-keys-{other}.json", tmp_path / f"api-keys-{dead}.json"
+    other_internal = {"name": "basal-ui", "sha256": "b" * 64, "admin": True}
+    other_file.write_text(json.dumps({"keys": [other_internal]}))
+    dead_file.write_text(json.dumps({"keys": []}))
+    settings.keys_file("a" * 64)
+    _record, _secret = settings.create_key("laptop")
+    other_keys = json.loads(other_file.read_text())["keys"]
+    assert [k["name"] for k in other_keys] == ["laptop", "basal-ui"] and other_internal in other_keys
+    assert not dead_file.exists()
+    settings.delete_key("laptop")
+    assert json.loads(other_file.read_text())["keys"] == [other_internal]
+    own = json.loads((tmp_path / f"api-keys-{os.getpid()}.json").read_text())["keys"]
+    assert own == [{"name": "basal-ui", "sha256": "a" * 64, "admin": True}]
+    settings.remove_keys_file()
+    assert not (tmp_path / f"api-keys-{os.getpid()}.json").exists() and other_file.exists()
 
 
 def test_auto_load_setting_requires_boolean(tmp_path, monkeypatch):

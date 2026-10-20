@@ -382,6 +382,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
             threading.Thread(target=_auto_load, daemon=True).start()
         yield
         runner.unload()
+        settings_mod.remove_keys_file()
 
     app = FastAPI(title="basal-ui", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
