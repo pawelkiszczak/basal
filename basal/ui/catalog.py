@@ -84,23 +84,32 @@ def _hub_variants() -> tuple[Variant, ...]:
         return tuple(v for group in pool.map(get, repos) for v in group)
 
 
-def _cache_variants() -> list[Variant]:
+def _cache_variants(cache_dir: Path) -> list[Variant]:
     from huggingface_hub import scan_cache_dir
+    from huggingface_hub.errors import CacheNotFound
+    try:
+        cache = scan_cache_dir(cache_dir)
+    except (CacheNotFound, OSError, ValueError):
+        return []
     out = []
-    for repo in scan_cache_dir().repos:
+    for repo in cache.repos:
         if repo.repo_type == "model" and parse_repo(repo.repo_id):
             out += _variants(repo.repo_id, {f.file_name: f.size_on_disk for rev in repo.revisions for f in rev.files})
     return out
 
 
-def list_variants(refresh: bool = False) -> tuple[list[Variant], str]:
-    """All variants from the Hub (cached in this process); offline, the ones in the local Hugging Face cache."""
+def list_variants(refresh: bool = False, cache_dir: Path | None = None) -> tuple[list[Variant], str]:
+    """All variants from the Hub (cached in this process); offline, the ones in the selected cache."""
     if refresh:
         _hub_variants.cache_clear()
     try:
         return list(_hub_variants()), "hub"
     except Exception:  # offline, rate-limited, Hub down: what is already downloaded can still be served
-        return _cache_variants(), "cache"
+        if cache_dir is None:
+            from huggingface_hub.constants import HF_HUB_CACHE
+            cache_dir = Path(HF_HUB_CACHE)
+        return _cache_variants(cache_dir), "cache"
+
 
 
 def _mode(v: Variant, hw: Hardware) -> tuple[str | None, str | None]:
@@ -203,15 +212,57 @@ def download_kwargs(v: Variant) -> dict:
     return {"ignore_patterns": ["think/*"]}
 
 
-def is_downloaded(v: Variant) -> Path | None:
-    """The local snapshot directory if the weights are in the Hugging Face cache."""
+def is_downloaded(v: Variant, cache_dir: Path) -> Path | None:
+    """The local snapshot directory if the weights are in the selected cache."""
     from huggingface_hub import snapshot_download
     try:
-        path = Path(snapshot_download(v.repo, local_files_only=True, **download_kwargs(v)))
+        path = Path(snapshot_download(v.repo, cache_dir=cache_dir, local_files_only=True, **download_kwargs(v)))
     except Exception:  # not cached (or only partly)
         return None
     weights = [path / v.gguf_file] if v.gguf_file else list(path.glob("*.safetensors"))
     return path if weights and all(w.exists() for w in weights) else None
+
+
+def downloaded_bytes(v: Variant, cache_dir: Path) -> int | None:
+    """Bytes of the variant's weights in the selected cache, None if not downloaded."""
+    path = is_downloaded(v, cache_dir)
+    if path is None:
+        return None
+    if v.gguf_file:
+        return (path / v.gguf_file).stat().st_size
+    return sum(file.stat().st_size for file in path.glob("*.safetensors"))
+
+
+def delete(v: Variant, cache_dir: Path) -> int:
+    """Remove the variant from the selected cache and return the bytes freed. GGUF repositories hold several
+    variants, so only the variant's .gguf file goes, and the whole repository once no .gguf file is left."""
+    from huggingface_hub import scan_cache_dir
+    from huggingface_hub.errors import CacheNotFound
+    try:
+        cache = scan_cache_dir(cache_dir)
+    except (CacheNotFound, OSError, ValueError):
+        return 0
+    repo = next((r for r in cache.repos if r.repo_id == v.repo and r.repo_type == "model"), None)
+    if repo is None:
+        return 0
+    freed = 0
+    if v.gguf_file:
+        for revision in repo.revisions:
+            for file in revision.files:
+                if file.file_name == v.gguf_file:
+                    file.file_path.unlink(missing_ok=True)
+                    try:
+                        freed += file.blob_path.stat().st_size
+                        file.blob_path.unlink()
+                    except FileNotFoundError:
+                        pass
+        cache = scan_cache_dir(cache_dir)
+        repo = next((r for r in cache.repos if r.repo_id == v.repo and r.repo_type == "model"), None)
+        if repo is None or any(f.file_name.lower().endswith(".gguf") for rev in repo.revisions for f in rev.files):
+            return freed
+    freed += repo.size_on_disk
+    cache.delete_revisions(*[r.commit_hash for r in repo.revisions]).execute()
+    return freed
 
 
 def serve_args(v: Variant, local_dir: Path, mode: str) -> list[str]:

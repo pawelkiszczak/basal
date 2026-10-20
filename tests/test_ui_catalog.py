@@ -1,7 +1,7 @@
 import math
 from pathlib import Path
 
-from basal.ui.catalog import Variant, _label, _variants, assess, download_kwargs, parse_repo, recommend, serve_args
+from basal.ui.catalog import Variant, _label, _variants, assess, delete, download_kwargs, parse_repo, recommend, serve_args
 from basal.ui.hardware import Hardware
 
 
@@ -92,3 +92,26 @@ def test_cpu_with_llama_cpp_prefers_gguf_q8():
              for f, label in (("basal-2.0-4.5B-Q5_K_M.gguf", "GGUF Q5_K_M"), ("basal-2.0-4.5B-Q8_0.gguf", "GGUF Q8_0"))]
     items.append(assess(variant(), cpu))
     assert recommend(items, cpu)["recommended"] == f"{repo}:basal-2.0-4.5B-Q8_0.gguf"
+
+
+def test_delete_gguf_variants_removes_only_selected_file_then_repo(tmp_path):
+    repo_id = "Remek/basal-2.0-mini-GGUF"
+    repo = tmp_path / "models--Remek--basal-2.0-mini-GGUF"
+    blobs, snapshot = repo / "blobs", repo / "snapshots" / ("a" * 40)
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("a" * 40)
+    names = ("basal-2.0-mini-Q4_K_M.gguf", "basal-2.0-mini-Q8_0.gguf")
+    for index, name in enumerate(names, 1):
+        blob = blobs / (str(index) * 64)
+        blob.write_bytes(bytes([index]) * index)
+        (snapshot / name).symlink_to(blob)
+    first, second = _variants(repo_id, {name: index for index, name in enumerate(names, 1)})
+
+    assert delete(first, tmp_path) == 1
+    assert not (snapshot / names[0]).exists()
+    assert (snapshot / names[1]).exists()
+    assert repo.is_dir()
+    assert delete(second, tmp_path) == 2
+    assert not repo.exists()

@@ -21,7 +21,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import catalog, hardware
+from . import catalog, hardware, settings
 
 STATIC = Path(__file__).parent / "static"
 FAMILY_ORDER = {f"basal-{n}": i for i, n in enumerate(("2.0", "omni-1.1", "omni-1.0", "1.5", "1.0"))}
@@ -32,7 +32,8 @@ class Runner:
     """One model at a time: idle -> downloading -> starting -> ready, or error. Every load or stop starts a new
     generation; a background load that finds its generation outdated stops instead of touching the state."""
 
-    def __init__(self):
+    def __init__(self, models_dir_fn=settings.models_dir):
+        self.models_dir_fn = models_dir_fn
         self.lock = threading.RLock()
         self.gen = 0
         self.process = None
@@ -76,7 +77,8 @@ class Runner:
         bar = _byte_counter()
         result = {}
         worker = threading.Thread(target=lambda: result.update(path=_capture(
-            lambda: snapshot_download(v.repo, tqdm_class=bar, **catalog.download_kwargs(v)))), daemon=True)
+            lambda: snapshot_download(v.repo, cache_dir=self.models_dir_fn(), tqdm_class=bar,
+                                     **catalog.download_kwargs(v)))), daemon=True)
         worker.start()
         while worker.is_alive():
             done = bar.done
@@ -91,7 +93,7 @@ class Runner:
     def _start(self, assessment, gen):
         v = assessment.variant
         try:
-            path = catalog.is_downloaded(v) or self._download(v, gen)
+            path = catalog.is_downloaded(v, self.models_dir_fn()) or self._download(v, gen)
             if path is None:
                 return
             with socket.socket() as s:
@@ -194,8 +196,9 @@ def _byte_counter():
     return Counter
 
 
-def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, runner=None) -> FastAPI:
-    runner = runner or Runner()
+def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, runner=None,
+              settings_mod=settings) -> FastAPI:
+    runner = runner or Runner(models_dir_fn=settings_mod.models_dir)
     hw_cache = []
 
     def hw():
@@ -220,21 +223,58 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
     def get_hardware():
         return hw().to_dict()
 
+    def settings_response():
+        from huggingface_hub.constants import HF_HUB_CACHE
+        models = Path(settings_mod.models_dir()).resolve()
+        default = Path(HF_HUB_CACHE).resolve()
+        return {"models_dir": str(models), "default_models_dir": str(default), "is_default": models == default}
+
+    @app.get("/api/settings")
+    def get_settings():
+        return settings_response()
+
+    @app.put("/api/settings")
+    def put_settings(body: dict = Body(...)):
+        if runner.status()["state"] != "idle":
+            raise HTTPException(409, "unload the model before changing the models directory")
+        try:
+            settings_mod.set_models_dir(body.get("models_dir"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return settings_response()
+
     @app.get("/api/models")
     def get_models(refresh: bool = False):
-        variants, source = catalog_fn(refresh=refresh)
+        cache_dir = settings_mod.models_dir()
+        variants, source = catalog_fn(refresh=refresh, cache_dir=cache_dir)
         assessed = [catalog.assess(v, hw()) for v in variants]
         assessed.sort(key=lambda a: (FAMILY_ORDER.get(a.variant.family, 99),
                                      catalog.TIER_ORDER.get(a.variant.tier, 99), a.variant.port, a.variant.label))
         fields = ("id", "repo", "family", "tier", "port", "label", "gguf_file", "weights_bytes", "experimental")
-        return {"source": source, **catalog.recommend(assessed, hw()), "models": [
+        on_disk = {a.variant.id: catalog.downloaded_bytes(a.variant, cache_dir) for a in assessed}
+        return {"source": source, **catalog.recommend(assessed, hw()),
+                "models_dir": str(Path(cache_dir).resolve()), "models": [
             {**{k: getattr(a.variant, k) for k in fields}, "runnable": a.runnable, "reason": a.reason,
              "mode": a.mode, "est_memory_bytes": a.est_memory_bytes, "fit": a.fit,
-             "downloaded": catalog.is_downloaded(a.variant) is not None} for a in assessed]}
+             "downloaded": on_disk[a.variant.id] is not None, "downloaded_bytes": on_disk[a.variant.id]}
+            for a in assessed]}
+
+    @app.post("/api/models/delete")
+    def delete_model(body: dict = Body(...)):
+        model_id = body.get("id")
+        variants, _ = catalog_fn(cache_dir=settings_mod.models_dir())
+        variant = next((v for v in variants if v.id == model_id), None)
+        if variant is None:
+            raise HTTPException(400, f"unknown model {model_id!r}")
+        status = runner.status()
+        if status["state"] != "idle" and status["model"] == model_id:
+            raise HTTPException(409, "unload the model first")
+        return {"freed_bytes": catalog.delete(variant, settings_mod.models_dir())}
+
 
     @app.post("/api/load", status_code=202)
     def load(body: dict = Body(...)):
-        variants, _ = catalog_fn()
+        variants, _ = catalog_fn(cache_dir=settings_mod.models_dir())
         variant = next((v for v in variants if v.id == body.get("id")), None)
         if variant is None:
             raise HTTPException(400, f"unknown model {body.get('id')!r}")
