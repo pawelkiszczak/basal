@@ -195,6 +195,13 @@ uv pip install "basal[ui,mlx]"        # [ui] adds FastAPI; add the engine extra 
 basal-ui --port 7860                  # then open http://127.0.0.1:7860
 ```
 
+The left menu has one view per task, each with its own address (`#overview`, `#models`, `#manager`, `#playground`,
+`#api`), so the browser's back button and bookmarks work. **Overview** shows the hardware, the running model (state,
+logs, Unload / Restart, the serving URL), the recommended model for this machine and short summaries of the disk and
+the API server; **Models**, **Model manager**, **Playground** and **API server** hold the features below. The menu's
+footer always shows the model's state and an Unload button. Deleting a model or revoking a key asks for confirmation
+in a dialog, and actions report their outcome in a short notification. On a narrow window the menu becomes a top bar.
+
 - **Hardware.** NVIDIA GPU (name, compute capability, memory), Apple Silicon (MLX's recommended working set) or CPU
   (60% of RAM), the engines installed (`mlx`, `llama-cpp-python`, `vllm`, `media`), and the memory available now
   (free GPU memory on NVIDIA; free + inactive + speculative pages from `vm_stat` on macOS, which leaves out reclaimable
@@ -287,10 +294,12 @@ and compatibility details are in the [basal-serve HTTP API reference](API.md).
 7. To revoke access, choose **Revoke** beside the key and confirm. basal-ui rewrites the key file; the running server
    refuses that key on its next request without unloading the model or restarting basal-serve.
 
-The default settings file is `~/.config/basal-ui/settings.json`; set `BASAL_UI_CONFIG` to change its path. basal-ui
-writes `settings.json` and the sibling `api-keys.json` with owner-only permissions (`0600`). The files contain key
-hashes, not plaintext secrets. The internal key used by basal-ui is also stored as a hash and is marked admin in the
-server key file.
+The default settings file is `~/.config/basal-ui/settings.json`; set `BASAL_UI_CONFIG` to change its path. Next to it,
+each running basal-ui writes the key file of its own basal-serve, `api-keys-<pid>.json`: the API keys from the settings
+plus that process's internal admin key, which basal-ui uses for its own requests (playground, key usage). All files are
+owner-only (`0600`) and hold SHA-256 hashes, never secrets. Two basal-ui instances may share one settings file: a key
+created or revoked in either is written into every running instance's key file, the files of exited instances are
+removed, and each instance deletes its own file when it quits.
 
 **Auto-load.** Enable **Load the last model when basal-ui starts** to remember the last model that reached ready.
 On app startup, basal-ui resolves and loads that model and starts serving it using the current API server settings.

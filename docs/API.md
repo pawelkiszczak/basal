@@ -410,20 +410,42 @@ result = client.decisions.create(
 
 This returned score and choice answers; a wrong key raised `openai.AuthenticationError` (401).
 
-#### LiteLLM (not verified here)
+#### LiteLLM
 
-LiteLLM's self-hosted vLLM System One provider uses `hosted_vllm/<served name>` and `api_base`:
+LiteLLM's self-hosted vLLM System One provider reaches basal-serve as `hosted_vllm/<served name>` with `api_base` (the
+server root or `/v1`; both work). Verified with LiteLLM 1.106.1 against a basal-serve started with `--api-keys`.
+
+Python SDK, both request formats (LiteLLM translates the OpenAI shape to System One for this provider):
+
+```python
+import litellm
+
+r = litellm.systemone(model="hosted_vllm/basal-2.0-mini", api_base="http://127.0.0.1:8000", api_key="<secret>",
+                      state="Customer: charged twice, wants a refund today.",
+                      questions={"refund": {"type": "noul", "instructions": "Is this a refund request?"}})
+print(r.answers["refund"].noul)
+
+d = litellm.decisions(model="hosted_vllm/basal-2.0-mini", api_base="http://127.0.0.1:8000", api_key="<secret>",
+                      input="Customer: charged twice, wants a refund today.",
+                      questions=[{"type": "predicate", "name": "refund", "instructions": "Is this a refund request?"}])
+print(d.answers[0].probability)
+```
+
+A wrong basal key surfaces as `litellm.AuthenticationError` carrying basal's `{"error": ..., "code": "UNAUTHORIZED"}`.
+
+Proxy: the entry below (the same one the basal-ui Connect panel shows) served both `/v1/systemone` and
+`/v1/decisions` through `litellm --config config.yaml`. The proxy refuses to start without its own master key
+(`LITELLM_MASTER_KEY`); clients then authenticate to the proxy with that key, and the proxy uses `api_key` below
+towards basal.
 
 ```yaml
 model_list:
-  - model_name: basal
+  - model_name: basal-2.0-mini
     litellm_params:
-      model: hosted_vllm/Remek/basal-2.0-mini-MLX-8bit
+      model: hosted_vllm/basal-2.0-mini
       api_base: http://127.0.0.1:8000
-      api_key: <secret>
+      api_key: <secret>          # any non-empty value when basal-serve runs without --api-keys
 ```
-
-This integration is documented by LiteLLM but was not verified in this run. Use `api_key: local` if the server is open.
 
 #### `basal.client.Basal`
 
@@ -449,7 +471,7 @@ curl http://127.0.0.1:8000/v1/decisions -H 'Content-Type: application/json' \
 #### Verified compatibility
 
 The transcript-backed checks used basal-serve 2.3.0 with basal-2.0-mini MLX 8-bit on Apple M4 Max. TypeSafe Python
-SDK `typesafe-sdk` 0.7.5 and OpenAI SDK 3.35.1 worked against that server. LiteLLM was not tested.
+SDK `typesafe-sdk` 0.7.5, OpenAI SDK 3.35.1 and LiteLLM 1.106.1 (SDK and proxy) worked against that server.
 
 | Ecosystem | Matches | Differences and notes |
 |---|---|---|
