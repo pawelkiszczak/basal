@@ -2409,7 +2409,7 @@ class GraphBackend(EagerBackend):
         every prompt, as run_shared."""
         units = self._units(groups)
         keys, hits = self._cache_keys(groups, units)
-        self._extend_states(units, keys, hits)
+        # shortcut: prefix extension cannot yield; use layered prefill until extension supports the gate.
         probs = [self._readout(self._long_hidden(pk, keys[k] if keys else None, hits.get(k), between), lids)
                  for k, (pk, lids, _, _) in enumerate(units)]
         return self._assemble(groups, units, probs)

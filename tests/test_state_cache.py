@@ -137,3 +137,26 @@ def test_growing_and_edited_states_reuse_the_cached_prefix():
     s3 = s2[:22] + [rnd.randrange(3, 50) for _ in range(15)]            # edited after token 22
     check(be, requests(rnd, s3, 1))
     assert be.state_cache.stats()["prefix_hits"] >= 2 and be.state_cache.stats()["entries"] == 2
+
+
+def test_growing_state_in_long_lane_still_yields_and_matches_uncached_answers():
+    rnd = random.Random(2)
+    be = Stub(tiny())
+    be.state_cache = StateCache(1e9)
+    be.state_cache.BLOCK, be.CHUNK = 4, 7
+    state = [1] + [rnd.randrange(3, 50) for _ in range(40)]
+    be.run_shared(requests(rnd, state, 1))
+    grown = state + [rnd.randrange(3, 50) for _ in range(35)]
+    groups = requests(rnd, grown, 1)
+    calls = []
+    got = be.run_long(groups, between=calls.append)
+    assert calls == list(range(be.model.config.num_hidden_layers))
+    for (tokens, ids, _), answers in zip(groups, got):
+        for actual, expected in zip(answers, separate(be.model, tokens, ids)):
+            assert torch.allclose(torch.tensor(actual), expected, atol=1e-5)
+    # The gated fallback still stores the grown state, and exact hits retain cache reuse.
+    assert be.state_cache.has(be.state_cache.key(grown))
+    hits = be.state_cache.stats()["hits"]
+    calls.clear()
+    assert be.run_long(groups, between=calls.append) == got
+    assert not calls and be.state_cache.stats()["hits"] > hits
