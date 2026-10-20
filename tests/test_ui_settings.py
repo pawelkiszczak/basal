@@ -27,3 +27,14 @@ def test_set_models_dir_rejects_unwritable_directory(tmp_path, monkeypatch):
             settings.set_models_dir(str(target))
     finally:
         target.chmod(0o700)
+
+
+def test_invalid_json_shape_uses_default_and_relative_path_is_absolute(tmp_path, monkeypatch):
+    config = tmp_path / "settings.json"
+    monkeypatch.setenv("BASAL_UI_CONFIG", str(config))
+    monkeypatch.chdir(tmp_path)
+    config.write_text("[]")
+    assert settings.models_dir() == Path(HF_HUB_CACHE)
+    stored = settings.set_models_dir("relative-models-dir")
+    assert stored == (tmp_path / "relative-models-dir").resolve()
+    assert settings.load()["models_dir"] == str(stored)

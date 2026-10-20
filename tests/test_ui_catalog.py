@@ -25,10 +25,13 @@ def test_hardware_detects_media_engine(monkeypatch):
     packages = {"PIL", "soundfile", "scipy", "torchvision"}
     monkeypatch.setattr(hardware.importlib.util, "find_spec",
                         lambda name: object() if name in packages else find_spec(name))
+    hardware._static.cache_clear()
     assert "media" in hardware.detect().engines
     monkeypatch.setattr(hardware.importlib.util, "find_spec",
                         lambda name: None if name == "torchvision" else find_spec(name))
+    hardware._static.cache_clear()
     assert "media" not in hardware.detect().engines
+    hardware._static.cache_clear()
 
 
 def test_media_kinds_and_mode_eligibility():
@@ -181,3 +184,56 @@ def test_delete_gguf_variants_removes_only_selected_file_then_repo(tmp_path):
     assert repo.is_dir()
     assert delete(second, tmp_path) == 2
     assert not repo.exists()
+
+
+def test_old_cuda_bf16_requires_ampere_but_omni_remains_eager():
+    sm75 = hw(cap=(7, 5))
+    text = assess(variant("Remek/basal-2.0-mini"), sm75)
+    assert not text.runnable
+    assert text.reason == ("The basal engine needs an NVIDIA GPU with compute capability 8.0+ (Ampere or newer); "
+                           "on this GPU use a GGUF file with basal[gguf].")
+    omni = assess(variant("Remek/basal-omni-1.0-mini"), sm75)
+    assert omni.runnable and omni.mode == "eager"
+
+
+def test_suggestion_prefers_fit_before_preferred_format():
+    apple = hw("apple", "M4 Max", None, frozenset({"mlx"}), 24 * 1024**3, 4_200_000_000)
+    preferred = variant("Remek/basal-2.0-mini-MLX-8bit", "MLX-8bit", 3_000_000_000)
+    compact = variant("Remek/basal-2.0-mini-MLX-fp4", "MLX-fp4", 2_000_000_000)
+    cards = suggest([assess(preferred, apple), assess(compact, apple)], apple)
+    assert cards[0]["id"] == compact.id
+
+
+def _gguf_cache(tmp_path):
+    repo = tmp_path / "models--Remek--basal-2.0-mini-GGUF"
+    blobs, snapshot = repo / "blobs", repo / "snapshots" / ("b" * 40)
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("b" * 40)
+    return blobs, snapshot
+
+
+def test_delete_gguf_in_a_cache_of_copied_files_counts_the_freed_file(tmp_path):
+    blobs, snapshot = _gguf_cache(tmp_path)
+    selected, other = "basal-2.0-mini-Q4_K_M.gguf", "basal-2.0-mini-Q8_0.gguf"
+    (snapshot / selected).write_bytes(b"12345")  # no symlinks (Windows default): the snapshot holds the file
+    (blobs / ("c" * 64)).write_bytes(b"67")
+    (snapshot / other).symlink_to(blobs / ("c" * 64))
+    first, _ = _variants("Remek/basal-2.0-mini-GGUF", {selected: 5, other: 2})
+    assert delete(first, tmp_path) == 5
+    assert not (snapshot / selected).exists()
+    assert (snapshot / other).read_bytes() == b"67"
+
+
+def test_delete_gguf_keeps_a_blob_another_file_name_still_uses(tmp_path):
+    blobs, snapshot = _gguf_cache(tmp_path)
+    selected, other = "basal-2.0-mini-Q4_K_M.gguf", "basal-2.0-mini-Q8_0.gguf"
+    blob = blobs / ("c" * 64)
+    blob.write_bytes(b"12345")
+    (snapshot / selected).symlink_to(blob)
+    (snapshot / other).symlink_to(blob)
+    first, _ = _variants("Remek/basal-2.0-mini-GGUF", {selected: 5, other: 5})
+    assert delete(first, tmp_path) == 0
+    assert not (snapshot / selected).exists()
+    assert (snapshot / other).read_bytes() == b"12345"

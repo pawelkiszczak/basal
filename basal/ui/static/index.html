@@ -34,7 +34,7 @@
 const $ = (s, root=document) => root.querySelector(s);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const gb = n => n == null ? '—' : `${(Number(n) / 1e9).toFixed(1)} GB`;
-let modelData = [], hw = null, examples = [], pollTimer = null, loadedMedia = [], selectedMedia = [], mediaSelection = 0;
+let modelData = [], hw = null, examples = [], pollTimer = null, loadedMedia = [], selectedMedia = [], mediaSelection = 0, statusSequence = 0;
 async function api(path, options={}) {
   const response = await fetch(path, {headers:{'Content-Type':'application/json',...(options.headers||{})}, ...options});
   const text = await response.text(); let data;
@@ -77,7 +77,7 @@ function renderModels(data) {
       const badges = `${slot?`<span class="badge ${({recommended:'rec',best_quality:'best',multimodal:'omni'})[slot]||''}">${esc(slot.replace('_',' '))}</span>`:''}${m.experimental?'<span class="badge experimental">Experimental</span>':''}`;
       const mediaReason = !m.media_mode && (m.media || []).length ? `<small class="muted">${esc(m.media_reason || '')}</small>` : '';
       const mediaButton = m.media_mode ? `<button class="load-media-model" data-id="${esc(m.id)}" title="${esc(mediaTitle(m.media || []))}">Load with media</button>` : '';
-      html += `<tr class="${m.runnable?'':'not-runnable'}"><td class="nowrap"><span class="model-name">${esc(m.tier)}</span>${reason}${mediaReason}</td><td class="nowrap">${esc(m.label)}</td><td>${gb(m.weights_bytes)}</td><td>${gb(m.est_memory_bytes)}</td><td><span class="badge ${classes}">${esc(m.fit || 'unknown')}</span></td><td><span class="badge ${nowClasses}">${esc(m.fit_now || 'unknown')}</span></td><td>${badges}</td><td>${m.downloaded?`✓${m.downloaded_bytes == null?'':` ${gb(m.downloaded_bytes)}`}`:''}</td><td>${m.runnable?`<button class="load-model" data-id="${esc(m.id)}">Load</button>${mediaButton}`:'—'}</td></tr>`;
+      html += `<tr class="${m.runnable?'':'not-runnable'}"><td class="nowrap"><span class="model-name">${esc(m.tier)}</span>${reason}${mediaReason}</td><td class="nowrap">${esc(m.label)}</td><td>${gb(m.weights_bytes)}</td><td>${gb(m.est_memory_bytes)}</td><td><span class="badge ${classes}">${esc(m.fit || 'unknown')}</span></td><td><span class="badge ${nowClasses}">${esc(m.fit_now || 'unknown')}</span></td><td>${badges}</td><td>${m.downloaded?`✓${m.downloaded_bytes == null?'':` ${gb(m.downloaded_bytes)}`}`:''}</td><td>${m.runnable?`<button class="load-model" data-id="${esc(m.id)}">Load</button>`:''}${mediaButton || (!m.runnable?'—':'')}</td></tr>`;
     }
   }
   $('#models').innerHTML = html + '</tbody></table>';
@@ -136,6 +136,7 @@ async function loadModels(refresh=false) {
   catch (e) { $('#models').innerHTML = `<div class="error-box">${esc(e.message)}</div>`; $('#suggested').innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }
 }
 async function loadModel(id, media=false) {
+  statusSequence++;
   clearSelectedMedia();
   try { await api('/api/load', {method:'POST', body:JSON.stringify({id,...(media?{media:true}:{})})}); await refreshStatus(); }
   catch (e) { showStatusError(e.message); }
@@ -157,7 +158,7 @@ function renderSelectedMedia() {
   $('#mediaItems').querySelectorAll('[data-remove]').forEach(button => button.addEventListener('click', () => {
     URL.revokeObjectURL(selectedMedia[Number(button.dataset.remove)].url);
     selectedMedia.splice(Number(button.dataset.remove),1);
-    renderSelectedMedia(); syncRequest(true);
+    renderSelectedMedia(); syncRequest();
   }));
   $('#mediaItems').querySelectorAll('[data-preview]').forEach(button => {
     const item = selectedMedia[Number(button.dataset.preview)], img = button.querySelector('img');
@@ -197,7 +198,7 @@ async function selectMedia(files) {
     if (selection !== mediaSelection) return;
     selectedMedia.forEach(item => URL.revokeObjectURL(item.url));
     selectedMedia = filesData.map(item => ({...item,url:URL.createObjectURL(item.file)}));
-    renderSelectedMedia(); syncRequest(true);
+    renderSelectedMedia(); syncRequest();
   } catch (error) { if (selection === mediaSelection) showMediaError(error.message); }
 }
 function renderStatus(s) {
@@ -228,7 +229,15 @@ function renderStatus(s) {
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer=setTimeout(refreshStatus,delay);
 }
-async function refreshStatus() { try { renderStatus(await api('/api/status')); } catch(e) { showStatusError(e.message); pollTimer=setTimeout(refreshStatus,5000); } }
+async function refreshStatus() {
+  const sequence = ++statusSequence;
+  try {
+    const status = await api('/api/status');
+    if (sequence === statusSequence) renderStatus(status);
+  } catch(e) {
+    if (sequence === statusSequence) { showStatusError(e.message); pollTimer=setTimeout(refreshStatus,5000); }
+  }
+}
 async function loadExamples() {
   try {
     examples=await api('/api/examples');
@@ -250,15 +259,32 @@ function parseQuestionCard(card) {
   const name=$('.q-name',card).value.trim() || 'question'; const type=$('.q-type',card).value;
   return [name,{type,instructions:parseStructuredText($('.q-instructions-input',card).value),...parseOptions($('.q-options textarea',card).value,type)}];
 }
+function mediaRequestFields() {
+  const fields = {};
+  if (selectedMedia.length) fields.media = selectedMedia.map(({kind,data}) => ({type:kind,data}));
+  if (selectedMedia.some(item => item.kind === 'image')) fields.detail = $('#mediaDetail').value;
+  if ($('#mediaLang').value !== 'auto') fields.lang = $('#mediaLang').value;
+  return fields;
+}
 function buildRequest() {
   const questions={}; for(const card of document.querySelectorAll('.question')) { const [name,q]=parseQuestionCard(card); questions[name]=q; }
-  const request = {state:parseStructuredText($('#stateInput').value),questions};
-  if (selectedMedia.length) request.media = selectedMedia.map(({kind,data}) => ({type:kind,data}));
-  if (selectedMedia.some(item => item.kind === 'image')) request.detail = $('#mediaDetail').value;
-  if ($('#mediaLang').value !== 'auto') request.lang = $('#mediaLang').value;
-  return request;
+  return {state:parseStructuredText($('#stateInput').value),questions,...mediaRequestFields()};
 }
-function syncRequest(force=false) { if(force || !$('#editJsonToggle').checked) $('#requestJson').value=JSON.stringify(buildRequest(),null,2); }
+function syncRequest(force=false) {
+  const textarea = $('#requestJson');
+  if ($('#editJsonToggle').checked && !force) {
+    let request;
+    try { request = JSON.parse(textarea.value); }
+    catch (e) { showMediaError(e.message); return; }
+    if (!request || typeof request !== 'object' || Array.isArray(request)) { showMediaError('request JSON must be an object'); return; }
+    delete request.media; delete request.detail; delete request.lang;
+    Object.assign(request, mediaRequestFields());
+    textarea.value = JSON.stringify(request, null, 2);
+    showMediaError();
+  } else if (force || !$('#editJsonToggle').checked) {
+    textarea.value = JSON.stringify(buildRequest(), null, 2);
+  }
+}
 function addQuestion(name='question', q={type:'choice',instructions:'',criteria:{}}) {
   const card=document.createElement('div'); card.className='question';
   const type=['choice','noul','score'].includes(q.type)?q.type:'choice';
@@ -281,7 +307,7 @@ function setRequest(req) {
   $('#questions').innerHTML='';
   for(const [name,q] of Object.entries(req.questions||{})) addQuestion(name,q);
   if(!Object.keys(req.questions||{}).length) addQuestion();
-  currentRequest=req; syncRequest();
+  syncRequest(true);
 }
 function resultHeadline(name, answer, requestQuestion) {
   const type=answer.type || requestQuestion?.type || 'unknown';
@@ -335,14 +361,14 @@ function selectModelsTab(tab) {
 $('#suggestedTab').addEventListener('click',()=>selectModelsTab('suggested'));
 $('#allModelsTab').addEventListener('click',()=>selectModelsTab('all'));
 selectModelsTab(localStorage.getItem('basal-ui.tab')==='all'?'all':'suggested');
-$('#unloadButton').addEventListener('click',async()=>{try{renderStatus(await api('/api/unload',{method:'POST'}));await loadModels();}catch(e){showStatusError(e.message);}});
+$('#unloadButton').addEventListener('click',async()=>{statusSequence++;try{await api('/api/unload',{method:'POST'});await refreshStatus();await loadModels();}catch(e){showStatusError(e.message);}});
 $('#logsToggle').addEventListener('click',()=>{const logs=$('#logs');logs.hidden=!logs.hidden;$('#logsToggle').setAttribute('aria-expanded',String(!logs.hidden));});
 $('#addQuestion').addEventListener('click',()=>addQuestion());
 $('#stateInput').addEventListener('input',syncRequest);
 $('#editJsonToggle').addEventListener('change',()=>{if($('#editJsonToggle').checked) syncRequest(true);else syncRequest();$('#editJsonArea').hidden=!$('#editJsonToggle').checked;$('#builder').hidden=$('#editJsonToggle').checked;});
 $('#mediaInput').addEventListener('change',event=>selectMedia(Array.from(event.target.files||[])));
-$('#mediaDetail').addEventListener('change',()=>syncRequest(true));
-$('#mediaLang').addEventListener('change',()=>syncRequest(true));
+$('#mediaDetail').addEventListener('change',()=>syncRequest());
+$('#mediaLang').addEventListener('change',()=>syncRequest());
 $('#mediaLightboxClose').addEventListener('click',()=>$('#mediaLightbox').close());
 $('#mediaLightbox').addEventListener('click',e=>{if(e.target===$('#mediaLightbox'))$('#mediaLightbox').close();});
 window.addEventListener('beforeunload',()=>selectedMedia.forEach(item=>URL.revokeObjectURL(item.url)));

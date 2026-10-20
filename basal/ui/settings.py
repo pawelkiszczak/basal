@@ -14,7 +14,8 @@ def _settings_path() -> Path:
 
 def load() -> dict:
     try:
-        return json.loads(_settings_path().read_text())
+        value = json.loads(_settings_path().read_text())
+        return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -36,7 +37,7 @@ def set_models_dir(path: str | None) -> Path:
         settings.pop("models_dir", None)
         save(settings)
         return Path(HF_HUB_CACHE)
-    directory = Path(path).expanduser()
+    directory = Path(path).expanduser().resolve()
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

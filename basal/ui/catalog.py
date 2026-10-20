@@ -123,7 +123,6 @@ def list_variants(refresh: bool = False, cache_dir: Path | None = None) -> tuple
         return _cache_variants(cache_dir), "cache"
 
 
-
 def _mode(v: Variant, hw: Hardware) -> tuple[str | None, str | None]:
     """(basal-serve --mode, None) or (None, why this machine cannot serve the variant)."""
     cap = hw.cuda_capability or (0, 0)
@@ -153,6 +152,9 @@ def _mode(v: Variant, hw: Hardware) -> tuple[str | None, str | None]:
         return "gguf", None
     # bf16 weights
     if hw.platform == "cuda":
+        if hw.cuda_capability and hw.cuda_capability < (8, 0) and not v.experimental:
+            return None, "The basal engine needs an NVIDIA GPU with compute capability 8.0+ (Ampere or newer); " \
+                        "on this GPU use a GGUF file with basal[gguf]."
         return ("eager" if v.experimental else "fast"), None  # basal-omni: eager runs on every GPU (docs/OMNI.md)
     if hw.platform == "apple":
         if "mlx" in hw.engines:
@@ -229,9 +231,11 @@ def suggest(items: list[Assessment], hw: Hardware) -> list[dict]:
     suggestions = []
     if families:
         family = CURRENT_TEXT_FAMILY if CURRENT_TEXT_FAMILY in families else families[0]
-        pool = [a for a in text if a.variant.family == family]
-        pool = [a for a in pool if a.variant.label == preferred_format(hw)] or pool
-        # one variant per tier, a comfortable fit over a tight one (GGUF repositories hold several per tier)
+        family_items = [a for a in text if a.variant.family == family]
+        preferred = [a for a in family_items if a.variant.label == preferred_format(hw)]
+        fits = [a for a in family_items if now(a) == "fits"]
+        preferred_fits = [a for a in preferred if now(a) == "fits"]
+        pool = preferred_fits or fits or preferred or family_items
         by_tier = {a.variant.tier: a for a in sorted(pool, key=lambda a: now(a) != "fits", reverse=True)}
         smallest = by_tier[min(by_tier, key=lambda tier: TIER_ORDER.get(tier, 99))]
         large = by_tier.get("4.5B")
@@ -307,15 +311,28 @@ def delete(v: Variant, cache_dir: Path) -> int:
         return 0
     freed = 0
     if v.gguf_file:
-        for revision in repo.revisions:
-            for file in revision.files:
-                if file.file_name == v.gguf_file:
-                    file.file_path.unlink(missing_ok=True)
-                    try:
-                        freed += file.blob_path.stat().st_size
-                        file.blob_path.unlink()
-                    except FileNotFoundError:
-                        pass
+        files = [f for revision in repo.revisions for f in revision.files]
+        for file in files:
+            if file.file_name != v.gguf_file:
+                continue
+            file_path, blob_path = file.file_path, file.blob_path
+            same_path = file_path.resolve() == blob_path.resolve()
+            try:
+                size = file_path.stat().st_size
+            except FileNotFoundError:
+                size = 0
+            referenced = any(
+                other.file_name != file.file_name
+                and other.blob_path.resolve() == blob_path.resolve()
+                and other.file_path.exists()
+                for other in files
+            )
+            file_path.unlink(missing_ok=True)
+            if not referenced:
+                if not same_path and blob_path.exists():
+                    size = blob_path.stat().st_size
+                    blob_path.unlink()
+                freed += size
         cache = scan_cache_dir(cache_dir)
         repo = next((r for r in cache.repos if r.repo_id == v.repo and r.repo_type == "model"), None)
         if repo is None or any(f.file_name.lower().endswith(".gguf") for rev in repo.revisions for f in rev.files):

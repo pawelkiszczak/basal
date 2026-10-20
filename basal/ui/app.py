@@ -9,16 +9,20 @@ The model runs in a basal-serve subprocess on a free local port; this app proxie
 import argparse
 from collections import deque
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urlsplit
 
 import httpx
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import catalog, hardware, settings
@@ -38,11 +42,12 @@ class Runner:
         self.lock = threading.RLock()
         self.gen = 0
         self.process = None
+        self.downloads: dict[str, threading.Thread] = {}
         self.logs = deque(maxlen=200)
         self._reset()
 
     def _reset(self):
-        self.state, self.model, self.mode = "idle", None, None
+        self.state, self.model, self.model_repo, self.mode = "idle", None, None, None
         self.command, self.progress, self.error, self.base_url = None, None, None, None
         self.media_requested, self.media = False, []
 
@@ -55,17 +60,40 @@ class Runner:
                     "progress": self.progress, "error": self.error, "logs": list(self.logs),
                     "media_requested": self.media_requested, "media": self.media}
 
+    def busy(self, repo: str) -> bool:
+        """A download of the repository is running (also one left in the background by an unload), or the loaded
+        or loading model comes from it."""
+        with self.lock:
+            download = self.downloads.get(repo)
+            return bool(download and download.is_alive()) or (self.model_repo == repo and self.state != "idle")
+
+    def while_idle(self, fn):
+        """fn() with no model and no download running, atomically with load()."""
+        with self.lock:
+            if self.state != "idle" or any(thread.is_alive() for thread in self.downloads.values()):
+                raise RuntimeError("unload the model before changing the models directory")
+            return fn()
+
+    def while_not_busy(self, repo: str, fn):
+        """fn() while nothing uses the repository, atomically with load()."""
+        with self.lock:
+            if self.busy(repo):
+                raise RuntimeError("unload the model first")
+            return fn()
+
     def load(self, assessment, media=False):
         with self.lock:
             if self.state in ("downloading", "starting"):
                 raise RuntimeError("a model is already loading; unload it first")
-            self._stop_locked()
-            self.state, self.model = "downloading", assessment.variant.id
+            old = self._detach_locked()
+            self.state, self.model, self.model_repo = "downloading", assessment.variant.id, assessment.variant.repo
             self.mode = "eager" if media else assessment.mode
             self.media_requested, self.media = media, []
             self.logs.clear()
             gen = self.gen
-        threading.Thread(target=self._start, args=(assessment, gen, media), daemon=True).start()
+            cache_dir = self.models_dir_fn()
+        self._terminate(old)
+        threading.Thread(target=self._start, args=(assessment, gen, media, cache_dir), daemon=True).start()
         return self.status()
 
     def _update(self, gen, **fields):
@@ -77,13 +105,26 @@ class Runner:
                 setattr(self, k, v)
             return True
 
-    def _download(self, v, gen):
+    def _download(self, v, gen, cache_dir):
         from huggingface_hub import snapshot_download
         bar = _byte_counter()
         result = {}
-        worker = threading.Thread(target=lambda: result.update(path=_capture(
-            lambda: snapshot_download(v.repo, cache_dir=self.models_dir_fn(), tqdm_class=bar,
-                                     **catalog.download_kwargs(v)))), daemon=True)
+        worker = None
+
+        def download():
+            try:
+                result["path"] = _capture(
+                    lambda: snapshot_download(v.repo, cache_dir=cache_dir, tqdm_class=bar,
+                                              **catalog.download_kwargs(v))
+                )
+            finally:
+                with self.lock:
+                    if self.downloads.get(v.repo) is worker:
+                        self.downloads.pop(v.repo, None)
+
+        worker = threading.Thread(target=download, daemon=True)
+        with self.lock:
+            self.downloads[v.repo] = worker
         worker.start()
         while worker.is_alive():
             done = bar.done
@@ -95,25 +136,30 @@ class Runner:
             raise path
         return Path(path)
 
-    def _start(self, assessment, gen, media=False):
+    def _build_command(self, v, path, assessment, media, port):
+        return [sys.executable, "-m", "basal.server",
+                *catalog.serve_args(v, path, assessment.mode, self.platform_fn() if media else None),
+                "--host", "127.0.0.1", "--port", str(port)]
+
+    def _start(self, assessment, gen, media=False, cache_dir=None):
         v = assessment.variant
         try:
-            path = catalog.is_downloaded(v, self.models_dir_fn()) or self._download(v, gen)
+            path = catalog.is_downloaded(v, cache_dir) or self._download(v, gen, cache_dir)
             if path is None:
                 return
             with socket.socket() as s:
                 s.bind(("127.0.0.1", 0))
                 port = s.getsockname()[1]
-            command = [sys.executable, "-m", "basal.server",
-                       *catalog.serve_args(v, path, assessment.mode, self.platform_fn() if media else None),
-                       "--host", "127.0.0.1", "--port", str(port)]
+            command = self._build_command(v, path, assessment, media, port)
+            options = ({"start_new_session": True} if os.name == "posix" else
+                       {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
             with self.lock:
                 if gen != self.gen:
                     return
                 self.state, self.progress, self.command = "starting", None, command
                 self.base_url = f"http://127.0.0.1:{port}"
                 self.process = proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                                       text=True, bufsize=1)
+                                                       text=True, bufsize=1, **options)
             threading.Thread(target=self._read_logs, args=(proc,), daemon=True).start()
             deadline = time.monotonic() + START_TIMEOUT_S
             while time.monotonic() < deadline:
@@ -125,13 +171,21 @@ class Runner:
                     if httpx.get(self.base_url + "/health", timeout=1).status_code == 200:
                         media_kinds = []
                         if media:
-                            try:
-                                response = httpx.get(self.base_url + "/v1/models", timeout=1)
-                                response.raise_for_status()
-                                models = response.json().get("models", [])
-                                media_kinds = models[0].get("media", []) if models else []
-                            except Exception:
-                                pass
+                            error = None
+                            for attempt in range(5):
+                                try:
+                                    response = httpx.get(self.base_url + "/v1/models", timeout=1)
+                                    response.raise_for_status()
+                                    models = response.json().get("models", [])
+                                    media_kinds = models[0].get("media", []) if models else []
+                                    error = None
+                                    break
+                                except Exception as exc:
+                                    error = exc
+                                    if attempt < 4:
+                                        time.sleep(0.5)
+                            if error is not None:
+                                raise RuntimeError(f"could not read media capabilities from basal-serve: {error}")
                         self._update(gen, state="ready", media=media_kinds)
                         return
                 except httpx.HTTPError:
@@ -141,7 +195,14 @@ class Runner:
                 time.sleep(0.5)
             raise RuntimeError(f"basal-serve did not become healthy within {START_TIMEOUT_S} s")
         except Exception as exc:  # any failure of this load is shown in the UI
-            self._update(gen, state="error", error=str(exc))
+            proc = None
+            with self.lock:
+                if gen == self.gen:
+                    proc = self.process
+                    self.process = None
+                    self.gen += 1
+                    self.state, self.error = "error", str(exc)
+            self._terminate(proc)
 
     def _read_logs(self, proc):
         for line in proc.stdout:
@@ -151,20 +212,37 @@ class Runner:
 
     def unload(self):
         with self.lock:
-            self._stop_locked()
-            return self.status()
+            proc = self._detach_locked()
+        self._terminate(proc)
+        return self.status()
 
-    def _stop_locked(self):
+    def _detach_locked(self):
         self.gen += 1
         proc, self.process = self.process, None
-        if proc and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
         self._reset()
+        return proc
+
+    @staticmethod
+    def _terminate(proc):
+        """Stop basal-serve and everything it started (its own process group / session), then reap it."""
+        if not proc:
+            return
+
+        def signal_group(kill):
+            try:
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
+                else:
+                    proc.kill() if kill else proc.terminate()
+            except ProcessLookupError:
+                pass
+
+        signal_group(kill=False)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            signal_group(kill=True)
+            proc.wait()
 
     def decide(self, body):
         with self.lock:
@@ -212,14 +290,12 @@ def _byte_counter():
 
 
 def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, runner=None,
-              settings_mod=settings) -> FastAPI:
-    runner = runner or Runner(models_dir_fn=settings_mod.models_dir, platform_fn=lambda: hw().platform)
-    hw_cache = []
+              settings_mod=settings, allowed_hosts=("127.0.0.1", "localhost", "::1")) -> FastAPI:
+    runner = runner or Runner(models_dir_fn=settings_mod.models_dir, platform_fn=lambda: hardware_fn().platform)
+    allowed_hosts = tuple(allowed_hosts)
 
     def hw():
-        if not hw_cache:
-            hw_cache.append(hardware_fn())
-        return hw_cache[0]
+        return hardware_fn()
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -227,12 +303,26 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
         runner.unload()
 
     app = FastAPI(title="basal-ui", lifespan=lifespan)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
     if STATIC.is_dir():
         app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
+    @app.middleware("http")
+    async def refuse_cross_origin(request: Request, call_next):
+        origin = request.headers.get("origin")
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and origin and "*" not in allowed_hosts:
+            try:
+                origin_host = urlsplit(origin).hostname
+            except ValueError:
+                origin_host = None
+            if origin_host is None or origin_host.lower() not in {host.lower() for host in allowed_hosts}:
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+        return await call_next(request)
+
     @app.get("/")
     def index():
-        return FileResponse(STATIC / "index.html")
+        # revalidate on every load: a cached copy from an older basal-ui would talk to the new API
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/hardware")
     def get_hardware():
@@ -250,10 +340,13 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
 
     @app.put("/api/settings")
     def put_settings(body: dict = Body(...)):
-        if runner.status()["state"] != "idle":
-            raise HTTPException(409, "unload the model before changing the models directory")
+        models_dir = body.get("models_dir")
+        if models_dir is not None and not isinstance(models_dir, str):
+            raise HTTPException(400, "models_dir must be a string or null")
         try:
-            settings_mod.set_models_dir(body.get("models_dir"))
+            runner.while_idle(lambda: settings_mod.set_models_dir(models_dir))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return settings_response()
@@ -261,13 +354,14 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
     @app.get("/api/models")
     def get_models(refresh: bool = False):
         cache_dir = settings_mod.models_dir()
+        current_hw = hw()
         variants, source = catalog_fn(refresh=refresh, cache_dir=cache_dir)
-        assessed = [catalog.assess(v, hw()) for v in variants]
+        assessed = [catalog.assess(v, current_hw) for v in variants]
         assessed.sort(key=lambda a: (FAMILY_ORDER.get(a.variant.family, 99),
                                      catalog.TIER_ORDER.get(a.variant.tier, 99), a.variant.port, a.variant.label))
         fields = ("id", "repo", "family", "tier", "port", "label", "gguf_file", "weights_bytes", "experimental")
         on_disk = {a.variant.id: catalog.downloaded_bytes(a.variant, cache_dir) for a in assessed}
-        return {"source": source, "suggestions": catalog.suggest(assessed, hw()),
+        return {"source": source, "suggestions": catalog.suggest(assessed, current_hw),
                 "models_dir": str(Path(cache_dir).resolve()), "models": [
             {**{k: getattr(a.variant, k) for k in fields}, "runnable": a.runnable, "reason": a.reason,
              "mode": a.mode, "est_memory_bytes": a.est_memory_bytes, "fit": a.fit, "fit_now": a.fit_now,
@@ -282,11 +376,11 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, ru
         variant = next((v for v in variants if v.id == model_id), None)
         if variant is None:
             raise HTTPException(400, f"unknown model {model_id!r}")
-        status = runner.status()
-        if status["state"] != "idle" and status["model"] == model_id:
-            raise HTTPException(409, "unload the model first")
-        return {"freed_bytes": catalog.delete(variant, settings_mod.models_dir())}
-
+        try:
+            freed = runner.while_not_busy(variant.repo, lambda: catalog.delete(variant, settings_mod.models_dir()))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"freed_bytes": freed}
 
     @app.post("/api/load", status_code=202)
     def load(body: dict = Body(...)):
@@ -339,9 +433,13 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7860)
     a = ap.parse_args()
+    wildcard = a.host in ("0.0.0.0", "::")
+    allowed = ["*"] if wildcard else ["127.0.0.1", "localhost", "::1", a.host]
+    if wildcard:
+        print("WARNING: basal-ui has no authentication; it is exposed to all network hosts.", flush=True)
     import uvicorn
     print(f"basal-ui -> http://{a.host}:{a.port}", flush=True)
-    uvicorn.run(create_app(), host=a.host, port=a.port, log_level="warning")
+    uvicorn.run(create_app(allowed_hosts=allowed), host=a.host, port=a.port, log_level="warning")
 
 
 if __name__ == "__main__":
