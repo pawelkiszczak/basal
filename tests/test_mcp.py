@@ -149,6 +149,28 @@ def test_bridge_forwards_over_http_and_reports_errors():
     assert r.is_error and "422" in r.content[0].text and "unknown question type: guess" in r.content[0].text
 
 
+def test_bridge_api_key_authenticates_model_lookup_and_decisions(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, request.headers.get("authorization")))
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"models": [{"name": "m"}]})
+        return httpx.Response(200, json={"answers": {}})
+
+    transport = httpx.MockTransport(handler)
+
+    def get(url, **kwargs):
+        with httpx.Client(transport=transport) as client:
+            return client.get(url, **kwargs)
+
+    monkeypatch.setattr(httpx, "get", get)
+    assert mcp_server.model_name("http://basal:8000", api_key="secret") == "m"
+    decide = mcp_server.remote("http://basal:8000", transport=transport, api_key="secret")
+    asyncio.run(decide({"state": "x"}))
+    assert seen == [("/v1/models", "Bearer secret"), ("/v1/systemone", "Bearer secret")]
+
+
 def test_mcp_without_the_package_fails_before_model_loading(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["basal-serve", "--mode", "eager", "--mcp", "on"])
     monkeypatch.setattr(mcp_server, "available", lambda: mcp_server.INSTALL)

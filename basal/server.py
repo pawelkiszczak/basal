@@ -34,6 +34,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -1409,47 +1410,65 @@ def parser():
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--api-keys", default=None, metavar="PATH",
+                    help="JSON API key file; when set, require a key for every endpoint except GET /health")
+    ap.add_argument("--cors-origins", default="", help="comma-separated browser origins allowed by CORS")
     ap.add_argument("--mcp", choices=["off", "on"], default="off",
                     help="also serve MCP (streamable HTTP) at /mcp for agents: tools decide and decide_many over the "
-                         "same queue (needs basal[mcp]; no authentication, like the HTTP API: bind --host 127.0.0.1 "
-                         "for agents on this machine)")
+                         "same queue (needs basal[mcp]; API-key protected with --api-keys)")
     from .think import add_think_args  # --think off|auto (experimental; off = this server unchanged)
     add_think_args(ap)
     return ap
 
 
-def main():
-    a = parser().parse_args()
-    a.mode = a.mode or default_mode(a.model, a.revision)
-    validate_quant(a.mode, a.quant)
-    if a.mcp == "on":
-        from .mcp_server import available
-        missing = available()
-        if missing:
-            raise SystemExit(missing)
+def build_app(srv, a):
+    """Build the HTTP application around an initialized inference server."""
     from contextlib import asynccontextmanager, nullcontext
 
-    import uvicorn
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
     from starlette.routing import Route
 
-    t0 = time.time()
-    if a.think == "off":
-        srv = Server(a)
-    else:
-        from .think import ThinkServer
-        srv = ThinkServer(a)
-    attn = getattr(srv.backend, "attn", None)
-    print(f"basal: model {a.model} mode {a.mode}{f' attention {attn}' if attn else ''} ready in {time.time() - t0:.0f}s "
-          f"on port {a.port}", flush=True)
+    from .auth import ApiKeys, protect
+    from .compat import decision_body, decision_response, openai_error, systemone_media, validate_systemone
 
     async def systemone(request):
         try:
-            return JSONResponse(await srv.decide(await request.json()))
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "malformed JSON", "code": "INVALID_JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be a JSON object", "code": "INVALID_JSON"}, status_code=400)
+        try:
+            validate_systemone(body)
+            body = systemone_media(body)
+            return JSONResponse(await srv.decide(body))
+        except (ValueError, KeyError, TypeError) as e:
+            status, msg, code = e.args[0] if e.args and isinstance(e.args[0], tuple) else (422, str(e), "INVALID_REQUEST")
+            return JSONResponse({"error": msg, "code": code,
+                                 "detail": [{"loc": ["body"], "msg": msg, "type": "value_error"}]}, status_code=status)
         except Exception as e:  # noqa: BLE001
             print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
-            return JSONResponse({"error": str(e)}, status_code=422)
+            return JSONResponse({"error": str(e), "code": "INTERNAL_ERROR"}, status_code=500)
+
+    async def decisions(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return openai_error(400, "malformed JSON", "INVALID_JSON")
+        if not isinstance(body, dict):
+            return openai_error(400, "request body must be a JSON object", "INVALID_JSON")
+        try:
+            internal, spec, values = decision_body(body)
+            result = await srv.decide(internal)
+            return JSONResponse(decision_response(result, spec, values))
+        except (ValueError, KeyError, TypeError) as e:
+            error = e.args[0] if isinstance(e, ValueError) and e.args and isinstance(e.args[0], tuple) else (422, str(e), "INVALID_REQUEST")
+            status, message, code = error[:3]
+            return openai_error(status, message, code, error[3] if len(error) > 3 else None)
+        except Exception as e:  # noqa: BLE001
+            print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
+            return openai_error(500, str(e), "INTERNAL_ERROR")
 
     async def models(_):
         return JSONResponse(models_payload(srv.name, a.mode, getattr(srv.backend, "policies", {}), srv.temps,
@@ -1463,22 +1482,68 @@ def main():
     if a.mcp == "on":
         from .mcp_server import http
         mcp_routes, mcp_run = http(srv, a.host)
-        print(f"basal: MCP (streamable HTTP) at http://{a.host}:{a.port}/mcp", flush=True)
 
     @asynccontextmanager
     async def lifespan(_app):
-        tasks = [asyncio.get_running_loop().create_task(srv.worker())]
+        workers = [asyncio.get_running_loop().create_task(srv.worker())]
         if srv.long_tokens is not None:
-            tasks.append(asyncio.get_running_loop().create_task(srv.long_worker()))
+            workers.append(asyncio.get_running_loop().create_task(srv.long_worker()))
         async with mcp_run() if mcp_run else nullcontext():
             yield
-        for task in tasks:
+        for task in workers:
             task.cancel()
 
-    app = Starlette(routes=[Route("/v1/systemone", systemone, methods=["POST"]),
-                            Route("/v1/basal", systemone, methods=["POST"]), Route("/v1/models", models),
-                            Route("/health", health), *mcp_routes], lifespan=lifespan)
-    try:  # uvloop + httptools when available (uvicorn[standard]); plain asyncio otherwise
+    app = Starlette(routes=[
+        Route("/v1/systemone", systemone, methods=["POST"]),
+        Route("/v1/basal", systemone, methods=["POST"]),
+        Route("/v1/decisions", decisions, methods=["POST"]),
+        Route("/decisions", decisions, methods=["POST"]),
+        Route("/v1/models", models), Route("/health", health), *mcp_routes
+    ], lifespan=lifespan)
+
+    async def with_request_id(scope, receive, send):
+        if scope["type"] != "http":
+            await protected(scope, receive, send)
+            return
+        supplied = dict(scope.get("headers", ())).get(b"x-request-id", b"").decode("latin1")
+        request_id = supplied if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied) else f"req_{uuid.uuid4().hex}"
+        async def send_with_id(message):
+            if message["type"] == "http.response.start":
+                message = dict(message)
+                message["headers"] = list(message.get("headers", [])) + [
+                    (b"x-request-id", request_id.encode()), (b"x-typesafe-request-id", request_id.encode())]
+            await send(message)
+        await protected(scope, receive, send_with_id)
+
+    origins = [origin.strip() for origin in a.cors_origins.split(",") if origin.strip()]
+    keys = ApiKeys(a.api_keys) if a.api_keys else None
+    protected = protect(app, keys, origins)
+    return with_request_id
+
+
+def main():
+    a = parser().parse_args()
+    a.mode = a.mode or default_mode(a.model, a.revision)
+    validate_quant(a.mode, a.quant)
+    if a.mcp == "on":
+        from .mcp_server import available
+        missing = available()
+        if missing:
+            raise SystemExit(missing)
+    import uvicorn
+    t0 = time.time()
+    if a.think == "off":
+        srv = Server(a)
+    else:
+        from .think import ThinkServer
+        srv = ThinkServer(a)
+    attn = getattr(srv.backend, "attn", None)
+    print(f"basal: model {a.model} mode {a.mode}{f' attention {attn}' if attn else ''} ready in {time.time() - t0:.0f}s "
+          f"on port {a.port}", flush=True)
+    app = build_app(srv, a)
+    if a.mcp == "on":
+        print(f"basal: MCP (streamable HTTP) at http://{a.host}:{a.port}/mcp", flush=True)
+    try:
         import httptools  # noqa: F401
         import uvloop  # noqa: F401
         fast = dict(loop="uvloop", http="httptools")
