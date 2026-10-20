@@ -1,7 +1,7 @@
 # Serving, batch inference and benchmarks
 
-Flags of `basal-serve`, inference on a JSONL file with `basal-run`, a look inside one decision with `basal-viz`, and
-benchmarking a GPU.
+Flags of `basal-serve`, inference on a JSONL file with `basal-run`, a browser app that picks and serves a model for
+your hardware (`basal-ui`), a look inside one decision with `basal-viz`, and benchmarking a GPU.
 
 ## Serving modes
 
@@ -157,6 +157,36 @@ basal-viz --model Remek/basal-2.0-mini --port 8080     # then open http://127.0.
 It runs `--mode mps` on Apple Silicon and `--mode eager` elsewhere (`--device`, `--orders 1|2`, `--calibration` as for
 `basal-serve`), and only the Llama-architecture models (basal-1.0, basal-1.5, basal-2.0; not basal-omni). It is meant
 for exploring, not serving: every question runs one extra forward per option order to record all layers.
+
+## Browser app: pick a model for your hardware and try it
+
+`basal-ui` is a local web app in the style of LM Studio: it detects the machine, lists every basal model on Hugging
+Face with what this machine can do with it, downloads the one you choose, starts `basal-serve` for it and gives you a
+playground for decisions.
+
+```bash
+uv pip install "basal[ui,mlx]"        # [ui] adds FastAPI; add the engine extra of your machine (mlx, gguf, fp8, vllm)
+basal-ui --port 7860                  # then open http://127.0.0.1:7860
+```
+
+- **Hardware.** NVIDIA GPU (name, compute capability, memory), Apple Silicon (MLX's recommended working set) or CPU
+  (60% of RAM), and the engines installed (`mlx`, `llama-cpp-python`, `vllm`).
+- **Models.** Every `Remek/basal-*` repository and each `.gguf` file of a `-GGUF` repository, with weight size,
+  estimated memory (weights × 1.2 + 1 GB), fit (*fits* up to 85% of the budget, *tight* up to 100%), and the
+  `basal-serve` mode it would run in, or why it cannot run here and which extra fixes that. Offline, the list is
+  what is already in the Hugging Face cache.
+- **Recommendation**, after [HARDWARE.md](HARDWARE.md#recommendation) and the model advice in the README: the
+  basal-2.0 family; FP8 on NVIDIA GPUs with compute capability 8.9+ other than data-centre GPUs and the RTX 4090
+  (bf16 there), `-MLX-8bit` on Apple Silicon, GGUF `Q8_0` on a CPU with `llama-cpp-python`, else bf16; 4.5B if it
+  fits, else mini. *Best quality* is the largest tier that fits.
+- **Load** downloads only what serving needs (the chosen `.gguf` file of a `-GGUF` repository; not the 4.5B's
+  `think/` model), then runs `basal-serve` as a subprocess on a free local port and shows its log. One model at a
+  time; loading another one stops the first.
+- **Playground**: the bundled examples, a question builder (`choice`, `noul`, `score`) or the raw JSON request;
+  answers with calibrated probabilities, confidence and latency. Requests go to the model's `POST /v1/systemone`.
+
+The app binds `127.0.0.1` by default and has no authentication. The NVIDIA, CPU and GGUF rules are covered by tests
+with simulated hardware; end to end it was run on Apple Silicon (MLX).
 
 ## Benchmark your GPU
 
