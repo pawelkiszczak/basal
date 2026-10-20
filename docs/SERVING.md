@@ -201,8 +201,11 @@ basal-ui --port 7860                  # then open http://127.0.0.1:7860
   With a media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail` and
   the audio `lang`.
 
-The app binds `127.0.0.1` by default and has no authentication. The NVIDIA, CPU and GGUF rules are covered by tests
-with simulated hardware; end to end it was run on Apple Silicon (MLX, and basal-omni-1.0-mini with an image on MPS).
+The app binds `127.0.0.1` by default and has no authentication. It answers only requests addressed to
+`127.0.0.1`, `localhost` or the `--host` given, and refuses changes (load, delete, settings) sent from other web
+origins, so a web page cannot drive it through the browser; `--host 0.0.0.0` lifts the host check and prints a
+warning. The NVIDIA, CPU and GGUF rules are covered by tests with simulated hardware; end to end it was run on Apple
+Silicon (MLX, and basal-omni-1.0-mini with an image on MPS).
 
 ## Benchmark your GPU
 
