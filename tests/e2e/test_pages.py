@@ -85,6 +85,25 @@ def test_the_playground_builds_sends_and_renders_each_question_type(page, text_m
         sync_api.expect(articles.first.locator("tbody tr")).to_have_count(3)
 
 
+def test_no_automation_claim_where_the_certificate_does_not_hold(page, text_model):
+    """A media answer (calibration fitted on text) or one with unvalidated calibration is never "Automatable"."""
+    view(page, "playground")
+    probe = """([model, calibration]) => {
+      const m = statusCache.models.find(x => x.id === model);
+      const saved = m.entry; m.entry = {...saved, certified: {"0.01": {choice: 0.5}, "0.05": {choice: 0.4}},
+                                        temperature_per_prim: {choice: 1.2}};
+      renderResults({answers: {q: {type: 'choice', choice: 'a', probabilities: {a: 0.99, b: 0.01}, confidence: 0.99,
+                                   ...(calibration ? {calibration} : {})}}},
+                    {model, state: 's', questions: {q: {type: 'choice', criteria: {a: 'A', b: 'B'}}}});
+      m.entry = saved;
+      return document.querySelector('#results .chips.safety').textContent;
+    }"""
+    assert "Automatable at 1% error" in page.evaluate(probe, [text_model["id"], None])
+    for calibration in ("text", "unvalidated"):
+        strip = page.evaluate(probe, [text_model["id"], calibration])
+        assert "Automatable" not in strip and "Not certified for this answer" in strip
+
+
 def test_the_builder_switches_types_and_edits_a_cost_matrix(page):
     view(page, "playground")
     page.evaluate("() => setRequest({state: 'Paczka nie dotarła.', questions: {}})")

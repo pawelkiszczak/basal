@@ -593,9 +593,21 @@ function decisionBase(answer,q) {
   const keys=q.criteria&&!Array.isArray(q.criteria)?Object.keys(q.criteria):[];
   return keys.length&&keys.every(k=>k==='true'||k==='false')?'noul':'choice';
 }
+// why the model's certified thresholds do not hold for this answer (null: they do). The thresholds are certified on
+// text decisions with the served option orders; a media answer ("text"), one fitted on other option orders or an act
+// question shape the calibration was not validated for ("unvalidated") and uncalibrated probabilities get no claim.
+function certificateGap(answer, entry) {
+  if(answer.calibration==='text')return 'the thresholds are certified on text decisions, not on media';
+  if(answer.calibration==='unvalidated')return answer.type==='act'?'the calibration is not validated for this question shape':'the calibration was fitted on other option orders';
+  if(answer.calibration!=null&&answer.calibration!=='validated')return `calibration: ${answer.calibration}`;
+  if(uncalibrated(entry))return 'the probabilities are not calibrated';
+  return null;
+}
 function automationBadge(answer,q,entry) {
   const type=decisionBase(answer,q);
   if(!entry||!['choice','noul','score'].includes(type)||answer.confidence==null)return '';
+  const gap=certificateGap(answer,entry);
+  if(gap)return `<span class="badge fit-tight" title="${esc(gap)}">Not certified for this answer — review</span>`;
   const cert=entry.certified||{}, t1=cert['0.01']?.[type], t5=cert['0.05']?.[type];
   if(t1==null&&t5==null)return '<span class="muted">No certificate for this type</span>';
   const c=Number(answer.confidence), shown=t=>t==null?'—':Number(t).toFixed(4);
