@@ -48,6 +48,9 @@
 - **`basal-ui` thinking and early exit**: load basal-2.0 4.5B with thinking or a basal-1.0 `fast-exit` model with a
   default early-exit policy from the load options; the Playground then sends `think`, `think_text` and `early_exit`
   and shows the reasoning of each answer that thought. [SERVING.md](SERVING.md#load-options)
+- **`basal-ui` end-to-end tests** (`tests/e2e`, `BASAL_E2E=1`, extra `basal[e2e]`): a real basal-ui with the models on
+  disk, through its API, its API server and its pages in Chromium, for every feature above; skipped by default.
+  [E2E.md](E2E.md)
 - **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
   aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 
