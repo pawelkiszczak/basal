@@ -1157,6 +1157,11 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
                 f.read(1)
         except OSError as exc:
             raise HTTPException(400, f"cannot read {source}: {exc.strerror or exc}") from exc
+        try:  # every problem of the file before any model is loaded (basal-calibrate's own checks)
+            _, units = calibration.labelled(source)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        in_process = bool(units)  # task thresholds are certified on the answers the engine serves in process
         targets = body.get("targets") or list(calibration.TARGETS)
         try:
             if not isinstance(targets, list) or not targets or not all(0 < float(t) < 1 for t in targets):
@@ -1168,13 +1173,25 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         out = settings_mod.calibrations_dir(variant.id) / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
+        label = f"{variant.id} on {source.name}" + (" (engine in process: task questions)" if in_process else "")
         try:
-            with fleet.lock:
-                fleet.check_budget(assessment.est_memory_bytes)
-            return fleet.jobs.start("calibrate", variant.id, f"{variant.id} on {source.name}",
-                                    calibration.run_calibration, fleet, assessment, local_dir, source, out,
-                                    [str(float(t)) for t in targets], options)
+            if in_process:
+                fleet.reserve("calibrate", assessment.est_memory_bytes)
+            else:
+                with fleet.lock:
+                    fleet.check_budget(assessment.est_memory_bytes)
         except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        engine_args = None
+        if in_process:  # the serving mode's flags and the load options basal-calibrate's engine takes
+            engine_args = calibration.engine_flags(catalog.serve_args(variant, local_dir, assessment.mode)
+                                                   + load_options.args(options))
+        try:
+            return fleet.jobs.start("calibrate", variant.id, label, calibration.run_calibration, fleet, assessment,
+                                    local_dir, source, out, [str(float(t)) for t in targets], options, engine_args)
+        except RuntimeError as exc:
+            if in_process:
+                fleet.release("calibrate")
             raise HTTPException(409, str(exc)) from exc
 
     @app.delete("/api/calibrate")
@@ -1198,7 +1215,25 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
             except (OSError, ValueError) as exc:
                 shipped["error"] = str(exc)
         return {"selected": settings_mod.calibration_selection().get(variant.id),
-                "files": calibration.listing(variant.id, settings_mod), "shipped": shipped}
+                "files": calibration.listing(variant.id, settings_mod, local_dir), "shipped": shipped}
+
+    @app.post("/api/calibrations/import")
+    def import_calibration(body: dict = Body(...)):
+        """A calibration file fitted elsewhere (basal-calibrate on another machine, a colleague's file): copied into the
+        model's calibrations, then selectable; a file of another model is listed with basal-serve's warning."""
+        from . import calibration
+
+        variant = find_variant(body.get("id"))
+        downloaded(variant)  # the listing checks the file against the model's directory
+        source = body.get("path")
+        if not isinstance(source, str) or not source.strip():
+            raise HTTPException(400, "path must name a calibration file (JSON)")
+        try:
+            target = calibration.import_file(variant.id, settings_mod, source)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        fleet.event("info", f"calibration imported for {variant.id}: {source} -> {target}")
+        return {"file": str(target), **calibrations_response(variant)}
 
     @app.get("/api/calibrations")
     def get_calibrations(id: str):
@@ -1211,7 +1246,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         variant = find_variant(body.get("id"))
         path = body.get("file")
         if path is not None and path not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
-            raise HTTPException(400, f"{path!r} is not a calibration basal-ui fitted for {variant.id}")
+            raise HTTPException(400, f"{path!r} is not one of the calibrations of {variant.id} in basal-ui")
         settings_mod.select_calibration(variant.id, path)
         fleet.event("info", f"calibration for {variant.id}: {path or 'shipped'} (applies at the next start)")
         return calibrations_response(variant)
@@ -1222,7 +1257,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
 
         variant = find_variant(id)
         if file not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
-            raise HTTPException(404, f"{file!r} is not a calibration basal-ui fitted for {variant.id}")
+            raise HTTPException(404, f"{file!r} is not one of the calibrations of {variant.id} in basal-ui")
         try:
             return {"report": Path(file).with_suffix(".report.txt").read_text()}
         except OSError as exc:
