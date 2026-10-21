@@ -1,5 +1,7 @@
 # Unreleased (fork)
 
+- Integrated upstream 2.3.1 through `621bc57004bde3df6cefa078e3421f21af7f795b`, including the facts fixes, while preserving fork authentication, Decisions, MCP, request IDs, and error envelopes. The UI adds CPU packed execution, Blackwell omni routing, opt-in MLX packed rows, graph-batch guidance, sampled child load counters, HTTP error diagnostics, and calibration completion warnings. See [Serving](SERVING.md#engine-integration-in-231) and [the release gate](E2E.md).
+
 - **`basal-ui`**, a local browser app (extra `basal[ui]`): detects the hardware and the memory available now,
   suggests models that fit (recommended, best quality, fastest, multimodal), lists every basal model with its fit and
   serving mode, downloads the model into a directory of your choice, lists and
