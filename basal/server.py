@@ -272,6 +272,18 @@ def certified(cal, max_error, q_type):
     return ((entry.get("per_type") or {}).get(q_type) or {}).get("confidence")
 
 
+def certified_table(cal):
+    """{max_error target: {question type: certified confidence threshold}} of a calibration ({} without thresholds):
+    what a client needs to tell automatable decisions from those to review."""
+    table = {}
+    for target in (cal.get("thresholds") or {}):
+        row = {t: c for t in ("choice", "noul", "score") if (c := certified(cal, float(target), t)) is not None}
+        if row:
+            table[target] = row
+    return table
+
+
+
 def act_answer(q, probs, conf, cal):
     """Minimum expected cost action; with max_error, automatic actions below the certified threshold of the question's
     type are refused, and all of them when the type has no certified threshold for that target (`deferred`)."""
@@ -495,11 +507,12 @@ def orders_for(orders, k):
 
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
-                   calibration_warning=None, vllm_preset=None):
+                   calibration_warning=None, vllm_preset=None, certified=None, context=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
-    model's prompt format, the option orders served, why the --calibration file may not belong to the model and the
-    --vllm-preset (--mode vllm)."""
+    model's prompt format, the option orders served, why the --calibration file may not belong to the model, the
+    --vllm-preset (--mode vllm), the certified thresholds per max_error target and type, and the context policy
+    (limit in tokens, --context-overflow, --truncate-head)."""
     entry = {"name": name, "release_date": RELEASE_DATE,
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
@@ -514,6 +527,10 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
         entry["calibration_warning"] = calibration_warning
     if vllm_preset:
         entry["vllm_preset"] = vllm_preset
+    if certified:
+        entry["certified"] = certified
+    if context:
+        entry["context"] = context
     return {"models": [entry]}
 
 
@@ -1470,9 +1487,12 @@ def build_app(srv, a):
             return openai_error(500, str(e), "INTERNAL_ERROR")
 
     async def models(_):
-        return JSONResponse(models_payload(srv.name, a.mode, getattr(srv.backend, "policies", {}), srv.temps,
-                                           srv.fmt, srv.orders, getattr(srv.backend, "media_kinds", ()),
-                                           getattr(srv, "cal_mismatch", None), getattr(srv.backend, "preset", None)))
+        return JSONResponse(models_payload(
+            srv.name, a.mode, getattr(srv.backend, "policies", {}), srv.temps, srv.fmt, srv.orders,
+            getattr(srv.backend, "media_kinds", ()), getattr(srv, "cal_mismatch", None),
+            getattr(srv.backend, "preset", None), certified_table(srv.cal),
+            {"limit": srv.context[0] if srv.context else None, "overflow": srv.overflow,
+             "truncate_head": srv.trunc_head}))
 
     async def health(_):
         return JSONResponse({"status": "ok"})

@@ -77,8 +77,11 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   tool of a `tool` question with `"multi": true` (times the option orders).
 - Errors are described in [Errors and request IDs](#errors-and-request-ids).
 - `GET /v1/models` returns `{"models": [{"name", "description", "release_date", "mode", "early_exit",
-  "temperature_per_prim"}]}` (`release_date` is the engine's release date, not the model's); `GET /health` returns
-  `{"status": "ok"}`.
+  "temperature_per_prim"}]}` (`release_date` is the engine's release date, not the model's), plus `"certified"`
+  (`{max_error target: {type: confidence threshold}}` of the loaded calibration, the thresholds `max_error` applies to
+  `act` / `tool` decisions; absent without certified thresholds) and `"context"` (`{"limit": tokens, "overflow":
+  "truncate" | "refuse", "truncate_head"}`, the longest prompt and `--context-overflow` / `--truncate-head`);
+  `GET /health` returns `{"status": "ok"}`.
 
 ## Question types
 
