@@ -159,6 +159,7 @@ def available_modes(v, hw, assessment) -> list[dict]:
         "tpu": None if "tpu" in hw.engines else "needs a TPU VM with basal[tpu]",
         "ollama": None, "llamacpp": None,  # external services: their URL fields are required then
     }
-    reasons["mlx-q8"] = reasons["mlx"]
+    reasons["mlx-q8"] = reasons["mlx"] or (None if v.port in ("bf16", "MLX") else
+                                           f"{v.port} weights are quantised already (mlx-q8 quantises at load)")
     return [{"mode": m, "available": reasons[m] is None, "reason": reasons[m], "default": m == assessment.mode}
             for m in MODE_ORDER]

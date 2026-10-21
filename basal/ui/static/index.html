@@ -997,31 +997,82 @@ function renderStats() {
   $('#statsTable').querySelectorAll('[data-reset]').forEach(b=>b.onclick=()=>act(async()=>{if(await confirmDialog({title:'Reset statistics?',description:`The counters of ${b.dataset.reset} start from zero.`,confirmLabel:'Reset',destructive:true})){await api(`/api/stats/${encodeURIComponent(b.dataset.reset)}`,{method:'DELETE'});toast('Statistics reset');await loadStats();}}));
   const all=$('#resetAllStats'); if(all)all.onclick=()=>act(async()=>{if(await confirmDialog({title:'Reset all statistics?',description:'The counters of every model start from zero. Benchmark results stay.',confirmLabel:'Reset all',destructive:true})){await api('/api/stats',{method:'DELETE'});toast('Statistics reset');await loadStats();}});
 }
-$('#benchmarks').innerHTML=`<div class="section-head"><h3>Benchmarks</h3></div><div class="controls"><select id="benchmarkModel" aria-label="Model to benchmark"></select><select id="benchmarkSet" aria-label="Benchmark set"><option value="bundled">Bundled examples (44 items)</option><option value="custom">Custom path…</option></select><input id="benchmarkPath" type="text" placeholder="/path/to/set.jsonl or a directory of .jsonl" hidden><button type="button" id="runBenchmark">Benchmark</button><button type="button" id="cancelBenchmark" hidden>Cancel</button><span id="benchmarkProgress" class="muted"></span></div><p class="muted">5 warm-up, 30 sequential and 120 concurrent requests (8 at a time); items with a gold answer are scored. Own set: <code>docs/BENCHMARK_SETS.md</code>.</p><div id="benchmarkResults"></div>`;
+const BENCH_HINTS={benchmark:'5 warm-up, 30 sequential and 120 concurrent requests (8 at a time); items with a gold answer are scored. Own set: <code>docs/BENCHMARK_SETS.md</code>.',
+  loadtest:'basal-loadtest against the model: 10 warm-up, sequential requests for the latency, then the concurrent ones for the throughput. Synthetic states of about N tokens replace the set when given.',
+  determinism:'basal-loadtest --determinism: N requests alone, then the same N mixed with N others at the concurrency; a model loaded with Deterministic must return identical probabilities.',
+  modes:'basal-bench in basal-ui’s process: each mode is loaded, measured and freed in turn (the first is the reference of the agreement). Needs the model’s memory once more (twice for eager-fp32) while it runs.'};
+$('#benchmarks').innerHTML=`<div class="section-head"><h3>Benchmarks</h3></div><div class="controls"><select id="benchmarkKind" aria-label="Measurement"><option value="benchmark">Benchmark (preset)</option><option value="loadtest">Load test</option><option value="determinism">Determinism check</option><option value="modes">Compare engine modes</option></select><select id="benchmarkModel" aria-label="Model to benchmark"></select><select id="benchmarkSet" aria-label="Benchmark set"><option value="bundled">Bundled examples (44 items)</option><option value="custom">Custom path…</option></select><input id="benchmarkPath" type="text" placeholder="/path/to/set.jsonl or a directory of .jsonl" hidden><button type="button" id="runBenchmark">Run</button><button type="button" id="cancelBenchmark" hidden>Cancel</button><span id="benchmarkProgress" class="muted"></span><a class="dashboard-link" href="#logs/job%3Abenchmark">Logs</a></div>
+<div class="bench-params" data-kinds="loadtest determinism"><div class="qf-row"><div class="qf"><label>Synthetic tokens</label><input type="number" id="bpSynthetic" min="50" step="50" placeholder="use the set"></div><div class="qf" data-kinds="loadtest"><label>Sequential</label><input type="number" id="bpNSeq" min="1" value="200"></div><div class="qf" data-kinds="loadtest"><label>Concurrent</label><input type="number" id="bpNConc" min="1" value="1000"></div><div class="qf"><label>Concurrency</label><input type="number" id="bpConcurrency" min="1" value="32"></div><div class="qf" data-kinds="loadtest"><label>Questions per request</label><input type="number" id="bpQpr" min="1" max="5" value="1"></div><div class="qf" data-kinds="loadtest"><label>Seed</label><input type="number" id="bpSeed" min="0" value="0"></div><div class="qf" data-kinds="loadtest"><label>Long share</label><input type="number" id="bpLong" min="0" max="1" step="0.1" value="0"></div><div class="qf" data-kinds="determinism"><label>Requests (N)</label><input type="number" id="bpN" min="1" value="50"></div><div class="qf" data-kinds="loadtest" id="bpEarlyExitField" hidden><label>Early exit</label><select id="bpEarlyExit"></select></div></div></div>
+<div class="bench-params" data-kinds="modes"><div id="bpModes" class="controls"></div><div class="qf-row"><div class="qf"><label>Questions (n)</label><input type="number" id="bpModesN" min="10" value="100"></div><div class="qf"><label>Latency samples</label><input type="number" id="bpLatN" min="5" value="30"></div></div></div>
+<p class="muted" id="benchmarkHint"></p><div id="benchmarkResults"></div>`;
 $('#benchmarkSet').value=localStorage.getItem('basal-ui.benchmarkSet')==='custom'?'custom':'bundled';
 $('#benchmarkPath').value=localStorage.getItem('basal-ui.benchmarkPath')||'';
-$('#benchmarkPath').hidden=$('#benchmarkSet').value!=='custom';
-$('#benchmarkSet').onchange=()=>{localStorage.setItem('basal-ui.benchmarkSet',$('#benchmarkSet').value);$('#benchmarkPath').hidden=$('#benchmarkSet').value!=='custom';};
+$('#benchmarkKind').value=localStorage.getItem('basal-ui.benchmarkKind')||'benchmark';
+$('#benchmarkSet').onchange=()=>{localStorage.setItem('basal-ui.benchmarkSet',$('#benchmarkSet').value);updateBenchmarkForm();};
 $('#benchmarkPath').oninput=()=>localStorage.setItem('basal-ui.benchmarkPath',$('#benchmarkPath').value);
+$('#benchmarkKind').onchange=()=>{localStorage.setItem('basal-ui.benchmarkKind',$('#benchmarkKind').value);benchModelsSignature='';renderBenchmarkState(statusCache?.jobs?.benchmark,readyModels());};
+$('#benchmarkModel').onchange=()=>{updateBenchmarkForm();if($('#benchmarkKind').value==='modes')loadComparisonModes();};
+let benchModelsSignature='', comparisonFor='';
+function updateBenchmarkForm() {
+  const kind=$('#benchmarkKind').value;
+  document.querySelectorAll('#benchmarks [data-kinds]').forEach(x=>x.hidden=!x.dataset.kinds.split(' ').includes(kind));
+  $('#benchmarkSet').hidden=kind==='modes'; $('#benchmarkPath').hidden=kind==='modes'||$('#benchmarkSet').value!=='custom';
+  const levels=modelEntry($('#benchmarkModel').value)?.early_exit||[];
+  $('#bpEarlyExit').innerHTML=['',...levels].map(l=>`<option value="${esc(l)}">${l||'off'}</option>`).join('');
+  $('#bpEarlyExitField').hidden=kind!=='loadtest'||!levels.length;
+  $('#benchmarkHint').innerHTML=BENCH_HINTS[kind];
+}
+async function loadComparisonModes() {
+  const id=$('#benchmarkModel').value;
+  if(!id||id===comparisonFor)return;
+  comparisonFor=id;
+  try{
+    const d=await api(`/api/modes?id=${encodeURIComponent(id)}`);
+    const preset=new Set(d.modes.filter(m=>!['ollama','llamacpp'].includes(m)).slice(0,2));  // external services: opt in
+    $('#bpModes').innerHTML=d.modes.map(m=>`<label><input type="checkbox" role="switch" data-mode="${esc(m)}"${preset.has(m)?' checked aria-checked="true"':' aria-checked="false"'}> ${esc(m)}</label>`).join('')||'<span class="muted">No mode can run this model here.</span>';
+  }catch(e){comparisonFor='';$('#bpModes').innerHTML=`<span class="reason">${esc(e.message)}</span>`;}
+}
+const intOf=sel=>$(sel).value===''?undefined:Number($(sel).value);
 $('#runBenchmark').onclick=()=>act(async()=>{
-  const set=$('#benchmarkSet').value==='custom'?$('#benchmarkPath').value.trim():'bundled';
-  await api('/api/benchmark',{method:'POST',body:JSON.stringify({id:$('#benchmarkModel').value,set})});
-  toast('Benchmark started'); await refreshStatus();
+  const kind=$('#benchmarkKind').value, body={id:$('#benchmarkModel').value,kind};
+  if(kind!=='modes')body.set=$('#benchmarkSet').value==='custom'?$('#benchmarkPath').value.trim():'bundled';
+  if(kind==='loadtest')body.params={n_seq:intOf('#bpNSeq'),n_conc:intOf('#bpNConc'),concurrency:intOf('#bpConcurrency'),questions_per_request:intOf('#bpQpr'),seed:intOf('#bpSeed'),long_frac:intOf('#bpLong'),synthetic:intOf('#bpSynthetic')??null,early_exit:$('#bpEarlyExit').value||null};
+  if(kind==='determinism')body.params={determinism:intOf('#bpN'),concurrency:intOf('#bpConcurrency'),synthetic:intOf('#bpSynthetic')??null};
+  if(kind==='modes')Object.assign(body,{modes:[...document.querySelectorAll('#bpModes [data-mode]:checked')].map(x=>x.dataset.mode),n:intOf('#bpModesN'),lat_n:intOf('#bpLatN')});
+  if(body.params)body.params=Object.fromEntries(Object.entries(body.params).filter(([,v])=>v!==undefined));
+  await api('/api/benchmark',{method:'POST',body:JSON.stringify(body)});
+  toast(`${$('#benchmarkKind').selectedOptions[0].textContent} started`); await refreshStatus();
 });
 $('#cancelBenchmark').onclick=()=>act(async()=>{await api('/api/benchmark',{method:'DELETE'});await refreshStatus();});
 function renderBenchmarkState(bench, ready) {
-  const select=$('#benchmarkModel'), current=select.value, ids=ready.map(m=>m.id);
-  if(JSON.stringify([...select.options].map(o=>o.value))!==JSON.stringify(ids))select.innerHTML=ids.map(id=>`<option value="${esc(id)}">${esc(id)}</option>`).join('');
-  if(ids.includes(current))select.value=current;
+  const kind=$('#benchmarkKind').value, select=$('#benchmarkModel'), current=select.value;
+  const ids=kind==='modes'?modelData.filter(m=>m.downloaded).map(m=>m.id):ready.map(m=>m.id);
+  const signature=JSON.stringify([kind,ids]);
+  if(signature!==benchModelsSignature){
+    benchModelsSignature=signature;
+    select.innerHTML=ids.map(id=>`<option value="${esc(id)}">${esc(id)}</option>`).join('');
+    if(ids.includes(current))select.value=current;
+    updateBenchmarkForm(); if(kind==='modes'){comparisonFor='';loadComparisonModes();}
+  }
   const running=Boolean(bench?.running);
   $('#runBenchmark').disabled=running||!ids.length; $('#cancelBenchmark').hidden=!running;
-  $('#benchmarkProgress').textContent=!bench?(ids.length?'':'Load a model to benchmark it.'):running?`${shortName(bench.model)} · ${bench.phase} ${bench.done}/${bench.total}`:bench.phase==='error'?`Failed: ${bench.error}`:bench.phase==='cancelled'?'Cancelled':'';
+  $('#benchmarkProgress').textContent=!bench?(ids.length?'':kind==='modes'?'Download a model to compare its modes.':'Load a model to benchmark it.'):running?`${shortName(bench.model)} · ${bench.label} · ${bench.phase} ${bench.done}/${bench.total}`:bench.phase==='error'?`Failed: ${bench.error}`:bench.phase==='cancelled'?'Cancelled':'';
   if(benchRunning&&!running)loadStats();
   benchRunning=running;
 }
+function benchmarkRow(x) {
+  const kind=x.kind||'benchmark', head=`<td title="${esc(x.model)}">${esc(shortName(x.model))}</td><td><span class="chip">${esc(kind)}</span></td><td title="${esc(x.set)}">${esc(x.set==='bundled'?'bundled':shortName(x.set))}${x.items!=null?` (${x.items})`:''}</td><td>${esc(new Date(x.when*1000).toLocaleString())}</td>`;
+  if(kind==='determinism'){const d=x.determinism||{};return `<tr>${head}<td colspan="7"><span class="badge ${d.identical===d.requests?'fit-fits':'fit-tight'}">identical ${esc(d.identical)}/${esc(d.requests)}</span> max |Δp| ${esc(d.max_abs_diff)} · decision flips ${esc(d.decision_flips)} · concurrency ${esc(d.concurrency)}</td></tr>`;}
+  if(kind==='modes'){
+    const f=(v,d=1)=>v==null||Number.isNaN(Number(v))?'—':Number(v).toFixed(d);
+    const rows=(x.modes||[]).map(m=>m.error?`<tr><td>${esc(m.mode)}</td><td colspan="8"><span class="reason wide">${esc(m.error)}</span></td></tr>`:`<tr><td>${esc(m.mode)}</td><td>${f(m.lat1_ms)}</td><td>${f(m.lat2_ms)}</td><td>${f(m.lat2_p95_ms)}</td><td>${f(m.dec_s)}</td><td>${m.agree==null?`ref`:f(m.agree,3)}</td><td>${m.acc==null?'—':pct(m.acc)}</td><td>${f(m.load_s)}</td><td>${f(m.mem_gb,2)}</td></tr>`).join('');
+    return `<tr>${head}<td colspan="7"><details><summary>${(x.modes||[]).map(m=>esc(m.mode)).join(' vs ')}</summary><table class="mini-table"><thead><tr><th>Mode</th><th>lat1 ms</th><th>lat2 ms</th><th>p95 ms</th><th>dec/s</th><th>agree</th><th>acc</th><th>load s</th><th>mem GB</th></tr></thead><tbody>${rows}</tbody></table></details></td></tr>`;
+  }
+  return `<tr>${head}<td>${num(x.p50_ms,0)} ms</td><td>${num(x.p95_ms,0)} ms</td><td>${num(x.decisions_per_s)}</td><td>${num(x.questions_per_s)}</td><td>${num(x.input_tokens_per_s,0)}</td><td title="${esc(Object.entries(x.accuracy?.by_file||{}).map(([f,v])=>`${f}: ${pct(v)}`).join(', '))}">${pct(x.accuracy?.overall)}</td><td>${esc(x.errors??'—')}</td></tr>`;
+}
 function renderBenchmarkResults() {
   const rows=Object.values(statsData.benchmarks||{}).flat().sort((a,b)=>b.when-a.when);
-  $('#benchmarkResults').innerHTML=rows.length?`<div class="table-wrap"><table><thead><tr><th>Model</th><th>Set</th><th>When</th><th>p50</th><th>p95</th><th>dec/s</th><th>q/s</th><th>tok/s</th><th>Accuracy</th><th>Errors</th></tr></thead><tbody>${rows.map(x=>`<tr><td title="${esc(x.model)}">${esc(shortName(x.model))}</td><td title="${esc(x.set)}">${esc(x.set==='bundled'?'bundled':shortName(x.set))} (${x.items})</td><td>${esc(new Date(x.when*1000).toLocaleString())}</td><td>${num(x.p50_ms,0)} ms</td><td>${num(x.p95_ms,0)} ms</td><td>${num(x.decisions_per_s)}</td><td>${num(x.questions_per_s)}</td><td>${num(x.input_tokens_per_s,0)}</td><td title="${esc(Object.entries(x.accuracy?.by_file||{}).map(([f,v])=>`${f}: ${pct(v)}`).join(', '))}">${pct(x.accuracy?.overall)}</td><td>${x.errors}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No benchmark results yet.</div>';
+  $('#benchmarkResults').innerHTML=rows.length?`<div class="table-wrap"><table><thead><tr><th>Model</th><th>Kind</th><th>Set</th><th>When</th><th>p50</th><th>p95</th><th>dec/s</th><th>q/s</th><th>tok/s</th><th>Accuracy</th><th>Errors</th></tr></thead><tbody>${rows.map(benchmarkRow).join('')}</tbody></table></div>`:'<div class="empty">No benchmark results yet.</div>';
 }
 // Calibration: basal-calibrate on the user's labelled requests against a temporary uncalibrated child of the model
 $('#calibrationBlock').innerHTML=`<div class="section-head"><h3>Calibration</h3></div><div class="controls"><select id="calibrationModel" aria-label="Model to calibrate"></select><input id="calibrationInput" type="text" placeholder="/path/to/labelled.jsonl" size="40"><label><input id="calibrationT1" type="checkbox" checked> 1%</label><label><input id="calibrationT5" type="checkbox" checked> 5%</label><button type="button" id="runCalibration">Calibrate</button><button type="button" id="cancelCalibration" hidden>Cancel</button><span id="calibrationProgress" class="muted"></span><a class="dashboard-link" href="#logs/job%3Acalibrate">Logs</a></div><p class="muted">Fits temperatures and certified thresholds on your labelled requests (format: <code>docs/CALIBRATION.md#input</code>; the simple <code>basal-run</code> items with <code>gold</code> work too) against a temporary uncalibrated copy of the model, which needs its memory once more while it runs. Task questions need the engine in process: use <code>basal-calibrate</code> for them. The selected file applies from the model's next start.</p><div id="calibrationFiles"></div><dialog id="reportDialog" class="confirm-dialog report-dialog"><h3>Calibration report</h3><pre id="reportText" class="logs"></pre><div class="dialog-actions"><button type="button" id="reportClose">Close</button></div></dialog>`;

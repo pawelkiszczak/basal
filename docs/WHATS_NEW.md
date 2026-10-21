@@ -38,6 +38,10 @@
 - **`basal-ui` batch inference**: run a JSONL file through a loaded model from the **Batch** view, follow the progress,
   page through the answers and download them (`basal-run`'s `run()` now returns its summary and takes headers and a
   progress callback). [SERVING.md](SERVING.md#batch)
+- **`basal-ui` load tests, determinism checks and engine-mode comparisons**: configurable `basal-loadtest` runs and
+  `--determinism` checks against a loaded model, and `basal-bench` mode comparisons of a downloaded model in
+  basal-ui's process, next to the benchmark preset; `basal-loadtest`'s `run()` / `determinism()` return their results
+  and `basal-bench` exposes `measure_mode()`. [SERVING.md](SERVING.md#statistics-and-benchmarks)
 - **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
   aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 

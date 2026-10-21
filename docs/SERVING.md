@@ -255,6 +255,7 @@ with 422; the share kept from the beginning; `--max-len`). Only the values that 
 passed, and a combination basal-serve refuses shows its own message on the model's row. **Remember for this model**
 keeps them for its next plain Load; a restart and auto-load reuse the options the model runs with. The row lists them
 as chips.
+
 ### Batch
 
 **Batch** runs `basal-run` from the app: a loaded model, an input JSONL file (simple items or full `/v1/systemone`
@@ -263,7 +264,6 @@ concurrency and, for a `--mode fast-exit` model, an early-exit level. The progre
 seconds, items per second, server p50, accuracy over the items with `gold`) and the answers page by page are shown;
 **Download answers** saves the output file. Batch requests go straight to the model's basal-serve: they are not
 counted in the statistics or the history. One batch runs at a time; its log is **Logs → job:batch**.
-
 
 ### Memory budget
 
@@ -286,9 +286,22 @@ and can be reset per model or all at once.
 **Benchmark** measures one loaded model at a time: 5 warm-up requests, 30 sequential requests (p50 / p95 / mean
 latency) and 120 at concurrency 8 (decisions, questions and input tokens per second, errors). Every item with a `gold`
 answer is scored once (accuracy overall and per file). The set is either the bundled examples (44 items in
-`basal/examples/`) or your own JSONL file or directory: [BENCHMARK_SETS.md](BENCHMARK_SETS.md). The last 5 results
-per model stay in the stats file and are shown side by side. Benchmark requests are not counted in the statistics or
-the history.
+`basal/examples/`) or your own JSONL file or directory: [BENCHMARK_SETS.md](BENCHMARK_SETS.md). The same block runs
+three other measurements, one at a time:
+
+- **Load test**: `basal-loadtest` against the loaded model with your sequential / concurrent counts, concurrency,
+  questions per request, synthetic states of about N tokens (with a share of long ones and a seed) and, for a
+  `fast-exit` model, an early-exit level.
+- **Determinism check**: `basal-loadtest --determinism N`: N requests alone, then the same N mixed with N others; a
+  model loaded with **Deterministic** (load options) must return identical probabilities.
+- **Compare engine modes**: `basal-bench` in basal-ui's own process for a downloaded model: every chosen mode (the
+  ones this machine can run, plus `eager-fp32`, `vllm@deterministic` and `fast-exit@<policy>` where available) is
+  loaded, measured (latency with one and both option orders, decisions per second, agreement with the first mode,
+  accuracy, load time, memory) and freed in turn. Its memory is counted in the budget while it runs (twice the
+  estimate with `eager-fp32`); a mode that fails is listed with its error.
+
+The last 20 results per model stay in the stats file and are shown side by side. Benchmark requests are not counted
+in the statistics or the history.
 
 ### Custom calibration
 
