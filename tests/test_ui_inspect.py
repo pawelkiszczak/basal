@@ -20,7 +20,8 @@ MLX = Variant("mini-mlx", "Remek/basal-2.0-mini-MLX-8bit", "basal-2.0", "mini", 
 class StubExplainer:
     def __init__(self, a):
         self.a = a
-        self.info = {"model": "stub", "device": a.device, "layers": 2}
+        self.info = {"model": "stub", "device": a.device, "layers": 2, "mode": "eager", "orders": 2,
+                     "temperatures": {"choice": 1.1}, "temperature_per_bucket": {}}
         workers = self.workers = []
 
         class Srv:
@@ -60,8 +61,10 @@ def test_inspector_serves_basal_viz_for_a_bf16_model_and_stops(client):
     deadline = time.monotonic() + 5
     while client.get("/api/inspect").json()["state"] != "ready" and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert client.get("/api/inspect").json() == {"model": "mini", "state": "ready", "error": None}
-    assert client.get("/viz/api/info").json() == {"model": "mini", "device": "cpu", "layers": 2}  # the variant's id
+    assert client.get("/api/inspect").json() == {
+        "model": "mini", "state": "ready", "error": None, "mode": "eager", "device": "cpu", "orders": 2,
+        "calibration": None, "temperatures": {"choice": 1.1}, "temperature_per_bucket": {}}
+    assert client.get("/viz/api/info").json()["model"] == "mini"  # the variant's id
     explained = client.post("/viz/api/explain", json={"state": "s", "questions": {}})
     assert explained.json() == {"questions": [], "state": "s", "served": {}}
     assert client.fleet.reserved["inspect"] == catalog.assess(BF16, HW).est_memory_bytes

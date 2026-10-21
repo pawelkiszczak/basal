@@ -193,14 +193,16 @@ class Runner:
         temporary: a private child for a job (basal-calibrate): no API key (it is reached on loopback without one),
         no calibration selected in basal-ui, not remembered for auto-load; extra_args go to basal-serve last."""
         options = load_options.non_default(load_options.validate(options, assessment.mode))
-        if options.get("mode") and not media:
+        if media:  # --media on: eager, or vLLM where chosen (prepare checks it can run)
+            assessment = dataclasses.replace(assessment, mode="vllm" if options.get("mode") == "vllm" else "eager")
+        elif options.get("mode"):
             assessment = dataclasses.replace(assessment, mode=options["mode"])
         with self.lock:
             if self.state in ("downloading", "starting"):
                 raise RuntimeError("the model is already loading; unload it first")
             old, _ = self.detach()
             self.state, self.model, self.model_repo = "downloading", assessment.variant.id, assessment.variant.repo
-            self.mode = "eager" if media else assessment.mode
+            self.mode = assessment.mode
             self.media_requested, self.media = media, []
             self.est_memory_bytes = assessment.est_memory_bytes
             self.extra_args, self.temporary, self.options = tuple(extra_args), temporary, options
@@ -705,8 +707,12 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         assessment = catalog.assess(variant, current)
         merged = load_options.validate(options, assessment.mode)
         if media:
-            if assessment.media_mode is None:
-                raise ValueError(assessment.media_reason)
+            modes = {m["mode"]: m for m in load_options.available_media_modes(assessment, current)}
+            chosen = modes.get(merged["mode"] or "eager")
+            if chosen is None:
+                raise ValueError("--media on needs --mode eager or vllm (the media paths of basal-omni)")
+            if not chosen["available"]:
+                raise ValueError(chosen["reason"])
         elif merged["mode"]:
             mode = next(m for m in load_options.available_modes(variant, current, assessment)
                         if m["mode"] == merged["mode"])
@@ -714,7 +720,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
                 raise ValueError(f"--mode {merged['mode']}: {mode['reason']}")
         elif not assessment.runnable:
             raise ValueError(assessment.reason)
-        load_options.check_combination(variant, current, merged, assessment.mode)
+        load_options.check_combination(variant, current, merged, "eager" if media else assessment.mode)
         return assessment, load_options.non_default(merged)
 
     auto_load_stop = threading.Event()
@@ -948,6 +954,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         family_ok = variant.family == "basal-2.0" and variant.tier == "4.5B"
         return {"modes": load_options.available_modes(variant, current, assessment), "options": merged,
                 "saved": bool(saved), "defaults": load_options.DEFAULTS,
+                "media_modes": load_options.available_media_modes(assessment, current),
                 "think": {"model": family_ok, "vllm": "vllm" in current.engines,
                           "reason": None if family_ok else load_options.THINK_REASON}}
 
@@ -984,7 +991,12 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         if not isinstance(media, bool):
             raise HTTPException(400, "media must be a boolean")
         try:
-            options = body["options"] if "options" in body else settings_mod.load_options(variant.id)  # remembered
+            if "options" in body:
+                options = body["options"]
+            else:  # remembered; their engine mode applies with media only when it is a media mode
+                options = settings_mod.load_options(variant.id)
+                if media and options.get("mode") not in (None, "eager", "vllm"):
+                    options = {k: v for k, v in options.items() if k != "mode"}
             assessment, options = prepare(variant, media, options)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -1145,6 +1157,11 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
                 f.read(1)
         except OSError as exc:
             raise HTTPException(400, f"cannot read {source}: {exc.strerror or exc}") from exc
+        try:  # every problem of the file before any model is loaded (basal-calibrate's own checks)
+            _, units = calibration.labelled(source)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        in_process = bool(units)  # task thresholds are certified on the answers the engine serves in process
         targets = body.get("targets") or list(calibration.TARGETS)
         try:
             if not isinstance(targets, list) or not targets or not all(0 < float(t) < 1 for t in targets):
@@ -1156,13 +1173,25 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         out = settings_mod.calibrations_dir(variant.id) / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
+        label = f"{variant.id} on {source.name}" + (" (engine in process: task questions)" if in_process else "")
         try:
-            with fleet.lock:
-                fleet.check_budget(assessment.est_memory_bytes)
-            return fleet.jobs.start("calibrate", variant.id, f"{variant.id} on {source.name}",
-                                    calibration.run_calibration, fleet, assessment, local_dir, source, out,
-                                    [str(float(t)) for t in targets], options)
+            if in_process:
+                fleet.reserve("calibrate", assessment.est_memory_bytes)
+            else:
+                with fleet.lock:
+                    fleet.check_budget(assessment.est_memory_bytes)
         except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        engine_args = None
+        if in_process:  # the serving mode's flags and the load options basal-calibrate's engine takes
+            engine_args = calibration.engine_flags(catalog.serve_args(variant, local_dir, assessment.mode)
+                                                   + load_options.args(options))
+        try:
+            return fleet.jobs.start("calibrate", variant.id, label, calibration.run_calibration, fleet, assessment,
+                                    local_dir, source, out, [str(float(t)) for t in targets], options, engine_args)
+        except RuntimeError as exc:
+            if in_process:
+                fleet.release("calibrate")
             raise HTTPException(409, str(exc)) from exc
 
     @app.delete("/api/calibrate")
@@ -1186,7 +1215,25 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
             except (OSError, ValueError) as exc:
                 shipped["error"] = str(exc)
         return {"selected": settings_mod.calibration_selection().get(variant.id),
-                "files": calibration.listing(variant.id, settings_mod), "shipped": shipped}
+                "files": calibration.listing(variant.id, settings_mod, local_dir), "shipped": shipped}
+
+    @app.post("/api/calibrations/import")
+    def import_calibration(body: dict = Body(...)):
+        """A calibration file fitted elsewhere (basal-calibrate on another machine, a colleague's file): copied into the
+        model's calibrations, then selectable; a file of another model is listed with basal-serve's warning."""
+        from . import calibration
+
+        variant = find_variant(body.get("id"))
+        downloaded(variant)  # the listing checks the file against the model's directory
+        source = body.get("path")
+        if not isinstance(source, str) or not source.strip():
+            raise HTTPException(400, "path must name a calibration file (JSON)")
+        try:
+            target = calibration.import_file(variant.id, settings_mod, source)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        fleet.event("info", f"calibration imported for {variant.id}: {source} -> {target}")
+        return {"file": str(target), **calibrations_response(variant)}
 
     @app.get("/api/calibrations")
     def get_calibrations(id: str):
@@ -1199,7 +1246,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         variant = find_variant(body.get("id"))
         path = body.get("file")
         if path is not None and path not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
-            raise HTTPException(400, f"{path!r} is not a calibration basal-ui fitted for {variant.id}")
+            raise HTTPException(400, f"{path!r} is not one of the calibrations of {variant.id} in basal-ui")
         settings_mod.select_calibration(variant.id, path)
         fleet.event("info", f"calibration for {variant.id}: {path or 'shipped'} (applies at the next start)")
         return calibrations_response(variant)
@@ -1210,7 +1257,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
 
         variant = find_variant(id)
         if file not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
-            raise HTTPException(404, f"{file!r} is not a calibration basal-ui fitted for {variant.id}")
+            raise HTTPException(404, f"{file!r} is not one of the calibrations of {variant.id} in basal-ui")
         try:
             return {"report": Path(file).with_suffix(".report.txt").read_text()}
         except OSError as exc:
@@ -1228,7 +1275,10 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         local_dir = downloaded(variant)
         cal = body.get("calibration")
         if cal is not None and cal not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
-            raise HTTPException(400, f"{cal!r} is not a calibration basal-ui fitted for {variant.id}")
+            raise HTTPException(400, f"{cal!r} is not one of the calibrations of {variant.id} in basal-ui")
+        orders = body.get("orders")
+        if orders not in (None, 1, 2):
+            raise HTTPException(400, "orders must be 1, 2 or null (the model's own)")
         job = fleet.jobs.get("inspect")
         if job is not None and job.running:
             raise HTTPException(409, "the inspector is loading a model")
@@ -1242,7 +1292,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
 
         def start(job):
             try:
-                return inspector.start(job, variant, local_dir, current, cal)
+                return inspector.start(job, variant, local_dir, current, cal, orders)
             except BaseException:
                 fleet.release("inspect")
                 raise
