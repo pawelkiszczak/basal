@@ -26,11 +26,12 @@ def _strip_media(value):
 
 
 def _best(answer: dict):
-    for key in ("choice", "action", "tool", "score"):
+    for key in ("choice", "action", "tool", "label", "score"):
         if key in answer and answer[key] is not None:
             return str(answer[key])
-    if isinstance(answer.get("selected"), list):
-        return ", ".join(map(str, answer["selected"]))
+    for key in ("selected", "labels", "tools"):  # multi, multi-label classify, multi tool
+        if isinstance(answer.get(key), list):
+            return ", ".join(map(str, answer[key]))
     for key in ("noul", "probability"):  # systemone noul, decisions-API predicate: the probability of yes
         if isinstance(answer.get(key), (int, float)):
             return "true" if answer[key] >= 0.5 else "false"
