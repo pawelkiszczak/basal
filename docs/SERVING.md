@@ -302,7 +302,29 @@ caches, the scheduler and long-request lane, and the **context policy** (truncat
 with 422; the share kept from the beginning; `--max-len`). Only the values that differ from basal-serve's defaults are
 passed, and a combination basal-serve refuses shows its own message on the model's row. **Remember for this model**
 keeps them for its next plain Load; a restart and auto-load reuse the options the model runs with. The row lists them
-as chips.
+as chips. **Experimental**: **Thinking** (`--think auto`, with the reasoning budget, and the Python of an environment
+with vLLM or the URL of a running think server when basal-ui's own has no vLLM) for basal-2.0 4.5B
+([THINKING.md](THINKING.md)), and the default **early exit** policy of `--mode fast-exit` (basal-1.0 bf16 on CUDA);
+both are refused for other models and modes. A model loaded with them gets **Think** (auto / off / force), **Show
+reasoning** and **Early exit** in the Playground head, and each answer that thought shows its reasoning tokens and
+time, the calibration it used and the confidence it had without thinking.
+
+### Batch
+
+**Batch** runs `basal-run` from the app: a loaded model, an input JSONL file (simple items or full `/v1/systemone`
+requests, [above](#inference-on-a-jsonl-file)), the output file (default `<input>.answers.jsonl` next to it), the
+concurrency and, for a `--mode fast-exit` model, an early-exit level. The progress, the summary (items, errors,
+seconds, items per second, server p50, accuracy over the items with `gold`) and the answers page by page are shown;
+**Download answers** saves the output file. Batch requests go straight to the model's basal-serve: they are not
+counted in the statistics or the history. One batch runs at a time; its log is **Logs → job:batch**.
+
+### Inspect
+
+**Inspect** embeds `basal-viz` ([above](#see-how-a-decision-is-made)) for a downloaded bf16 model of basal-1.0,
+basal-1.5 or basal-2.0 (the MLX, GGUF, FP8 and NVFP4 ports and basal-omni cannot be read layer by layer): **Start**
+loads it into basal-ui's own process (MPS on Apple Silicon, CUDA on NVIDIA, else the CPU; its memory is counted in the
+budget until **Stop**), with the shipped calibration or one fitted in basal-ui, and the page appears below. **Inspect
+this decision** in the Playground sends the current request there and explains it.
 
 ### Memory budget
 
@@ -325,9 +347,22 @@ and can be reset per model or all at once.
 **Benchmark** measures one loaded model at a time: 5 warm-up requests, 30 sequential requests (p50 / p95 / mean
 latency) and 120 at concurrency 8 (decisions, questions and input tokens per second, errors). Every item with a `gold`
 answer is scored once (accuracy overall and per file). The set is either the bundled examples (44 items in
-`basal/examples/`) or your own JSONL file or directory: [BENCHMARK_SETS.md](BENCHMARK_SETS.md). The last 5 results
-per model stay in the stats file and are shown side by side. Benchmark requests are not counted in the statistics or
-the history.
+`basal/examples/`) or your own JSONL file or directory: [BENCHMARK_SETS.md](BENCHMARK_SETS.md). The same block runs
+three other measurements, one at a time:
+
+- **Load test**: `basal-loadtest` against the loaded model with your sequential / concurrent counts, concurrency,
+  questions per request, synthetic states of about N tokens (with a share of long ones and a seed) and, for a
+  `fast-exit` model, an early-exit level.
+- **Determinism check**: `basal-loadtest --determinism N`: N requests alone, then the same N mixed with N others; a
+  model loaded with **Deterministic** (load options) must return identical probabilities.
+- **Compare engine modes**: `basal-bench` in basal-ui's own process for a downloaded model: every chosen mode (the
+  ones this machine can run, plus `eager-fp32`, `vllm@deterministic` and `fast-exit@<policy>` where available) is
+  loaded, measured (latency with one and both option orders, decisions per second, agreement with the first mode,
+  accuracy, load time, memory) and freed in turn. Its memory is counted in the budget while it runs (twice the
+  estimate with `eager-fp32`); a mode that fails is listed with its error.
+
+The last 20 results per model stay in the stats file and are shown side by side. Benchmark requests are not counted
+in the statistics or the history.
 
 ### Custom calibration
 
