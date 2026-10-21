@@ -71,3 +71,22 @@ were read, and settings/history/calibration/batch output used isolated temporary
 Review the merged `build_app` validation boundary, asynchronous health generation guard, report-warning parsing,
 and `done_with_warnings` consumers. MLX mode comparisons now receive the saved packed option and record it per row;
 other benchmark options keep their existing scope. Health figures are sampled and may lag by one polling interval.
+
+## PR 9 regression follow-up
+
+Shared request parsing now rejects invalid act `max_error` and threshold multi/tool `min`/`max` before inference,
+returning 422 while retaining legacy numeric-string coercion. Internal engine failures remain 500 and OOM remains 503.
+Long-lane cache misses use the existing gated layered prefill, so queued short requests can run between layers.
+This recomputes the root even when a partial prefix is cached; exact long-lane hits and main-lane incremental reuse
+remain enabled. Incremental long-lane reuse can return when prefix extension supports the scheduling gate.
+
+- Red check: `.venv/bin/python -m pytest -q tests/test_http_status.py -k assembly_options tests/test_state_cache.py -k 'assembly_options or growing_state_in_long_lane'`:
+  **6 failed, 3 passed, 25 deselected**, 1.41 seconds, reproducing five incorrect 500 responses and missing callbacks.
+- Green check: `.venv/bin/python -m pytest -q tests/test_http_status.py tests/test_state_cache.py tests/test_long_lane.py tests/test_engine16.py tests/test_sets.py tests/test_tools.py tests/test_tasks.py`:
+  **378 passed**, 5.25 seconds. The new cache regression checks scheduling callbacks, answer equality, and subsequent exact-hit reuse.
+- Compatibility check: `.venv/bin/python -m pytest -q tests/test_server.py tests/test_api_compat.py tests/test_auth.py tests/test_mcp.py tests/test_ui_engine231.py tests/test_ui_gateway.py tests/test_engine.py tests/test_gemma4_graph.py tests/test_prefix_cache.py`:
+  **188 passed**, 5.80 seconds, with no skips.
+
+These follow-up checks use the existing virtualenv, HTTP stubs and tiny local CPU models; no downloads or real GPU,
+browser, latency, or throughput acceptance was performed for these two fixes. The partial-prefix long-lane fallback
+trades incremental prefill speed for preserved scheduling. Publication remains with the coordinator.

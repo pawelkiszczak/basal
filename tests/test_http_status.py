@@ -132,3 +132,30 @@ def test_health_counts_running_and_queued_requests():
     assert codes == [200, 200]
     assert health == [{"status": "ok", "running": 1, "queued": 0}, {"status": "ok", "running": 1, "queued": 1},
                       {"status": "ok", "running": 0, "queued": 0}]
+
+
+@pytest.mark.parametrize("question", [
+    dict(Q, type="act", costs={"wrong": 1, "defer": .1}, max_error="bad"),
+    *[{"type": "multi", "criteria": ["a", "b"], key: "bad"} for key in ("min", "max")],
+    *[{"type": "tool", "multi": True, "tools": [{"type": "function", "function": {"name": "lookup"}}],
+       key: "bad"} for key in ("min", "max")],
+])
+def test_invalid_assembly_options_are_rejected_before_inference(question):
+    engine = Engine()
+    srv = AppServer(engine)
+    response = post(srv, {"state": "s", "questions": {"q": question}})
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "INVALID_REQUEST"
+    assert not engine.entered.is_set()
+    assert srv.load() == {"running": 0, "queued": 0}
+
+
+@pytest.mark.parametrize("question", [
+    dict(Q, type="act", costs={"wrong": 1, "defer": .1}, max_error="0.05"),
+    {"type": "multi", "criteria": ["a", "b"], "min": "1", "max": "2"},
+    {"type": "tool", "multi": True, "tools": [{"type": "function", "function": {"name": "lookup"}}],
+     "min": "1", "max": "2"},
+])
+def test_numeric_assembly_options_keep_legacy_coercion(question):
+    response = post(AppServer(Engine()), {"state": "s", "questions": {"q": question}})
+    assert response.status_code == 200, response.text
