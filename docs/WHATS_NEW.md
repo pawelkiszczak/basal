@@ -42,6 +42,9 @@
   `--determinism` checks against a loaded model, and `basal-bench` mode comparisons of a downloaded model in
   basal-ui's process, next to the benchmark preset; `basal-loadtest`'s `run()` / `determinism()` return their results
   and `basal-bench` exposes `measure_mode()`. [SERVING.md](SERVING.md#statistics-and-benchmarks)
+- **`basal-ui` Inspect view**: `basal-viz` embedded for a downloaded bf16 model, with **Inspect this decision** from
+  the Playground; `basal-viz` builds its app with `make_app()` and its page uses relative API paths, so it also works
+  under a prefix. [SERVING.md](SERVING.md#inspect)
 - **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
   aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 

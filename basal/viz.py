@@ -197,6 +197,42 @@ def examples():
     return out
 
 
+def make_app(explainer_fn, examples_fn, lifespan=None):
+    """The basal-viz page and its API: /, /api/info, /api/examples, /api/explain. explainer_fn() is the Explainer in
+    use; RuntimeError when there is none (basal-ui before its Inspect view starts one): 503 on info and explain."""
+    from starlette.applications import Starlette
+    from starlette.responses import FileResponse, JSONResponse
+    from starlette.routing import Route
+
+    def current():
+        try:
+            return explainer_fn(), None
+        except RuntimeError as e:
+            return None, JSONResponse({"error": str(e)}, status_code=503)
+
+    async def info(_):
+        ex, unavailable = current()
+        return unavailable or JSONResponse(ex.info)
+
+    async def explain(request):
+        ex, unavailable = current()
+        if unavailable:
+            return unavailable
+        try:
+            body = await request.json()
+            res = await asyncio.get_running_loop().run_in_executor(None, ex.explain, body)
+            return JSONResponse(compare_served(res, await ex.srv.decide(body)))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": str(e)}, status_code=422)
+
+    return Starlette(routes=[
+        Route("/", lambda _: FileResponse(HERE / "viz.html")),
+        Route("/api/info", info),
+        Route("/api/examples", lambda _: JSONResponse(examples_fn())),
+        Route("/api/explain", explain, methods=["POST"]),
+    ], lifespan=lifespan)
+
+
 def main():
     ap = argparse.ArgumentParser(description="basal decision visualiser (local web page)")
     ap.add_argument("--model", default="Remek/basal-2.0-mini", help="local directory or Hugging Face repo id")
@@ -211,33 +247,17 @@ def main():
     a = ap.parse_args()
 
     import uvicorn
-    from starlette.applications import Starlette
-    from starlette.responses import FileResponse, JSONResponse
-    from starlette.routing import Route
 
     t0 = time.time()
     ex = Explainer(a)
     exs = examples()
-
-    async def explain(request):
-        try:
-            body = await request.json()
-            res = await asyncio.get_running_loop().run_in_executor(None, ex.explain, body)
-            return JSONResponse(compare_served(res, await ex.srv.decide(body)))
-        except Exception as e:  # noqa: BLE001
-            return JSONResponse({"error": str(e)}, status_code=422)
 
     async def lifespan(_app):
         task = asyncio.get_running_loop().create_task(ex.srv.worker())  # the batching loop of basal-serve
         yield
         task.cancel()
 
-    app = Starlette(routes=[
-        Route("/", lambda _: FileResponse(HERE / "viz.html")),
-        Route("/api/info", lambda _: JSONResponse(ex.info)),
-        Route("/api/examples", lambda _: JSONResponse(exs)),
-        Route("/api/explain", explain, methods=["POST"]),
-    ], lifespan=lifespan)
+    app = make_app(lambda: ex, lambda: exs, lifespan)
     print(f"basal-viz: {ex.name} on {ex.dev} ready in {time.time() - t0:.0f}s -> http://{a.host}:{a.port}", flush=True)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 

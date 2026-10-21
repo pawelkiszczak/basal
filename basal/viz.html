@@ -364,7 +364,7 @@ async function decide(gold) {
   const ld = h("div", { class: "loading" }, h("div", { class: "spin" }), "Running the model — a forward pass per option order, with every layer recorded…");
   out.prepend(ld);
   try {
-    const r = await fetch("/api/explain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(req) });
+    const r = await fetch("api/explain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(req) });
     const res = await r.json();
     if (!r.ok || res.error) throw new Error(res.error || r.statusText);
     last = { res, req, gold: currentGold };
@@ -639,12 +639,19 @@ function decisionView(q, v) {
 }
 
 // ---- boot -------------------------------------------------------------------------------------------------------
+let booted = false, posted = null;  // a request posted by basal-ui before the page has booted waits for it
+function explainPosted(req) {
+  loadRequest(req); currentGold = null;
+  $("#go").click();
+}
 (async function () {
   renderHistory();
   try {
-    INFO = await (await fetch("/api/info")).json();
+    const ri = await fetch("api/info");
+    INFO = await ri.json();
+    if (!ri.ok) throw new Error(INFO.error || ri.statusText);
     $("#modelchip").textContent = `${INFO.model} · ${INFO.device} · ${INFO.dtype} · ${INFO.layers} layers · prompt format ${INFO.prompt_format} · ${INFO.orders} option order${INFO.orders === 1 ? "" : "s"}`;
-    EXAMPLES = await (await fetch("/api/examples")).json();
+    EXAMPLES = await (await fetch("api/examples")).json();
     const sel = $("#ex"), groups = {};
     EXAMPLES.forEach((e, i) => {
       groups[e.file] ??= sel.appendChild(h("optgroup", { label: e.file }));
@@ -653,8 +660,15 @@ function decisionView(q, v) {
       groups[e.file].append(h("option", { value: i }, `${e.id} — ${txt.slice(0, 60)}${Object.keys(e.request.questions).length > 1 ? ` (+${Object.keys(e.request.questions).length - 1} more)` : ""}`));
     });
     loadRequest(EXAMPLES[0].request); currentGold = EXAMPLES[0].gold || null;
-  } catch (e) { $("#modelchip").textContent = "server not reachable"; }
+  } catch (e) { $("#modelchip").textContent = `server not reachable: ${e.message}`; }
+  booted = true;
+  if (posted) explainPosted(posted);
 })();
+// embedded in basal-ui (/viz/): the playground posts a request to explain
+window.addEventListener("message", e => {
+  if (e.origin !== location.origin || !e.data?.request) return;
+  if (booted) explainPosted(e.data.request); else posted = e.data.request;
+});
 </script>
 </body>
 </html>

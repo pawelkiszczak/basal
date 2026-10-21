@@ -265,6 +265,14 @@ seconds, items per second, server p50, accuracy over the items with `gold`) and 
 **Download answers** saves the output file. Batch requests go straight to the model's basal-serve: they are not
 counted in the statistics or the history. One batch runs at a time; its log is **Logs → job:batch**.
 
+### Inspect
+
+**Inspect** embeds `basal-viz` ([above](#see-how-a-decision-is-made)) for a downloaded bf16 model of basal-1.0,
+basal-1.5 or basal-2.0 (the MLX, GGUF, FP8 and NVFP4 ports and basal-omni cannot be read layer by layer): **Start**
+loads it into basal-ui's own process (MPS on Apple Silicon, CUDA on NVIDIA, else the CPU; its memory is counted in the
+budget until **Stop**), with the shipped calibration or one fitted in basal-ui, and the page appears below. **Inspect
+this decision** in the Playground sends the current request there and explains it.
+
 ### Memory budget
 
 The budget is the hardware budget shown under Hardware unless set in **API server → Memory** (at least 1 GiB), and

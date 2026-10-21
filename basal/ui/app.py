@@ -689,6 +689,11 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
                            settings_mod=settings_mod, hardware_fn=hardware_fn, stats=stats, history=history)
     gateway = gateway or Gateway(fleet, settings_mod, stats)
     allowed_hosts = tuple(allowed_hosts)
+    from basal.viz import examples as viz_examples
+    from basal.viz import make_app as viz_app
+
+    from .inspect import Inspector
+    inspector = Inspector()
 
     def hw():
         return hardware_fn()
@@ -743,6 +748,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         if settings_mod.load().get("auto_load") and settings_mod.last_models():
             auto_load_thread = threading.Thread(target=_auto_load, daemon=True)
             auto_load_thread.start()
+        inspector.bind(asyncio.get_running_loop())  # the explainer's batching loop runs on this one
         await asyncio.to_thread(gateway.start)
         yield
         with auto_load_lock:
@@ -750,6 +756,8 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         if auto_load_thread is not None:
             auto_load_thread.join(timeout=5)
         gateway.stop()
+        inspector.stop()
+        fleet.release("inspect")
         fleet.shutdown()
         stats.close()
         settings_mod.remove_keys_file()
@@ -758,6 +766,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
     if STATIC.is_dir():
         app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.mount("/viz", viz_app(inspector.explainer, viz_examples))  # basal-viz for the Inspect view
 
     @app.middleware("http")
     async def refuse_cross_origin(request: Request, call_next):
@@ -784,7 +793,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         return variant
 
     def full_status():
-        return {**fleet.status(), "serving": gateway.status()}
+        return {**fleet.status(), "serving": gateway.status(), "inspect": inspector.state()}
 
     def serve_response():
         config = settings_mod.serve_settings()
@@ -1202,6 +1211,55 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
             return {"report": Path(file).with_suffix(".report.txt").read_text()}
         except OSError as exc:
             raise HTTPException(404, f"no report for {file}") from exc
+
+    @app.post("/api/inspect", status_code=202)
+    def post_inspect(body: dict = Body(...)):
+        from . import calibration
+        from .inspect import inspectable
+
+        variant = find_variant(body.get("id"))
+        reason = inspectable(variant)
+        if reason:
+            raise HTTPException(400, reason)
+        local_dir = downloaded(variant)
+        cal = body.get("calibration")
+        if cal is not None and cal not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
+            raise HTTPException(400, f"{cal!r} is not a calibration basal-ui fitted for {variant.id}")
+        job = fleet.jobs.get("inspect")
+        if job is not None and job.running:
+            raise HTTPException(409, "the inspector is loading a model")
+        inspector.stop()
+        fleet.release("inspect")
+        current = hw()
+        try:
+            fleet.reserve("inspect", catalog.assess(variant, current).est_memory_bytes)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        def start(job):
+            try:
+                return inspector.start(job, variant, local_dir, current, cal)
+            except BaseException:
+                fleet.release("inspect")
+                raise
+
+        try:
+            return fleet.jobs.start("inspect", variant.id, variant.id, start)
+        except RuntimeError as exc:
+            fleet.release("inspect")
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.delete("/api/inspect")
+    def stop_inspect():
+        fleet.jobs.cancel("inspect")
+        inspector.stop()
+        fleet.release("inspect")
+        fleet.event("info", "inspector stopped")
+        return inspector.state()
+
+    @app.get("/api/inspect")
+    def get_inspect():
+        return inspector.state()
 
     @app.post("/api/batch", status_code=202)
     def post_batch(body: dict = Body(...)):
