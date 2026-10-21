@@ -254,7 +254,12 @@ caches, the scheduler and long-request lane, and the **context policy** (truncat
 with 422; the share kept from the beginning; `--max-len`). Only the values that differ from basal-serve's defaults are
 passed, and a combination basal-serve refuses shows its own message on the model's row. **Remember for this model**
 keeps them for its next plain Load; a restart and auto-load reuse the options the model runs with. The row lists them
-as chips.
+as chips. **Experimental**: **Thinking** (`--think auto`, with the reasoning budget, and the Python of an environment
+with vLLM or the URL of a running think server when basal-ui's own has no vLLM) for basal-2.0 4.5B
+([THINKING.md](THINKING.md)), and the default **early exit** policy of `--mode fast-exit` (basal-1.0 bf16 on CUDA);
+both are refused for other models and modes. A model loaded with them gets **Think** (auto / off / force), **Show
+reasoning** and **Early exit** in the Playground head, and each answer that thought shows its reasoning tokens and
+time, the calibration it used and the confidence it had without thinking.
 
 ### Batch
 

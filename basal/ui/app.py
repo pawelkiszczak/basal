@@ -714,6 +714,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
                 raise ValueError(f"--mode {merged['mode']}: {mode['reason']}")
         elif not assessment.runnable:
             raise ValueError(assessment.reason)
+        load_options.check_combination(variant, current, merged, assessment.mode)
         return assessment, load_options.non_default(merged)
 
     auto_load_stop = threading.Event()
@@ -944,8 +945,11 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
             merged = load_options.validate(saved, assessment.mode)
         except ValueError:  # options saved by another basal-ui version
             merged = dict(load_options.DEFAULTS)
+        family_ok = variant.family == "basal-2.0" and variant.tier == "4.5B"
         return {"modes": load_options.available_modes(variant, current, assessment), "options": merged,
-                "saved": bool(saved), "defaults": load_options.DEFAULTS}
+                "saved": bool(saved), "defaults": load_options.DEFAULTS,
+                "think": {"model": family_ok, "vllm": "vllm" in current.engines,
+                          "reason": None if family_ok else load_options.THINK_REASON}}
 
     @app.put("/api/models/options")
     def put_model_options(body: dict = Body(...)):

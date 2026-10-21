@@ -45,6 +45,9 @@
 - **`basal-ui` Inspect view**: `basal-viz` embedded for a downloaded bf16 model, with **Inspect this decision** from
   the Playground; `basal-viz` builds its app with `make_app()` and its page uses relative API paths, so it also works
   under a prefix. [SERVING.md](SERVING.md#inspect)
+- **`basal-ui` thinking and early exit**: load basal-2.0 4.5B with thinking or a basal-1.0 `fast-exit` model with a
+  default early-exit policy from the load options; the Playground then sends `think`, `think_text` and `early_exit`
+  and shows the reasoning of each answer that thought. [SERVING.md](SERVING.md#load-options)
 - **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
   aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 
