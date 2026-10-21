@@ -81,7 +81,7 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   (`{max_error target: {type: confidence threshold}}` of the loaded calibration, the thresholds `max_error` applies to
   `act` / `tool` decisions; absent without certified thresholds) and `"context"` (`{"limit": tokens, "overflow":
   "truncate" | "refuse", "truncate_head"}`, the longest prompt and `--context-overflow` / `--truncate-head`);
-  `GET /health` returns `{"status": "ok"}`.
+  `GET /health` returns status and the running/queued counters described below.
 
 - `GET /health` returns `{"status": "ok", "running": R, "queued": Q}` (2.3.1). The counts cover the decision requests
   in flight (`/v1/systemone`, `/v1/basal` and MCP tool calls), from the moment the server has read a request until its
@@ -309,6 +309,7 @@ include `detail`:
 | 400 | `unsupported_parameter` | Decisions: unsupported top-level parameter (`param` names it) |
 | 401 | `UNAUTHORIZED` | Any protected route: missing or invalid API key |
 | 403 | `FORBIDDEN` | `/v1/keys`: a non-admin key requested key usage |
+| 503 | `OUT_OF_MEMORY` | CUDA, MPS, or Metal GPU memory exhaustion |
 | 422 | `INVALID_REQUEST` | System One validation / media failure, or translated Decisions inference validation |
 | 500 | `INTERNAL_ERROR` | Unexpected server failure; details are logged to stderr |
 
@@ -323,7 +324,7 @@ A malformed body example is `400 {"error":"malformed JSON","code":"INVALID_JSON"
 Decisions input/parameter errors return 400; translated inference validation returns 422; authentication failures
 return 401; unexpected server failures are 500. Auth errors use `authentication_error`, server errors use
 `server_error`, and request errors use `invalid_request_error`. The `error` message remains useful for display. Before
-this API change every failure returned 422 with `{"error":"..."}`. Now malformed JSON is 400, unexpected internal
+this API change every failure returned 422 with `{"error":"..."}`. Now malformed JSON is 400, GPU memory exhaustion is 503, unexpected internal
 failures are 500, and responses include `code`; the existing `error` string is unchanged for the same failure.
 
 Every HTTP response, including errors and `/health`, has `x-request-id` and `x-typesafe-request-id` with the same

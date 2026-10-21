@@ -1,6 +1,6 @@
 """basal-serve's status codes and load (#22): an invalid request answers 422, the GPU out of memory 503 and any other
 server error 500, all with {"error": ...}; GET /health counts the requests in flight as running and queued. Through
-the app of basal-serve (http_app) with its batching worker and a stub engine."""
+the app of basal-serve (build_app) with its batching worker and a stub engine."""
 import asyncio
 import threading
 

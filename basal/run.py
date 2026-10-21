@@ -53,6 +53,9 @@ def summarise(item, resp):
             out["correct"] = pred == item["gold"]
     if "error" in resp:
         out["error"] = resp["error"]
+    for key in ("status", "code", "request_id"):
+        if key in resp:
+            out[key] = resp[key]
     return out
 
 
@@ -71,7 +74,16 @@ async def run(a) -> dict:
             async with sem:
                 try:
                     r = await c.post(a.url, json=to_request(it, a.early_exit))
-                    resp = r.json()
+                    try:
+                        resp = r.json()
+                    except ValueError:
+                        resp = {"error": r.text or r.reason_phrase}
+                    if not isinstance(resp, dict):
+                        resp = {"error": "invalid response body"}
+                    if not r.is_success:
+                        resp.setdefault("error", r.text or r.reason_phrase)
+                        resp["status"] = r.status_code
+                        resp["request_id"] = r.headers.get("x-request-id")
                 except (httpx.HTTPError, ValueError) as e:
                     resp = {"error": str(e)}
                 results[i] = summarise(it, resp)

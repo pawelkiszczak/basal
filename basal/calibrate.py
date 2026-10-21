@@ -422,7 +422,8 @@ async def over_http(endpoint, bodies, concurrency):
         async def decide(b):
             r = await c.post(endpoint, json=b)
             if r.status_code != 200:
-                raise RuntimeError(r.text)
+                raise RuntimeError(f"HTTP {r.status_code}: {r.text}" +
+                                   (f" [request {r.headers['x-request-id']}]" if "x-request-id" in r.headers else ""))
             return r.json()
         return await collect(decide, bodies, concurrency)
 

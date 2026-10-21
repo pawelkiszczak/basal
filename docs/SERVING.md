@@ -294,6 +294,41 @@ both are refused for other models and modes. A model loaded with them gets **Thi
 reasoning** and **Early exit** in the Playground head, and each answer that thought shows its reasoning tokens and
 time, the calibration it used and the confidence it had without thinking.
 
+### Engine integration in 2.3.1
+
+The CPU packed path is available as **mps** with **Device: cpu** (`--mode mps --device cpu`); the default on a
+CPU remains eager. For basal-omni on NVIDIA, the default follows the engine: fast on supported sm_120 Blackwell
+workstations or Hopper with FlashAttention 3, eager otherwise. Media retains its eager/vLLM paths.
+
+**MLX packed** is off by default. It is available for Llama basal-1.x / basal-2.0 bf16 or MLX models with MLX on
+Apple Silicon, without media. It passes `--mlx-packed`; groups whose shared prefix and all suffixes total at most
+512 tokens can use packed rows. Longer groups keep the KV-cache path. Static RoPE is required by the engine;
+packed arithmetic can change probabilities slightly from the KV-cache path used for shipped calibration.
+
+**Batch rows** exposes `auto` (the engine default), `compact`, `default`, and `fine`. Compact/fine require the CUDA
+graph engine. `auto` chooses compact rows where supported, `default` uses padded graphs, and `fine` captures more
+shapes at a longer startup cost. Compact rows require compatible attention kernels and additional GPU memory
+(about 6 GB extra in upstream RTX 3090 measurements). A kernel-specific refusal appears verbatim on the model row
+and in Logs. These settings, MLX packed, device, and the state-cache size survive Remember, Restart, and auto-load.
+
+**State cache (GB)** budgets GPU memory for longest-prefix reuse: growing states reuse their cached beginning;
+edits reuse the unchanged prefix and recompute the suffix. This budget competes with weights and graphs; reduce it
+if memory is tight. The UI does not report cache hits.
+
+Loaded rows show the child's `/health` running and queued request counters. The UI samples at most once every five
+seconds per child with a 0.5-second timeout, without blocking `/api/status`. Missing counters remain null and display
+as unavailable; a failed health probe displays unreachable, never idle. These are sampled counts, not live totals.
+
+Playground and Batch distinguish HTTP 422 invalid input, 503 GPU memory exhaustion/service unavailability, and 500
+internal errors. The original diagnostic and available request ID are retained. Shorten input or unload another
+model after OOM; inspect logs for internal errors. Requests are never automatically retried. Batch output includes
+`status`, `code`, and `request_id` on HTTP errors; benchmark logs retain the first diagnostic per HTTP status.
+
+Calibration jobs can **complete with warnings**. The UI shows the engine's actual FIT-label, CERT-confirmation, and
+zero-family strict-check warnings from its saved report, also beside the calibration file. A completed job alone
+never means certification was confirmed; inspect the report and per-type thresholds. Failed jobs remain failures,
+with their log and any report written before failure retained.
+
 ### Batch
 
 **Batch** runs `basal-run` from the app: a loaded model, an input JSONL file (simple items or full `/v1/systemone`
