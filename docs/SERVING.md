@@ -227,8 +227,10 @@ outcome in a short notification. On a narrow window the menu becomes a top bar.
   *loaded* chip and **Unload**. A load that would exceed the memory budget is refused (below).
 - **Load with media**, for the basal-omni-1.0 bf16 checkpoints (mini and max: images and audio; ultra: images; the
   FP8, GGUF and MLX ports and basal-omni-1.1-max have no encoders): `basal-serve --mode eager --media on`, with
-  `--device mps` on Apple Silicon and `--device cpu` on a machine without a GPU. Needs the `basal[media]` extra
-  (pillow, soundfile, scipy, torchvision); the row says so when it is missing.
+  `--device mps` on Apple Silicon and `--device cpu` on a machine without a GPU, or — chosen in the media load's
+  ⚙ Options on an NVIDIA GPU with `basal[vllm]` — `--mode vllm --media on` ([OMNI.md](OMNI.md#vllm---mode-vllm)).
+  Needs the `basal[media]` extra (pillow, soundfile, scipy, torchvision); the row says so when it is missing. A
+  remembered text-only engine mode is not applied to a media load.
 - **Model manager**: the models directory (default: the Hugging Face cache, `HF_HUB_CACHE`) can be set to any
   writable directory; downloads, the downloaded marks, serving and deletes all use it. The setting is kept in
   `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
@@ -239,9 +241,13 @@ outcome in a short notification. On a narrow window the menu becomes a top bar.
   cost matrix, `tool`, `classify`, `verify`, `compress`, `extract`, with `max_error` and evidence where the type takes
   them), `facts` and `lang` for the request, or the raw JSON request (which carries `"model"`). Each type has its own
   result view; every answer shows whether it was deferred, whether its confidence clears the model's certified 1% / 5%
-  thresholds and how it is calibrated, a truncated state is flagged, and the state is shown with evidence spans, kept
-  units and extracted fields marked. Requests go to the selected model's `POST /v1/systemone`. With a media server,
-  up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail`.
+  thresholds and how it is calibrated; an answer whose calibration does not hold for it (media answers on a
+  text-fitted calibration, `unvalidated` files) gets no automation claim. A truncated state is flagged, and the state
+  is shown with evidence spans, kept units and extracted fields marked. A request the builder shows but cannot write
+  in its own fields (classify labels with rubrics, keyed criteria, `option_keys`) is sent as it was until that field
+  is edited; `multi`, multi-label `classify` and multi `tool` take the set options (objective, threshold, min, max;
+  multi and tool also fallback and exclusive keys). Requests go to the selected model's `POST /v1/systemone`. With a
+  media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail`.
 
 ### Load options
 
@@ -249,13 +255,18 @@ outcome in a short notification. On a narrow window the menu becomes a top bar.
 model: the **engine mode** (every `basal-serve --mode`, the ones this machine or variant cannot use greyed out with
 the reason — CUDA graph modes need an NVIDIA GPU, vLLM / SGLang their extra, MLX Apple Silicon, TPU a TPU VM, Strix
 an AMD Strix Halo; Ollama and llama-server take the URL of the running service), quantisation, attention kernels,
-the vLLM preset and GPU share, determinism, option orders and the `auto` band, batching, the state and prefix
-caches, the scheduler and long-request lane, and the **context policy** (truncate the middle of the state, or refuse
-with 422; the share kept from the beginning; `--max-len`). Only the values that differ from basal-serve's defaults are
+dtype, the vLLM preset, GPU share and KV-sharing fast prefill, the Gemma 4 eager forward, attention and per-layer
+embedding offload (`--eager-forward`, `--eager-attn`, `--ple-offload`), the exit heads directory, determinism, option
+orders and the `auto` band, batching, the state and prefix caches, the scheduler and long-request lane, the **context
+policy** (truncate the middle of the state, or refuse with 422; the share kept from the beginning; `--max-len`), the
+CUDA graph engine's kernel switches (`--gemma-attn`, `--merge`, `--lean`, `--tree`, `--batches`, `--readout-layer`,
+`--template-prefix`, `--fp8-accum`) and `--strict-calibration`. Each field shows only for the modes that read it. Only
+the values that differ from basal-serve's defaults are
 passed, and a combination basal-serve refuses shows its own message on the model's row. **Remember for this model**
 keeps them for its next plain Load; a restart and auto-load reuse the options the model runs with. The row lists them
 as chips. **Experimental**: **Thinking** (`--think auto`, with the reasoning budget, and the Python of an environment
-with vLLM or the URL of a running think server when basal-ui's own has no vLLM) for basal-2.0 4.5B
+with vLLM or the URL of a running think server when basal-ui's own has no vLLM; the readout-2 calibration, think
+weights, LoRA adapter and the think server's vLLM memory, context and log) for basal-2.0 4.5B
 ([THINKING.md](THINKING.md)), and the default **early exit** policy of `--mode fast-exit` (basal-1.0 bf16 on CUDA);
 both are refused for other models and modes. A model loaded with them gets **Think** (auto / off / force), **Show
 reasoning** and **Early exit** in the Playground head, and each answer that thought shows its reasoning tokens and
@@ -275,8 +286,11 @@ counted in the statistics or the history. One batch runs at a time; its log is *
 **Inspect** embeds `basal-viz` ([above](#see-how-a-decision-is-made)) for a downloaded bf16 model of basal-1.0,
 basal-1.5 or basal-2.0 (the MLX, GGUF, FP8 and NVFP4 ports and basal-omni cannot be read layer by layer): **Start**
 loads it into basal-ui's own process (MPS on Apple Silicon, CUDA on NVIDIA, else the CPU; its memory is counted in the
-budget until **Stop**), with the shipped calibration or one fitted in basal-ui, and the page appears below. **Inspect
-this decision** in the Playground sends the current request there and explains it.
+budget until **Stop**), with the shipped calibration or one fitted in basal-ui and the model's own option orders or 1
+or 2, and the page appears below. **Inspect this decision** in the Playground sends the current request there (with
+`facts` and `lang`) and lists what differs from the served decision: other weights of the same family and tier, the
+engine, option orders, calibration temperatures, thinking and early exit (explained at the final layer), task
+questions left out. A decision of another model, with media or with only task questions is refused with the reason.
 
 ### Memory budget
 
@@ -320,13 +334,17 @@ in the statistics or the history.
 
 **Models → Loaded → Calibration** runs `basal-calibrate` for a downloaded model on your labelled requests
 ([CALIBRATION.md](CALIBRATION.md#input); the simple `basal-run` items with `gold` work too) at the 1% and / or 5%
-`max_error` targets. basal-ui starts a temporary `basal-serve --no-calibration` of the model on loopback (its memory is
-counted in the budget while it runs), calls `basal-calibrate --url` on it and stops it; the job's output is under
-**Logs → job:calibrate**. The files go to `calibrations/<org>--<model>/` next to the settings file, each with its report
-(`.report.txt`); the table compares them with the shipped file (decisions per type, certified thresholds, automation on
-CERT). **Use** selects one for the model: basal-ui then starts its `basal-serve` with `--calibration FILE`, and a
-loaded model shows **Restart to apply**. Task questions (`classify`, `verify`, `extract` with `gold`) need the engine in
-process: run `basal-calibrate --model` for them.
+`max_error` targets. For decision questions basal-ui starts a temporary `basal-serve --no-calibration` of the model on
+loopback (its memory is counted in the budget while it runs), calls `basal-calibrate --url` on it and stops it. Task
+questions (`classify`, `verify`, `extract` with `gold`) are certified on the answers as served, so with them
+`basal-calibrate` runs the engine in basal-ui's process instead (the model's serving mode and load options; its memory
+is reserved in the budget until it ends; Cancel takes effect when it finishes). Every problem of the input is reported
+with its line before a model is loaded. The job's output is under **Logs → job:calibrate**. The files go to
+`calibrations/<org>--<model>/` next to the settings file, each with its report (`.report.txt`); the table compares them
+with the shipped file (decisions per type, certified thresholds of the types and tasks, automation on CERT).
+**Import** copies a file fitted elsewhere (with its report next to it) into the list; one fitted on another model or
+revision shows basal-serve's warning. **Use** selects one for the model: basal-ui then starts its `basal-serve` with
+`--calibration FILE`, and a loaded model shows **Restart to apply**.
 
 ### History and logs
 

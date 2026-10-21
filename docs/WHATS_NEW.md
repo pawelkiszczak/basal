@@ -4,7 +4,8 @@
   suggests models that fit (recommended, best quality, fastest, multimodal), lists every basal model with its fit and
   serving mode, downloads the model into a directory of your choice, lists and
   deletes what is on disk, runs `basal-serve` for it and offers a playground for decisions, with images and audio
-  for the basal-omni-1.0 checkpoints that have encoders.
+  for the basal-omni-1.0 checkpoints that have encoders (`--mode eager`, or `--mode vllm` on an NVIDIA GPU with
+  `basal[vllm]`).
   [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
 - The `basal-ui` can expose the loaded models as an API server, with optional named API keys, CORS, decision logging,
   MCP and auto-load. [API server walkthrough](SERVING.md#serving-models-from-basal-ui)
@@ -18,22 +19,26 @@
   [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
 - **`basal-ui` decision safety**: every playground answer shows whether it was deferred to a person (and the action or
   tool refused), whether its confidence clears the model's certified 1% / 5% thresholds, whether its calibration is
-  validated, unvalidated or fitted on text, and when the state was truncated to the context; `GET /v1/models` now
-  carries `certified` and `context`. History marks deferred and truncated decisions.
-- **`basal-ui` builders for every question type**: `multi`, `act` (simple costs or a cost matrix), `tool`, `classify`,
-  `verify`, `compress` and `extract` next to choice / noul / score, with `max_error`, evidence, `facts` and `lang`
-  controls, a dedicated result view per type and the state shown with evidence spans, kept / dropped units and
-  extracted fields highlighted; `basal/examples/advanced.jsonl` has one full request per type.
+  validated, unvalidated or fitted on text (no automation claim then), and when the state was truncated to the
+  context; `GET /v1/models` now carries `certified` and `context`. History marks deferred and truncated decisions.
+- **`basal-ui` builders for every question type**: `multi`, `act` (simple costs or a cost matrix), `tool` (with the set
+  options of several tools), `classify`, `verify`, `compress` and `extract` next to choice / noul / score, with
+  `max_error`, evidence, `facts` and `lang` controls, a dedicated result view per type and the state shown with
+  evidence spans, kept / dropped units and extracted fields highlighted; a request is sent as given until a field is
+  edited; `basal/examples/advanced.jsonl` has one full request per type.
 - **`basal-ui` custom calibration**: fit a calibration file on your labelled requests for a downloaded model (a
-  temporary uncalibrated `basal-serve` plus `basal-calibrate --url`, in the background), read its report, compare it
-  with the shipped file and select it per model. Benchmarks and calibrations run as background jobs with their own log.
+  temporary uncalibrated `basal-serve` plus `basal-calibrate --url`; with task questions the engine in basal-ui's
+  process), or import one fitted elsewhere (with basal-serve's warning when it belongs to another model); read its
+  report, compare it with the shipped file and select it per model. Benchmarks and calibrations run as background
+  jobs with their own log.
   `basal-calibrate --model <Hugging Face snapshot directory>` now records the repo id and revision, so basal-serve no
   longer warns that such a file belongs to another model.
   [SERVING.md](SERVING.md#custom-calibration)
 - **`basal-ui` load options**: choose the engine mode per load (with the reason a mode is unavailable on this
   machine; Ollama, llama-server, SGLang, TPU and Strix Halo where detected) and every runtime setting of
-  `basal-serve` — quantisation, attention, determinism, option orders, batching, caching, scheduling, context
-  policy; remembered per model and reused by restart and auto-load.
+  `basal-serve` — quantisation, attention, dtype, determinism, option orders, batching, caching, scheduling, context
+  policy, the CUDA graph engine's kernel switches, the Gemma 4 eager forward, `--strict-calibration` and the think
+  server; remembered per model and reused by restart and auto-load.
   [SERVING.md](SERVING.md#load-options)
 - **`basal-ui` batch inference**: run a JSONL file through a loaded model from the **Batch** view, follow the progress,
   page through the answers and download them (`basal-run`'s `run()` now returns its summary and takes headers and a
@@ -43,7 +48,9 @@
   basal-ui's process, next to the benchmark preset; `basal-loadtest`'s `run()` / `determinism()` return their results
   and `basal-bench` exposes `measure_mode()`. [SERVING.md](SERVING.md#statistics-and-benchmarks)
 - **`basal-ui` Inspect view**: `basal-viz` embedded for a downloaded bf16 model, with **Inspect this decision** from
-  the Playground; `basal-viz` builds its app with `make_app()` and its page uses relative API paths, so it also works
+  the Playground, which lists what differs from the served decision (weights, engine, option orders, calibration,
+  thinking, early exit) and refuses what basal-viz cannot explain; `basal-viz` applies `facts: auto`, builds its app
+  with `make_app()` and its page uses relative API paths, so it also works
   under a prefix. [SERVING.md](SERVING.md#inspect)
 - **`basal-ui` thinking and early exit**: load basal-2.0 4.5B with thinking or a basal-1.0 `fast-exit` model with a
   default early-exit policy from the load options; the Playground then sends `think`, `think_text` and `early_exit`
