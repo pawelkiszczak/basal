@@ -274,10 +274,27 @@ outcome in a short notification. On a narrow window the menu becomes a top bar.
   `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
   can be deleted; for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is
   left. The directory cannot change while any model is loaded or downloading, and a loaded model cannot be deleted.
-- **Playground**: a model selector (the ready models), the bundled examples, a question builder (`choice`, `noul`,
-  `score`) or the raw JSON request (which carries `"model"`); answers with calibrated probabilities, confidence and
-  latency. Requests go to the selected model's `POST /v1/systemone`. With a media server, up to 8 images or audio
-  files (20 MiB each) go along as `media`, with the image `detail` and the audio `lang`.
+- **Playground**: a model selector (the ready models), the bundled examples (`advanced.jsonl`: one request per
+  question type), a question builder for every type (`choice`, `noul`, `score`, `multi`, `act` with simple costs or a
+  cost matrix, `tool`, `classify`, `verify`, `compress`, `extract`, with `max_error` and evidence where the type takes
+  them), `facts` and `lang` for the request, or the raw JSON request (which carries `"model"`). Each type has its own
+  result view; every answer shows whether it was deferred, whether its confidence clears the model's certified 1% / 5%
+  thresholds and how it is calibrated, a truncated state is flagged, and the state is shown with evidence spans, kept
+  units and extracted fields marked. Requests go to the selected model's `POST /v1/systemone`. With a media server,
+  up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail`.
+
+### Load options
+
+**⚙ Options** next to every Load button (and **⚙** next to a loaded model's Restart) opens the load options of that
+model: the **engine mode** (every `basal-serve --mode`, the ones this machine or variant cannot use greyed out with
+the reason — CUDA graph modes need an NVIDIA GPU, vLLM / SGLang their extra, MLX Apple Silicon, TPU a TPU VM, Strix
+an AMD Strix Halo; Ollama and llama-server take the URL of the running service), quantisation, attention kernels,
+the vLLM preset and GPU share, determinism, option orders and the `auto` band, batching, the state and prefix
+caches, the scheduler and long-request lane, and the **context policy** (truncate the middle of the state, or refuse
+with 422; the share kept from the beginning; `--max-len`). Only the values that differ from basal-serve's defaults are
+passed, and a combination basal-serve refuses shows its own message on the model's row. **Remember for this model**
+keeps them for its next plain Load; a restart and auto-load reuse the options the model runs with. The row lists them
+as chips.
 
 ### Memory budget
 
@@ -303,6 +320,18 @@ answer is scored once (accuracy overall and per file). The set is either the bun
 `basal/examples/`) or your own JSONL file or directory: [BENCHMARK_SETS.md](BENCHMARK_SETS.md). The last 5 results
 per model stay in the stats file and are shown side by side. Benchmark requests are not counted in the statistics or
 the history.
+
+### Custom calibration
+
+**Models → Loaded → Calibration** runs `basal-calibrate` for a downloaded model on your labelled requests
+([CALIBRATION.md](CALIBRATION.md#input); the simple `basal-run` items with `gold` work too) at the 1% and / or 5%
+`max_error` targets. basal-ui starts a temporary `basal-serve --no-calibration` of the model on loopback (its memory is
+counted in the budget while it runs), calls `basal-calibrate --url` on it and stops it; the job's output is under
+**Logs → job:calibrate**. The files go to `calibrations/<org>--<model>/` next to the settings file, each with its report
+(`.report.txt`); the table compares them with the shipped file (decisions per type, certified thresholds, automation on
+CERT). **Use** selects one for the model: basal-ui then starts its `basal-serve` with `--calibration FILE`, and a
+loaded model shows **Restart to apply**. Task questions (`classify`, `verify`, `extract` with `gold`) need the engine in
+process: run `basal-calibrate --model` for them.
 
 ### History and logs
 
