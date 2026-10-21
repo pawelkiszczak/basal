@@ -35,6 +35,9 @@
   `basal-serve` — quantisation, attention, determinism, option orders, batching, caching, scheduling, context
   policy; remembered per model and reused by restart and auto-load.
   [SERVING.md](SERVING.md#load-options)
+- **`basal-ui` batch inference**: run a JSONL file through a loaded model from the **Batch** view, follow the progress,
+  page through the answers and download them (`basal-run`'s `run()` now returns its summary and takes headers and a
+  progress callback). [SERVING.md](SERVING.md#batch)
 - **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
   aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 

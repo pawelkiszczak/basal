@@ -12,6 +12,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import dataclasses
 import hashlib
+import json
 import os
 from pathlib import Path
 import secrets
@@ -1127,6 +1128,74 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
             return {"report": Path(file).with_suffix(".report.txt").read_text()}
         except OSError as exc:
             raise HTTPException(404, f"no report for {file}") from exc
+
+    @app.post("/api/batch", status_code=202)
+    def post_batch(body: dict = Body(...)):
+        from . import batch
+
+        model_id = body.get("id")
+        source = body.get("input")
+        if not isinstance(source, str) or not source.strip():
+            raise HTTPException(400, "input must be the path of a JSONL file (docs/SERVING.md#inference-on-a-jsonl-file)")
+        source = Path(source).expanduser()
+        try:
+            lines = [line for line in source.read_text().splitlines() if line.strip()]
+        except (OSError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, f"cannot read {source}: {getattr(exc, 'strerror', None) or exc}") from exc
+        for n, line in enumerate(lines, 1):
+            try:
+                item = json.loads(line)
+            except ValueError:
+                item = None
+            if not isinstance(item, dict) or not ("questions" in item or "options" in item):
+                raise HTTPException(400, f"{source.name}: line {n} is neither a simple item (state, question, "
+                                         "options) nor a /v1/systemone request")
+        if not lines:
+            raise HTTPException(400, f"{source} has no lines")
+        out = Path(body["output"]).expanduser() if body.get("output") else batch.default_output(source)
+        if not out.parent.is_dir() or not os.access(out.parent, os.W_OK):
+            raise HTTPException(400, f"cannot write to {out.parent}")
+        concurrency = body.get("concurrency", 16)
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not 1 <= concurrency <= 256:
+            raise HTTPException(400, "concurrency must be an integer between 1 and 256")
+        try:
+            runner = fleet.ready(model_id)
+        except KeyError as exc:
+            raise HTTPException(404, f"model {model_id!r} is not loaded") from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        early_exit = body.get("early_exit")
+        levels = (runner.models_entry or {}).get("early_exit") or []
+        if early_exit is not None and early_exit not in levels:
+            raise HTTPException(400, f"early_exit must be one of {levels} for {model_id}" if levels else
+                                f"{model_id} has no early exits (basal-serve --mode fast-exit)")
+        try:
+            return fleet.jobs.start("batch", model_id, f"{model_id} on {source.name}", batch.run_batch, fleet,
+                                    model_id, source, out, concurrency, early_exit)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.delete("/api/batch")
+    def cancel_batch():
+        return fleet.jobs.cancel("batch")
+
+    def batch_output():
+        job = fleet.jobs.get("batch")
+        state = job.state() if job is not None else None
+        if not state or state["phase"] != "done" or not Path(state["result"]["output"]).is_file():
+            raise HTTPException(404, "no finished batch")
+        return Path(state["result"]["output"])
+
+    @app.get("/api/batch/rows")
+    def get_batch_rows(offset: int = 0, limit: int = 100):
+        from . import batch
+
+        return batch.rows(batch_output(), max(0, offset), max(1, min(limit, 1000)))
+
+    @app.get("/api/batch/download")
+    def download_batch():
+        path = batch_output()
+        return FileResponse(path, filename=path.name, media_type="application/x-ndjson")
 
     @app.get("/api/benchmarks")
     def get_benchmarks():

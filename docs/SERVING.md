@@ -255,6 +255,15 @@ with 422; the share kept from the beginning; `--max-len`). Only the values that 
 passed, and a combination basal-serve refuses shows its own message on the model's row. **Remember for this model**
 keeps them for its next plain Load; a restart and auto-load reuse the options the model runs with. The row lists them
 as chips.
+### Batch
+
+**Batch** runs `basal-run` from the app: a loaded model, an input JSONL file (simple items or full `/v1/systemone`
+requests, [above](#inference-on-a-jsonl-file)), the output file (default `<input>.answers.jsonl` next to it), the
+concurrency and, for a `--mode fast-exit` model, an early-exit level. The progress, the summary (items, errors,
+seconds, items per second, server p50, accuracy over the items with `gold`) and the answers page by page are shown;
+**Download answers** saves the output file. Batch requests go straight to the model's basal-serve: they are not
+counted in the statistics or the history. One batch runs at a time; its log is **Logs → job:batch**.
+
 
 ### Memory budget
 
