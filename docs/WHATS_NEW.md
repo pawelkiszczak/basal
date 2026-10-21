@@ -35,6 +35,19 @@
   `basal-serve` — quantisation, attention, determinism, option orders, batching, caching, scheduling, context
   policy; remembered per model and reused by restart and auto-load.
   [SERVING.md](SERVING.md#load-options)
+- **`basal-ui` batch inference**: run a JSONL file through a loaded model from the **Batch** view, follow the progress,
+  page through the answers and download them (`basal-run`'s `run()` now returns its summary and takes headers and a
+  progress callback). [SERVING.md](SERVING.md#batch)
+- **`basal-ui` load tests, determinism checks and engine-mode comparisons**: configurable `basal-loadtest` runs and
+  `--determinism` checks against a loaded model, and `basal-bench` mode comparisons of a downloaded model in
+  basal-ui's process, next to the benchmark preset; `basal-loadtest`'s `run()` / `determinism()` return their results
+  and `basal-bench` exposes `measure_mode()`. [SERVING.md](SERVING.md#statistics-and-benchmarks)
+- **`basal-ui` Inspect view**: `basal-viz` embedded for a downloaded bf16 model, with **Inspect this decision** from
+  the Playground; `basal-viz` builds its app with `make_app()` and its page uses relative API paths, so it also works
+  under a prefix. [SERVING.md](SERVING.md#inspect)
+- **`basal-ui` thinking and early exit**: load basal-2.0 4.5B with thinking or a basal-1.0 `fast-exit` model with a
+  default early-exit policy from the load options; the Playground then sends `think`, `think_text` and `early_exit`
+  and shows the reasoning of each answer that thought. [SERVING.md](SERVING.md#load-options)
 - **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
   aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 
