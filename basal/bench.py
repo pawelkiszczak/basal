@@ -32,7 +32,7 @@ GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: -
 
 
 def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="http://127.0.0.1:11434",
-          llamacpp_url="http://127.0.0.1:8080", fmt=1):
+          llamacpp_url="http://127.0.0.1:8080", fmt=1, mlx_packed=False):
     if mode == "eager-fp32":
         return EagerBackend(md, "float32")
     if mode.startswith("fast-exit@"):
@@ -55,7 +55,7 @@ def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="h
     if kind == "sglang":
         return SGLangBackend(md)
     if kind == "mlx":
-        return MLXBackend(md, quant=quant)
+        return MLXBackend(md, quant=quant, packed=mlx_packed)
     if kind == "mps":
         return MPSBackend(md, "bfloat16")
     if kind == "ollama":
@@ -210,12 +210,12 @@ def measure(be, groups, lat_n):
 
 
 def measure_mode(mode, md, qs, fmt, lat_n, reference_mode, ref_top=None, vllm_model=None, gguf=None,
-                 ollama_model=None, ollama_url="http://127.0.0.1:11434", llamacpp_url="http://127.0.0.1:8080"):
+                 ollama_model=None, ollama_url="http://127.0.0.1:11434", llamacpp_url="http://127.0.0.1:8080", mlx_packed=False):
     """One mode of a comparison: load it, measure it, free it -> (the result row, the top option of every decision).
     ref_top: the reference mode's tops, for the agreement (None: this is the reference)."""
     reset_memory()
     t0 = time.time()
-    be = build(mode, md, vllm_model, gguf, ollama_model, ollama_url, llamacpp_url, fmt)
+    be = build(mode, md, vllm_model, gguf, ollama_model, ollama_url, llamacpp_url, fmt, mlx_packed)
     try:
         load_s = time.time() - t0
         groups = groups_for(be.tok, qs, fmt)
@@ -261,6 +261,8 @@ def main():
     ap.add_argument("--n", type=int, default=500)
     ap.add_argument("--lat-n", dest="lat_n", type=int, default=100)
     ap.add_argument("--out", default=None, help="write results as JSON")
+    ap.add_argument("--mlx-packed", dest="mlx_packed", action="store_true",
+                    help="mlx modes: the packed forward of short Llama groups (basal-serve --mlx-packed)")
     a = ap.parse_args()
     a.modes = a.modes or default_modes()
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
@@ -270,7 +272,7 @@ def main():
     ref, rows = None, []
     for mode in a.modes:
         r, top = measure_mode(mode, md, qs, fmt, a.lat_n, a.modes[0], ref, vm, a.gguf, a.ollama_model, a.ollama_url,
-                              a.llamacpp_url)
+                              a.llamacpp_url, a.mlx_packed)
         ref = top if ref is None else ref
         rows.append(r)
         print(json.dumps({k: round(v, 3) if isinstance(v, float) else v for k, v in r.items()}), flush=True)

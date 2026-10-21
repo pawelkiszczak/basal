@@ -70,7 +70,7 @@ def build(decide, model="basal", models=None):
         try:
             return await decide(body)
         except Exception as e:  # noqa: BLE001
-            raise ToolError(str(e)) from e  # the message the HTTP API returns with 422, so the agent can fix its call
+            raise ToolError(str(e)) from e  # the message of the HTTP API's error, so the agent can fix its call
 
     def tool(fn):
         """Register fn as a tool; its first parameter, `model`, is offered only when several models are served."""
@@ -153,7 +153,7 @@ def http(server, host, models=None):
     """--mcp on: the MCP tools of a running basal server -> (routes for /mcp, the session manager's lifespan).
     Stateless JSON responses: every call is one request. Bound to a loopback host, Host / Origin are checked (DNS
     rebinding). models: see build (basal-ui's API server)."""
-    m = build(server.decide, getattr(server, "name", None) or "basal", models)
+    m = build(getattr(server, "serve", server.decide), getattr(server, "name", None) or "basal", models)
     app = m.streamable_http_app(host=host, stateless_http=True, json_response=True)
     return app.routes, m.session_manager.run
 

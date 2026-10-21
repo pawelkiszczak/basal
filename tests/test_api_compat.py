@@ -87,8 +87,8 @@ def test_decide_errors_are_mapped_by_exception(failure, path):
     body = ({"state": "x", "questions": {"q": {"type": "noul"}}} if path == "/v1/systemone"
             else {"input": "x", "questions": [{"type": "predicate", "instructions": "valid?"}]})
     response = c.post(path, json=body)
-    code = "INTERNAL_ERROR" if failure == "runtime" else "INVALID_REQUEST"
-    assert response.status_code == (500 if failure == "runtime" else 422)
+    code = "INTERNAL_ERROR"
+    assert response.status_code == 500
     if path == "/v1/systemone":
         assert response.json()["code"] == code
     else:

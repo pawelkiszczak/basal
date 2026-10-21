@@ -83,6 +83,13 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   "truncate" | "refuse", "truncate_head"}`, the longest prompt and `--context-overflow` / `--truncate-head`);
   `GET /health` returns `{"status": "ok"}`.
 
+- `GET /health` returns `{"status": "ok", "running": R, "queued": Q}` (2.3.1). The counts cover the decision requests
+  in flight (`/v1/systemone`, `/v1/basal` and MCP tool calls), from the moment the server has read a request until its
+  answer or error. `queued` counts those waiting for the engine: all their queue entries are still in the server's
+  queue (the main queue, the `--scheduler` backlog or the `--long-lane` queue). `running` counts the others: in an
+  engine call, or in the server's own work before or after one (a request with a second pass, such as `--orders auto`,
+  can be queued again). `running` and `queued` both 0 means that the server is idle.
+
 ## Question types
 
 | type | answer | example |
@@ -164,8 +171,8 @@ certify your own thresholds on your data. The ports use per-engine files where t
 **Calibrate on your own data.** On your own domain, refit the temperatures and thresholds on your labelled requests
 with `basal-calibrate`. It runs the engine you serve, refits by the same procedure, and prints coverage and error at
 the shipped and the refitted thresholds on a held-out part of your items. A few hundred labelled items usually certify
-the 5% target; the 1% target needs at least 299 accepted decisions without an error in the fitting part, so in
-practice about 1,000 items or more. A target that cannot be certified is marked in the file, and `max_error` then
+the 5% target; the 1% target needs at least 299 accepted decisions without an error in the fitting part, per
+question type, so in practice about 1,000 items of each type or more. A target that cannot be certified is marked in the file, and `max_error` then
 defers every `act` / `tool` decision of that type. Input format and method: [CALIBRATION.md](CALIBRATION.md).
 
 ```bash
