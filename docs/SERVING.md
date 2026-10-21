@@ -234,10 +234,14 @@ outcome in a short notification. On a narrow window the menu becomes a top bar.
   `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
   can be deleted; for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is
   left. The directory cannot change while any model is loaded or downloading, and a loaded model cannot be deleted.
-- **Playground**: a model selector (the ready models), the bundled examples, a question builder (`choice`, `noul`,
-  `score`) or the raw JSON request (which carries `"model"`); answers with calibrated probabilities, confidence and
-  latency. Requests go to the selected model's `POST /v1/systemone`. With a media server, up to 8 images or audio
-  files (20 MiB each) go along as `media`, with the image `detail` and the audio `lang`.
+- **Playground**: a model selector (the ready models), the bundled examples (`advanced.jsonl`: one request per
+  question type), a question builder for every type (`choice`, `noul`, `score`, `multi`, `act` with simple costs or a
+  cost matrix, `tool`, `classify`, `verify`, `compress`, `extract`, with `max_error` and evidence where the type takes
+  them), `facts` and `lang` for the request, or the raw JSON request (which carries `"model"`). Each type has its own
+  result view; every answer shows whether it was deferred, whether its confidence clears the model's certified 1% / 5%
+  thresholds and how it is calibrated, a truncated state is flagged, and the state is shown with evidence spans, kept
+  units and extracted fields marked. Requests go to the selected model's `POST /v1/systemone`. With a media server,
+  up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail`.
 
 ### Load options
 
