@@ -41,6 +41,9 @@ test = [
   "mlx>=0.32; sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11'",
   "mlx-lm>=0.32; sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11'",
 ]
+# the release gate of basal-ui with the models on disk (tests/e2e, BASAL_E2E=1; docs/E2E.md): its page tests drive
+# Chromium (after installing: playwright install chromium)
+e2e = ["playwright>=1.48"]
 
 [project.scripts]
 basal-ui = "basal.ui.app:main"
@@ -62,3 +65,4 @@ basal = ["examples/*.jsonl", "examples/*.py", "viz.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]  # tests import shared stubs from tests.test_server
+markers = ["e2e: end-to-end test of a real basal-ui with real models (BASAL_E2E=1; docs/E2E.md)"]
