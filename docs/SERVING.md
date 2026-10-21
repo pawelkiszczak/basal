@@ -236,11 +236,13 @@ basal-ui --port 7860                  # then open http://127.0.0.1:7860
 ```
 
 The left menu has one view per task, each with its own address (`#overview`, `#models`, `#manager`, `#playground`,
-`#api`), so the browser's back button and bookmarks work. **Overview** shows the hardware, the running model (state,
-logs, Unload / Restart, the serving URL), the recommended model for this machine and short summaries of the disk and
-the API server; **Models**, **Model manager**, **Playground** and **API server** hold the features below. The menu's
-footer always shows the model's state and an Unload button. Deleting a model or revoking a key asks for confirmation
-in a dialog, and actions report their outcome in a short notification. On a narrow window the menu becomes a top bar.
+`#api`, `#history`, `#logs`), so the browser's back button and bookmarks work. **Overview** shows the hardware, the
+loaded models (one row each: state, mode, media, estimated → resident memory, requests and average confidence,
+Restart / Logs / Unload) above a memory budget bar, the recommended model for this machine and short summaries of the
+disk and the API server; **Models**, **Model manager**, **Playground**, **API server**, **History** and **Logs** hold
+the features below. The menu's footer shows how many models are ready, their names, the API server's URL and an
+**Unload all** button. Deleting a model or revoking a key asks for confirmation in a dialog, and actions report their
+outcome in a short notification. On a narrow window the menu becomes a top bar.
 
 - **Hardware.** NVIDIA GPU (name, compute capability, memory), Apple Silicon (MLX's recommended working set) or CPU
   (60% of RAM), the engines installed (`mlx`, `llama-cpp-python`, `vllm`, `media`), and the memory available now
@@ -250,114 +252,167 @@ in a dialog, and actions report their outcome in a short notification. On a narr
   estimated memory (weights × 1.2 + 1 GB), fit against the budget and *fit now* against the available memory (*fits*
   up to 85%, *tight* up to 100%), and the `basal-serve` mode it would run in, or why it cannot run here and which
   extra fixes that. Offline, the list is what is in the models directory.
-- **Suggested** (the default tab): cards for the models that fit both the budget and the memory available now, a
-  comfortable fit before a tight one. *Recommended*: the basal-2.0 family in the format of the machine (after
+- **Suggested**: cards for the models that fit both the budget and the memory available now, a comfortable fit before
+  a tight one. *Recommended*: the basal-2.0 family in the format of the machine (after
   [HARDWARE.md](HARDWARE.md#recommendation): FP8 on NVIDIA GPUs with compute capability 8.9+ other than data-centre
   GPUs and the RTX 4090, bf16 there, `-MLX-8bit` on Apple Silicon, GGUF `Q8_0` on a CPU with `llama-cpp-python`,
   else bf16), 4.5B if it fits now, else mini. *Best quality*: the largest tier that fits now. *Fastest*: mini.
   *Multimodal*: the largest basal-omni checkpoint this machine can serve with media. Without a reading of the
   available memory the budget fit stands in for it.
-- **Model manager**: the models directory (default: the Hugging Face cache, `HF_HUB_CACHE`) can be set to any
-  writable directory; downloads, the downloaded marks, serving and deletes all use it. The setting is kept in
-  `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
-  can be deleted; for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is
-  left. The directory cannot change, and the loaded model cannot be deleted, while a model is loaded.
-- **Load** downloads only what serving needs (the chosen `.gguf` file of a `-GGUF` repository; not the 4.5B's
-  `think/` model), then runs `basal-serve` as a subprocess on a free local port and shows its log. One model at a
-  time; loading another one stops the first.
+- **Download** (a model not on disk yet) fetches only what serving needs (the chosen `.gguf` file of a `-GGUF`
+  repository; not the 4.5B's `think/` model) into the models directory and shows the progress in the row; nothing is
+  started. Once on disk the row offers **Load** instead.
+- **Load** (downloading first when needed) runs `basal-serve` for the model as a subprocess on a free loopback port.
+  **Several models can be loaded at once**: each gets its own private `basal-serve`, and a loaded model's row shows a
+  *loaded* chip and **Unload**. A load that would exceed the memory budget is refused (below).
 - **Load with media**, for the basal-omni-1.0 bf16 checkpoints (mini and max: images and audio; ultra: images; the
   FP8, GGUF and MLX ports and basal-omni-1.1-max have no encoders): `basal-serve --mode eager --media on`, with
   `--device mps` on Apple Silicon and `--device cpu` on a machine without a GPU. Needs the `basal[media]` extra
   (pillow, soundfile, scipy, torchvision); the row says so when it is missing.
-- **Playground**: the bundled examples, a question builder (`choice`, `noul`, `score`) or the raw JSON request;
-  answers with calibrated probabilities, confidence and latency. Requests go to the model's `POST /v1/systemone`.
-  With a media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail` and
-  the audio `lang`.
+- **Model manager**: the models directory (default: the Hugging Face cache, `HF_HUB_CACHE`) can be set to any
+  writable directory; downloads, the downloaded marks, serving and deletes all use it. The setting is kept in
+  `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
+  can be deleted; for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is
+  left. The directory cannot change while any model is loaded or downloading, and a loaded model cannot be deleted.
+- **Playground**: a model selector (the ready models), the bundled examples, a question builder (`choice`, `noul`,
+  `score`) or the raw JSON request (which carries `"model"`); answers with calibrated probabilities, confidence and
+  latency. Requests go to the selected model's `POST /v1/systemone`. With a media server, up to 8 images or audio
+  files (20 MiB each) go along as `media`, with the image `detail` and the audio `lang`.
 
-- **API server.** The API server card shares the currently loaded model through `basal-serve`. Its settings are saved in
-  `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` changes the path) and apply on the next model load or when
-  **Restart server** is used.
+### Memory budget
+
+The budget is the hardware budget shown under Hardware unless set in **API server → Memory** (at least 1 GiB), and
+**Keep free** (default 2 GiB) is held back from it. A load is refused with `409 over memory budget: … loaded + …
+needed > …` when the estimates of the models already loaded or loading plus the new model's estimate exceed budget −
+keep free; unload a model or raise the budget. The Overview bar shows each model's resident memory (summed over the
+`basal-serve` process group with `ps`, so engine workers count; on Windows the estimates stand in), the committed
+estimates and the memory available now. On Apple Silicon, MLX and MPS allocations live in unified memory and may show
+only partly as resident memory; the estimate is what the budget check uses.
+
+### Statistics and benchmarks
+
+**Models → Loaded** lists, per model, the decisions basal-ui answered (playground, API server, MCP): requests,
+questions, errors, average best-answer probability (the answer's `confidence`; `set_confidence` for `multi`; the
+largest probability for `tool`), mean and p95 latency (over the last 1000 requests), input tokens and last use, with
+one line per question type. They are kept in `<settings stem>.stats.json` next to the settings file, survive restarts
+and can be reset per model or all at once.
+
+**Benchmark** measures one loaded model at a time: 5 warm-up requests, 30 sequential requests (p50 / p95 / mean
+latency) and 120 at concurrency 8 (decisions, questions and input tokens per second, errors). Every item with a `gold`
+answer is scored once (accuracy overall and per file). The set is either the bundled examples (44 items in
+`basal/examples/`) or your own JSONL file or directory: [BENCHMARK_SETS.md](BENCHMARK_SETS.md). The last 5 results
+per model stay in the stats file and are shown side by side. Benchmark requests are not counted in the statistics or
+the history.
+
+### History and logs
+
+**History** lists every decision basal-ui answered — from the playground, the API server and MCP — newest first:
+time, model, source, a preview of the state, the answer of each question with its confidence, latency and HTTP
+status. Filter by model and source, search the state, open a row for the full request and response, copy the request
+or **Replay in Playground** (the request in the JSON editor with its model selected). The last 2000 decisions are kept
+in `<settings stem>.history.jsonl` (owner-only) next to the settings file, with media bytes replaced by their size;
+**Clear history** empties it.
+
+**Logs** shows the output of each `basal-serve` (the last 1000 lines per model, kept after unload for the last 10
+unloaded models) and basal-ui's own event log (loads, downloads, readiness, errors, unloads, API server starts and
+stops, benchmarks, auto-load decisions). `#logs/<model id>` opens one model's tab (the Overview row's **Logs** link);
+follow mode keeps the view at the newest line; the text can be copied or downloaded. Logs are kept in memory only.
 
 ### API server
 
+One port serves every loaded model. The API server runs inside basal-ui and forwards each request to the private
+`basal-serve` of the model it names, so every request body must carry `"model"`: `400 MODEL_REQUIRED` without it,
+`404 MODEL_NOT_FOUND` for a model that is not loaded (both list the loaded models). `GET /v1/models` lists the ready
+models (the basal `models` entries and the OpenAI `data` list), `GET /health` names them, and `GET /v1/stats` returns
+the statistics above (admin key only when keys are required — that is, basal-ui's own key). Details:
+[API.md](API.md#several-models-behind-basal-ui).
+
 | Setting | Default | Effect |
 |---|---|---|
-| Serve the API | Off | Off, basal-serve listens only on an ephemeral loopback port for basal-ui. On, it uses the configured port and host. |
+| Serve the API | Off | Off, the models answer only basal-ui. On, the API server listens on the configured host and port. |
 | Exposure | This computer (`127.0.0.1`) | Local network binds `0.0.0.0`; use this only when remote clients need access. |
-| Port | `8000` | TCP port used when serving is enabled; valid range is 1024–65535. |
+| Port | `8000` | TCP port of the API server; valid range is 1024–65535. |
 | Require an API key | Off | Requires a named key on every API route except `/health`. Supports `Authorization: Bearer <key>` and `X-API-Key`. |
-| Max context length | `4096` | Passed only to vLLM and SGLang (`512`–`131072`). |
+| Max context length | `4096` | Passed to each vLLM and SGLang `basal-serve` (`512`–`131072`). |
 | CORS origins | Empty | Optional allowed browser origins, one per line; `*` allows every origin. |
-| Decision log | Empty (off) | Appends decisions to the specified writable log file. |
+| Decision log | Empty (off) | Every `basal-serve` appends its decisions (propensity records) to this writable file. |
 | MCP at `/mcp` | Off | Adds the MCP streamable-HTTP endpoint when the MCP extra is installed. |
-| Auto-load last model | Off | Starts the last successfully loaded model when basal-ui starts. |
+| Auto-load models | Off | Loads every model that was loaded when basal-ui last ran (in load order). |
 
 **Security.** The server is loopback-only by default. Local-network exposure is unauthenticated unless **Require an API
 key** is enabled; use a key before selecting **Local network**. Keys are generated with the `bsl_` prefix, stored as
 SHA-256 hashes in the settings file and keys file, and their plaintext is shown only once when created. Copy it then;
-it cannot be retrieved later. Revoking a key rewrites the live keys file and takes effect without restarting the model.
-The server also uses an internal admin key for basal-ui's own requests; its key-file record is not exposed in the UI.
+it cannot be retrieved later. Revoking a key rewrites the live keys file and takes effect without a restart. Each
+`basal-serve` listens on loopback only and always requires basal-ui's internal admin key, so only basal-ui and the API
+server reach it; that key's record is not exposed in the UI.
 
-Changing serving settings while a model is running does not alter that process. The status line marks this as
-**Restart to apply**; press **Restart server** to reload the current model with the saved settings. The app checks the
-chosen bind port before starting, and reports a clear error if another process owns it.
+**Restart server** restarts only the API server (instant; the models stay loaded) and applies the saved host, port,
+key, CORS and MCP settings; until then the status line shows **Restart to apply**. **Max context length** and
+**Decision log** belong to each `basal-serve`: a model loaded before such a change shows **Restart** in its Overview
+row, which reloads only that model. The app checks the chosen bind port before starting the API server and reports
+`port <port> on <host> is in use` if another process owns it.
 
-The **Connect** panel provides copy-ready examples for curl (both `/v1/systemone` and `/v1/decisions`), the
-`basal.client.Basal` Python client, TypeSafe and OpenAI SDKs, LiteLLM's `hosted_vllm` provider, and MCP. When
-authentication is disabled, examples omit API-key headers. Turn on MCP to use the streamable-HTTP endpoint at `/mcp`;
-the `basal-mcp` stdio bridge can also connect to the served endpoint. Full request and response shapes, error envelopes
+The **Connect** panel provides copy-ready examples for curl (both `/v1/systemone` and `/v1/decisions`), Python
+(httpx), TypeSafe and OpenAI SDKs, LiteLLM's `hosted_vllm` provider, and MCP, each with the selected model's id in
+`"model"`. When authentication is disabled, examples omit API-key headers. Turn on MCP to use the streamable-HTTP
+endpoint at `/mcp`: its `decide` and `decide_many` tools take a `model` argument and `list_models` names the loaded
+models; the `basal-mcp` stdio bridge connects with `--model <id>`. Full request and response shapes, error envelopes
 and compatibility details are in the [basal-serve HTTP API reference](API.md).
 
-### Serving a model from basal-ui
+### Serving models from basal-ui
 
-1. Start basal-ui and load a model. In **API server**, turn on **Serve the API**.
+1. Start basal-ui and load one or more models. In **API server**, turn on **Serve the API**.
 2. Choose **This computer** (`127.0.0.1`) for local clients. Choose **Local network** (`0.0.0.0`) only when another
    device must connect; enable **Require an API key** first. An unauthenticated LAN listener is accessible to other
    devices on that network.
-3. Set the port (default `8000`). Enable **Require an API key**, then save.
+3. Set the port (default `8000`). Enable **Require an API key**, then save and click **Restart server**.
 4. Under **API keys**, enter a name such as `laptop`, choose **Create key**, and copy the displayed `bsl_...` secret.
    It is shown once; basal-ui cannot display it again.
-5. The running model does not change settings in place. Click **Restart server**; wait for the serving URL to return.
-   The status line indicates `restart_required` / **Restart to apply** while saved settings differ from the running
-   process.
-6. Use **Connect** for a copy-ready client snippet. For example:
+5. Use **Connect** for a copy-ready client snippet. For example:
 
    ```python
-   from basal.client import Basal
-   client = Basal("http://127.0.0.1:8000", api_key="<copied key>")
-   answers = client.decide("A user asks for a refund.", {
-       "route": {"type": "choice", "instructions": "Which team?",
-                 "criteria": {"billing": "Billing", "support": "Support"}}
-   })
+   import httpx
+   r = httpx.post("http://127.0.0.1:8000/v1/systemone", headers={"Authorization": "Bearer <copied key>"}, json={
+       "model": "Remek/basal-2.0-mini-MLX-8bit",
+       "state": "A user asks for a refund.",
+       "questions": {"route": {"type": "choice", "instructions": "Which team?",
+                               "criteria": {"billing": "Billing", "support": "Support"}}}})
+   print(r.json()["answers"]["route"])
    ```
 
-7. To revoke access, choose **Revoke** beside the key and confirm. basal-ui rewrites the key file; the running server
-   refuses that key on its next request without unloading the model or restarting basal-serve.
+6. To revoke access, choose **Revoke** beside the key and confirm. basal-ui rewrites the key file; the API server
+   refuses that key on its next request without a restart.
 
 The default settings file is `~/.config/basal-ui/settings.json`; set `BASAL_UI_CONFIG` to change its path. Next to it,
-each running basal-ui writes its key file as `<settings stem>.keys-<pid>.json` (for example, `settings.keys-1234.json`):
-the API keys from the settings plus that process's internal admin key, which basal-ui uses for its own requests
-(playground, key usage). All files are owner-only (`0600`) and hold SHA-256 hashes, never secrets. Two basal-ui instances
-may share one settings file: a key created or revoked in either is written into every matching live instance's key file,
-the files of exited instances are removed, and each instance deletes its own file when it quits.
+each running basal-ui writes two key files: `<settings stem>.keys-<pid>.json` (for example, `settings.keys-1234.json`),
+the API keys from the settings plus that process's internal admin key, read by the API server; and
+`<settings stem>.internal-<pid>.json`, the internal key alone, read by every `basal-serve` child, so a user key never
+opens a child directly. basal-ui uses the internal key for its own requests (playground, API server, benchmarks). All
+files are owner-only (`0600`) and hold SHA-256 hashes, never secrets. Two basal-ui instances may share one settings
+file: a key created or revoked in either is written into every matching live instance's key file, the files of exited
+instances are removed, and each instance deletes its own files when it quits. The statistics (`<stem>.stats.json`) and
+the history (`<stem>.history.jsonl`) live next to it as well; both are written under the settings lock, so two
+instances add their counts up and neither rotation drops the other's decisions (each History view shows only the
+decisions its own instance answered or found in the file at startup).
 
-**Auto-load.** Enable **Load the last model when basal-ui starts** to remember the last model that reached ready.
-On app startup, basal-ui resolves and loads that model and starts serving it using the current API server settings.
-With auto-load off, start basal-ui and load a model manually. A serving configuration change made while a model is
-running sets `restart_required`; restarting reloads that model with the saved settings. Changes to keys are different:
-they take effect live.
+**Auto-load.** Enable **Load the models when basal-ui starts** to remember every model that reached ready (an unload
+forgets it; quitting basal-ui does not). On startup, basal-ui loads them in their load order and starts the API server
+with the current settings; a model that is unknown or cannot run any more is skipped and noted in the Logs view.
 
 **Troubleshooting.**
 
-- **Port in use:** choose another port, save, and restart. basal-ui checks the configured bind address before starting
-  the API server and reports `port <port> on <host> is in use`.
+- **Port in use:** choose another port, save, and restart the server. basal-ui checks the configured bind address
+  before starting the API server and reports `port <port> on <host> is in use`.
+- **400 MODEL_REQUIRED / 404 MODEL_NOT_FOUND:** add `"model": "<id>"` with an id from `GET /v1/models` (or the
+  Overview) to the body; the model must be loaded and ready.
 - **401 Unauthorized:** check that **Require an API key** is on and send the copied secret as
   `Authorization: Bearer <secret>` (or `X-API-Key: <secret>`). Revoked keys stop working immediately; create a new
   key if the original is lost.
+- **409 over memory budget:** unload a model, or raise the budget / lower **Keep free** under **API server → Memory**.
 - **CORS preflight returns 400:** add the browser page's exact origin (scheme and host, with any port) to **CORS
-  origins**, save, then restart the serving process. A foreign origin is rejected without an allow-origin header.
-- **MCP extra missing:** install `basal[mcp]` in the same environment as basal-ui and basal-serve, then enable MCP
-  and restart. The UI reports when the extra is unavailable.
+  origins**, save, then restart the server. A foreign origin is rejected without an allow-origin header.
+- **MCP extra missing:** install `basal[mcp]` in the same environment as basal-ui, then enable MCP and restart the
+  server. The UI reports when the extra is unavailable.
 
 For API routes, request and response formats, authentication details and compatibility notes, see the
 [HTTP API reference](API.md). The Connect panel also includes TypeSafe, OpenAI, LiteLLM and MCP examples.
@@ -388,6 +443,9 @@ basal-bench --identity --model Remek/basal-2.0-4.5B                    # fp32; -
 concurrent clients (`--concurrency`); `--synthetic N` uses generated items with states of about N tokens. `basal-bench
 --identity` runs single prompts, option orders and multi-question requests over one state, alone and batched, and
 compares every readout with an eager forward of its own prompt (argmax agreement, max |Δp|).
+
+basal-ui runs the same measurements on a loaded model from **Models → Loaded → Benchmark**, on the bundled examples
+or your own file ([BENCHMARK_SETS.md](BENCHMARK_SETS.md)).
 
 **Your own data.** 44 examples are enough to check that everything works, not for precise numbers. For numbers that
 describe *your* workload, write a JSONL file with a few hundred items in the same simple format (`{"state": ...,
