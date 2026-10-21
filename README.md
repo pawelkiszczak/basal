@@ -431,6 +431,36 @@ The engine serves basal-1.0 models unchanged; `fast-exit` and the `vllm` mode wi
 before. The Apple Silicon engine modes (`mps`, `gguf`, `mlx-q8`) and the Apple Silicon engine study were contributed
 by Paweł Kiszczak ([#4](https://github.com/rkinas/basal/pull/4)).
 
+## Development checks
+
+The [pre-commit configuration](.pre-commit-config.yaml) provides fast, read-only checks for Python syntax and
+critical errors (Ruff `E9`, `F63`, `F7`, `F82`), merge conflicts, private keys, TOML, YAML, JSON, and JSONL.
+It covers the engine, server, clients, benchmarks, examples, tests, and figure scripts. JSON checks include the
+checked-in OpenAPI fixture; JSONL checks parse each nonblank line, matching the batch runner. These are syntax
+checks, not request or response schema validation; the latter remains in `tests/test_server.py`.
+
+Use [uv's isolated tools](https://docs.astral.sh/uv/guides/tools/) without installing basal or its ML dependencies:
+
+```bash
+uvx pre-commit==4.7.0 validate-config
+uvx pre-commit==4.7.0 run --all-files
+python3 -m unittest discover -s tests -p test_check_jsonl.py
+```
+
+Hook versions are pinned in the configuration. The first run downloads the hook tools into isolated environments;
+subsequent runs reuse them. The hooks do not format files, start a server, download models, or run inference tests.
+Run the application tests separately when changing application behavior.
+
+To opt into checks on staged files before each commit, install the tool persistently and then install the Git hook:
+
+```bash
+uv tool install pre-commit==4.7.0
+pre-commit install
+```
+
+Git worktrees share their hooks directory: installing the hook affects sibling worktrees too. Use manual commands
+above if that is unwanted. To remove the installed Git hook, run `pre-commit uninstall`.
+
 ## Citation
 
 ```bibtex
