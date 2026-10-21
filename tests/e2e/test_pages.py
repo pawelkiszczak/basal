@@ -1,6 +1,5 @@
 """The pages of basal-ui in Chromium (Playwright, basal[e2e]): every view renders without a script error, the
 Playground builds, sends and renders every question type, the load options dialog, Batch, History, Logs and Inspect."""
-import json
 import re
 
 import pytest
@@ -54,15 +53,6 @@ def test_every_view_renders(page, text_model):
     sync_api.expect(page.locator("#footerState")).to_contain_text("ready")
 
 
-def normalised(questions):
-    """The builder leaves out the values that are the engine's defaults (compress unit "sentence")."""
-    out = json.loads(json.dumps(questions))
-    for q in out.values():
-        if q.get("type") == "compress" and q.get("unit") == "sentence":
-            del q["unit"]
-    return out
-
-
 @pytest.mark.parametrize("request_", advanced_requests(), ids=lambda r: r["id"])
 def test_the_playground_builds_sends_and_renders_each_question_type(page, text_model, request_):
     view(page, "playground")
@@ -71,7 +61,7 @@ def test_the_playground_builds_sends_and_renders_each_question_type(page, text_m
     page.select_option("#examples", str(index))
     built = page.evaluate("() => buildRequest()")
     assert built["state"] == request_["state"]
-    assert built["questions"] == normalised(request_["questions"])  # the builder round-trips the request
+    assert built["questions"] == request_["questions"]  # exactly the request: the builder never rewrites it
     page.click("#sendButton")
     page.wait_for_selector("#results article.answer")
     sync_api.expect(page.locator("#decideError")).to_be_hidden()
@@ -83,6 +73,28 @@ def test_the_playground_builds_sends_and_renders_each_question_type(page, text_m
         sync_api.expect(page.locator("#results .source-view mark").first).to_be_visible()
     if q_type == "verify":
         sync_api.expect(articles.first.locator("tbody tr")).to_have_count(3)
+
+
+RUBRIC = {"state": "Od wczoraj nie mogę zalogować się do aplikacji.",
+          "questions": {"category": {"type": "classify", "option_keys": "show",
+                                     "labels": [{"name": "bug", "rubric": "błąd aplikacji"}, {"name": "billing"}]},
+                        "dept": {"type": "choice", "instructions": "Który dział?", "criteria": ["it", "sales"]}}}
+
+
+def test_the_builder_keeps_what_it_cannot_write_in_its_own_form(page):
+    view(page, "playground")
+    page.evaluate("r => setRequest(r)", RUBRIC)
+    assert page.evaluate("() => buildRequest().questions") == RUBRIC["questions"]
+    cards = page.locator(".question")
+    cards.nth(0).locator(".q-instructions-input").fill("Jaka to kategoria?")  # an edit elsewhere on the card
+    cards.nth(1).locator(".q-instructions-input").fill("Do którego działu?")
+    built = page.evaluate("() => buildRequest().questions")
+    assert built["category"]["labels"] == RUBRIC["questions"]["category"]["labels"]  # still {name, rubric} objects
+    assert built["category"]["option_keys"] == "show" and built["category"]["instructions"] == "Jaka to kategoria?"
+    assert built["dept"]["criteria"] == ["it", "sales"] and "option_keys" not in built["dept"]
+    cards.nth(0).locator('[data-f="labels"]').fill("bug: błąd aplikacji\nbilling: płatności\nother")
+    assert page.evaluate("() => buildRequest().questions.category.labels") == [
+        {"name": "bug", "rubric": "błąd aplikacji"}, {"name": "billing", "rubric": "płatności"}, {"name": "other"}]
 
 
 def test_no_automation_claim_where_the_certificate_does_not_hold(page, text_model):
@@ -191,3 +203,25 @@ def test_inspect_view_embeds_basal_viz_and_explains_a_playground_decision(page, 
     page.click("#stopInspect")
     sync_api.expect(frame_el).to_be_hidden()
     assert ui.get("/api/inspect")["state"] == "idle"
+def test_the_tool_builder_sets_the_selection_of_several_tools(page):
+    view(page, "playground")
+    tools = [{"name": "refund", "description": "zwrot"}, {"name": "track", "description": "śledzenie"}]
+    request = {"state": "Chcę zwrotu i numeru przesyłki.", "questions": {"next": {
+        "type": "tool", "tools": tools, "multi": True, "objective": "f1", "min": 1, "max": 2,
+        "exclusive": ["refund"], "fallback": "track", "fallback_threshold": 0.3}}}
+    page.evaluate("r => setRequest(r)", request)
+    assert page.evaluate("() => buildRequest().questions") == request["questions"]
+    card = page.locator(".question").first
+    sync_api.expect(card.locator(".multi-tool-only")).to_be_visible()
+    card.locator('[data-f="max"]').fill("1")
+    card.locator('[data-f="objective"]').select_option("threshold")
+    card.locator('[data-f="threshold"]').fill("0.6")
+    built = page.evaluate("() => buildRequest().questions.next")
+    assert built["max"] == 1 and built["threshold"] == 0.6 and "objective" not in built
+    assert built["exclusive"] == ["refund"] and built["fallback"] == "track"
+    card.locator('[data-f="multi"]').uncheck()
+    sync_api.expect(card.locator(".multi-tool-only")).to_be_hidden()
+    built = page.evaluate("() => buildRequest().questions.next")
+    assert not {"multi", "min", "max", "exclusive", "fallback", "threshold"} & set(built)
+
+

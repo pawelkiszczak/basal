@@ -319,7 +319,7 @@ const TASK_TYPES=['classify','verify','compress','extract'], TOOL_EXTRAS=['answe
 const SET_KEYS=['objective','threshold','min','max','fallback','fallback_threshold','exclusive'];
 const OWNED={choice:['criteria','levels','option_keys'],noul:['criteria','option_keys'],score:['criteria','levels','option_keys'],
   multi:['criteria','option_keys',...SET_KEYS],act:['criteria','base','costs','defer_action','option_keys'],
-  tool:['tools','extra','rank','multi','description_chars'],classify:['labels','criteria','multi_label','none','threshold','min','max','objective'],
+  tool:['tools','extra','rank','multi','description_chars',...SET_KEYS],classify:['labels','criteria','multi_label','none','threshold','min','max','objective'],
   verify:['claims','binary'],compress:['unit','threshold','keep_ratio','min_keep'],extract:['schema']};
 const KEYED=/^([^\s:]{1,40}):\s*(\S.*)$/;  // "key: description"; a plain option text may contain colons too
 const textOf=v=>typeof v==='string'?v:JSON.stringify(v);
@@ -357,9 +357,12 @@ const qText=(f,v,ph='')=>`<input type="text" data-f="${f}" value="${esc(v??'')}"
 const qArea=(f,v,ph='',cls='')=>`<textarea data-f="${f}"${cls?` class="${cls}"`:''} placeholder="${esc(ph)}">${esc(v??'')}</textarea>`;
 const qSwitch=(f,v,label,cls='')=>`<label class="qf-switch${cls?` ${cls}`:''}"><input type="checkbox" role="switch" data-f="${f}"${v?' checked aria-checked="true"':' aria-checked="false"'}> ${label}</label>`;
 const qSelect=(f,options,v)=>`<select data-f="${f}">${options.map(([value,label])=>`<option value="${esc(value)}"${String(value)===String(v??'')?' selected':''}>${esc(label)}</option>`).join('')}</select>`;
-function setFields(q, threshold=true) {
+// the set options of multi, multi-label classify and multi tool; constraints: fallback and exclusive keys (multi and
+// tool only: classify takes objective, threshold, min and max)
+function setFields(q, constraints=true) {
   const objective=q.objective||'threshold';
-  return `<div class="qf-row set-fields">${qField('Objective',qSelect('objective',[['threshold','threshold'],['exact','exact'],['iou','iou'],['f1','f1']],objective))}${threshold?qField('Threshold',qNum('threshold',q.threshold??'','min="0" max="1" step="0.01" placeholder="0.5"'),'','set-threshold'):''}${qField('Min',qNum('min',q.min,'min="0" step="1"'))}${qField('Max',qNum('max',q.max,'min="1" step="1"'))}${qField('Fallback key',qText('fallback',q.fallback,'none'))}${qField('Fallback threshold',qNum('fallback_threshold',q.fallback_threshold,'min="0" max="1" step="0.01"'))}${qField('Exclusive keys',qText('exclusive',(q.exclusive||[]).join(', '),'comma-separated'))}</div>`;
+  const extra=constraints?`${qField('Fallback key',qText('fallback',q.fallback,'none'))}${qField('Fallback threshold',qNum('fallback_threshold',q.fallback_threshold,'min="0" max="1" step="0.01"'))}${qField('Exclusive keys',qText('exclusive',(q.exclusive||[]).join(', '),'comma-separated'))}`:'';
+  return `<div class="qf-row set-fields">${qField('Objective',qSelect('objective',[['threshold','threshold'],['exact','exact'],['iou','iou'],['f1','f1']],objective))}${qField('Threshold',qNum('threshold',q.threshold??'','min="0" max="1" step="0.01" placeholder="0.5"'),'','set-threshold')}${qField('Min',qNum('min',q.min,'min="0" step="1"'))}${qField('Max',qNum('max',q.max,'min="1" step="1"'))}${extra}</div>`;
 }
 function costRowsOf(costs) {
   return costs&&typeof costs==='object'&&!(Object.keys(costs).every(k=>k==='wrong'||k==='defer')&&typeof costs.wrong!=='object')
@@ -384,9 +387,10 @@ function renderTypeFields(card, type, q) {
     const extra=q.extra??(q.multi?[]:TOOL_EXTRAS);
     html=qField('Tools (JSON array)',qArea('tools',q.tools?JSON.stringify(q.tools,null,2):'','[{"name": "get_weather", "description": "…", "inputSchema": {"type": "object", "properties": {"city": {"type": "string"}}}}]','json'),'OpenAI function, OpenAI Responses, MCP tools/list or Anthropic definitions.')
       +`<div class="qf"><label>Other options</label><div class="controls">${TOOL_EXTRAS.map(x=>`<label><input type="checkbox" role="switch" data-extra="${x}"${extra.includes(x)?' checked aria-checked="true"':' aria-checked="false"'}> ${x}</label>`).join('')}</div></div>`
-      +`<div class="qf-row">${qField('Rank',qNum('rank',q.rank,'min="1" step="1" placeholder="off"'),'also the k most probable options')}${qField('Description chars',qNum('description_chars',q.description_chars,'min="0" step="1" placeholder="300"'),'0 = no cap')}</div>`+qSwitch('multi',q.multi,'Several tools (multi)');
+      +`<div class="qf-row">${qField('Rank',qNum('rank',q.rank,'min="1" step="1" placeholder="off"'),'also the k most probable options')}${qField('Description chars',qNum('description_chars',q.description_chars,'min="0" step="1" placeholder="300"'),'0 = no cap')}</div>`+qSwitch('multi',q.multi,'Several tools (multi)')
+      +`<div class="multi-tool-only">${setFields(q)}<small class="muted">The other options (answer directly, ask the user, none) are always exclusive.</small></div>`;
   }
-  else if(type==='classify')html=qField('Labels',qArea('labels',keyedText(q.labels??q.criteria),'key: description, or one label per line'))+qSwitch('multi_label',q.multi_label,'Several labels (multi-label)')+' '+qSwitch('none',q.none,'Add a "none" label','single-only')+`<div class="multi-only">${setFields(q)}</div>`;
+  else if(type==='classify')html=qField('Labels',qArea('labels',labelsText(q.labels??q.criteria),'key: description, or one label per line'))+qSwitch('multi_label',q.multi_label,'Several labels (multi-label)')+' '+qSwitch('none',q.none,'Add a "none" label','single-only')+`<div class="multi-only">${setFields(q,false)}</div>`;
   else if(type==='verify')html=qField('Claims',qArea('claims',keyedText(q.claims),'key: claim text, or one claim per line'))+qSwitch('binary',q.binary,'Binary (supported / not supported)');
   else if(type==='compress')html=`<div class="qf-row">${qField('Unit',qSelect('unit',[['sentence','sentence'],['line','line'],['paragraph','paragraph']],q.unit||'sentence'))}${qField('Threshold',qNum('threshold',q.threshold,'min="0" max="1" step="0.05" placeholder="0.5"'))}${qField('Keep ratio',qNum('keep_ratio',q.keep_ratio,'min="0" max="1" step="0.05" placeholder="off"'),'share of the characters kept (overrides threshold)')}${qField('Min keep',qNum('min_keep',q.min_keep,'min="0" step="1" placeholder="1"'))}</div>`;
   else if(type==='extract')html=qField('Schema (JSON)',qArea('schema',q.schema?JSON.stringify(q.schema,null,2):'','{"type": "object", "properties": {"total": {"type": "number"}}}','json'),'string, number, integer, boolean, enum and arrays of enums; nested objects as dotted paths.');
@@ -430,28 +434,67 @@ function updateCardVisibility(card) {
   const custom=$('[data-f="max_error_custom"]',card); if(custom)custom.hidden=$('[data-f="max_error"]',card).value!=='custom';
   const objective=$('[data-f="objective"]',card); show('.set-threshold',!objective||objective.value==='threshold');
   show('.multi-only',on('multi_label')); show('.single-only',type==='classify'&&!on('multi_label'));
+  show('.multi-tool-only',multiTool);
   if(type==='act'){
     show('.cost-simple',card._costMode==='simple'); show('.cost-matrix',card._costMode==='matrix');
     card.querySelectorAll('[data-cost-mode]').forEach(b=>b.classList.toggle('active',b.dataset.costMode===card._costMode));
   }
 }
+// every value the user can change on a card (the cost matrix too): equal to the rendered one = nothing was edited
+function cardSnapshot(card) {
+  return JSON.stringify([...card.querySelectorAll('input,select,textarea')].filter(x=>!x.matches('.q-name'))
+    .map(x=>x.type==='checkbox'||x.type==='radio'?x.checked:x.value).concat([card._costMode??null]));
+}
+// the request a card was made from, to give it back exactly where the user did not edit it: the builder's own text
+// forms (lines, defaults left out) cannot hold every request (a list of {name, rubric} labels, option_keys given as
+// the default, non-string descriptions)
+function rememberOriginal(card, type, q) {
+  const value=f=>$(`[data-f="${f}"]`,card)?.value;
+  card._orig={type,q:structuredClone(q),snapshot:cardSnapshot(card),
+    lines:{criteria:value('criteria'),labels:value('labels'),claims:value('claims'),yesno:$('[data-f="yesno"]',card)?.checked,
+           instructions:$('.q-instructions-input',card).value}};
+}
+const labelObjects=v=>Array.isArray(v)&&v.length>0&&v.every(x=>x&&typeof x==='object'&&!Array.isArray(x)&&'name' in x);
+function labelsText(v) {  // classify labels: {key: rubric}, [keys] or [{"name", "rubric" | "description"}]
+  if(!labelObjects(v))return keyedText(v);
+  return v.map(x=>{const d=x.rubric??x.description;return d==null?String(x.name):`${x.name}: ${textOf(d)}`;}).join('\n');
+}
+function parseLabels(text, original) {
+  if(!labelObjects(original))return parseKeyedList(text);
+  const key=original.some(x=>'rubric' in x)||!original.some(x=>'description' in x)?'rubric':'description';
+  return splitLines(text).map(line=>{const m=line.match(KEYED);return m?{name:m[1],[key]:m[2]}:{name:line};});
+}
 function parseQuestionCard(card, type=$('.q-type',card).value) {
   const name=$('.q-name',card).value.trim() || 'question';
+  const orig=card._orig&&card._orig.type===type?card._orig:null, box=$('.q-error',card);
+  if(orig&&cardSnapshot(card)===orig.snapshot){  // nothing edited: the request as it came
+    card._error=null; if(box){box.textContent='';box.hidden=true;}
+    return [name,structuredClone(orig.q)];
+  }
   const el=f=>$(`[data-f="${f}"]`,card), str=f=>(el(f)?.value??'').trim(), num=f=>str(f)===''?undefined:Number(str(f)), on=f=>Boolean(el(f)?.checked);
   const q={type}, errors=[], set=(k,v)=>{if(v!==undefined&&v!==''&&!(Array.isArray(v)&&!v.length))q[k]=v;};
   const json=(f,check,message)=>{const text=str(f);if(!text){errors.push(message);return undefined;}try{const v=JSON.parse(text);if(check(v))return v;}catch{}errors.push(message);return undefined;};
-  const instructions=parseStructuredText($('.q-instructions-input',card).value);
-  if(instructions!==''||!['tool',...TASK_TYPES].includes(type))q.instructions=instructions;
-  const setOptions=(threshold=true)=>{
+  // a field whose text the user did not edit keeps the original's keys and values (none of them when it had none)
+  const unedited=f=>orig!=null&&el(f)!=null&&el(f).value===orig.lines[f]&&(f!=='criteria'||type!=='act'||on('yesno')===orig.lines.yesno);
+  const keep=(...keys)=>{keys.forEach(k=>{if(k in orig.q)q[k]=structuredClone(orig.q[k]);});};
+  if(orig&&$('.q-instructions-input',card).value===orig.lines.instructions)keep('instructions');
+  else{
+    const instructions=parseStructuredText($('.q-instructions-input',card).value);
+    if(instructions!==''||!['tool',...TASK_TYPES].includes(type))q.instructions=instructions;
+  }
+  const setOptions=(constraints=true)=>{
     const objective=str('objective');
-    if(objective&&objective!=='threshold')q.objective=objective; else if(threshold)set('threshold',num('threshold'));
-    set('min',num('min')); set('max',num('max')); set('fallback',str('fallback')); set('fallback_threshold',num('fallback_threshold'));
+    if(objective&&objective!=='threshold')q.objective=objective; else set('threshold',num('threshold'));
+    set('min',num('min')); set('max',num('max'));
+    if(!constraints)return;
+    set('fallback',str('fallback')); set('fallback_threshold',num('fallback_threshold'));
     set('exclusive',str('exclusive').split(',').map(x=>x.trim()).filter(Boolean));
   };
-  if(['choice','noul','score'].includes(type))Object.assign(q,parseOptions(str('criteria'),type));
-  else if(type==='multi'){set('criteria',parseKeyedList(str('criteria'))); setOptions();}
+  if(['choice','noul','score'].includes(type)){if(unedited('criteria'))keep('criteria','levels','option_keys');else Object.assign(q,parseOptions(str('criteria'),type));}
+  else if(type==='multi'){if(unedited('criteria'))keep('criteria','option_keys');else set('criteria',parseKeyedList(str('criteria'))); setOptions();}
   else if(type==='act'){
-    if(on('yesno')){const c=parseOptions(str('criteria'),'noul').criteria;if(c)q.criteria=c;else q.base='noul';}
+    if(unedited('criteria'))keep('criteria','base','option_keys');
+    else if(on('yesno')){const c=parseOptions(str('criteria'),'noul').criteria;if(c)q.criteria=c;else q.base='noul';}
     else Object.assign(q,parseOptions(str('criteria'),'choice'));
     if(card._costMode==='matrix'){
       const rows=readCostRows(card).filter(r=>r.action.trim());
@@ -464,14 +507,14 @@ function parseQuestionCard(card, type=$('.q-type',card).value) {
   else if(type==='tool'){
     set('tools',json('tools',v=>Array.isArray(v)&&v.length>0,'tools must be a JSON array of tool definitions'));
     const multi=on('multi'), extra=TOOL_EXTRAS.filter(x=>$(`[data-extra="${x}"]`,card)?.checked);
-    if(multi){q.multi=true; if(extra.length)q.extra=extra;} else if(extra.length!==TOOL_EXTRAS.length)q.extra=extra;
+    if(multi){q.multi=true; if(extra.length)q.extra=extra; setOptions();} else if(extra.length!==TOOL_EXTRAS.length)q.extra=extra;
     set('rank',num('rank')); if(num('description_chars')!==undefined&&num('description_chars')!==300)q.description_chars=num('description_chars');
   }
   else if(type==='classify'){
-    set('labels',parseKeyedList(str('labels')));
-    if(on('multi_label')){q.multi_label=true;setOptions();} else if(on('none'))q.none=true;
+    if(unedited('labels'))keep('labels','criteria','option_keys'); else set('labels',parseLabels(str('labels'),orig?.q.labels));
+    if(on('multi_label')){q.multi_label=true;setOptions(false);} else if(on('none'))q.none=true;
   }
-  else if(type==='verify'){set('claims',parseKeyedList(str('claims'))); if(on('binary'))q.binary=true;}
+  else if(type==='verify'){if(unedited('claims'))keep('claims');else set('claims',parseKeyedList(str('claims'))); if(on('binary'))q.binary=true;}
   else if(type==='compress'){
     if(str('unit')&&str('unit')!=='sentence')q.unit=str('unit');
     if(num('threshold')!==undefined&&num('threshold')!==0.5)q.threshold=num('threshold');
@@ -482,7 +525,7 @@ function parseQuestionCard(card, type=$('.q-type',card).value) {
   if(EVIDENCE_TYPES.includes(type)&&!multiTool&&on('evidence'))q.evidence=true;
   if(MAX_ERROR_TYPES.includes(type)&&!multiTool){const me=str('max_error');if(me==='custom')set('max_error',num('max_error_custom'));else if(me)q.max_error=Number(me);}
   card._error=errors.join('\n')||null;
-  const box=$('.q-error',card); if(box){box.textContent=card._error||'';box.hidden=!card._error;}
+  if(box){box.textContent=card._error||'';box.hidden=!card._error;}
   return [name,{...card._extra,...q}];
 }
 function extraOf(q, type) {
@@ -540,7 +583,7 @@ function addQuestion(name='question', q={type:'choice',instructions:'',criteria:
   card._extra=extraOf(q,type); card._type=type;
   card.innerHTML=`<div class="q-head"><div><label>Name</label><input class="q-name" type="text" value="${esc(name)}"></div><div><label>Type</label><select class="q-type">${QUESTION_TYPES.map(t=>`<option value="${t}">${t}</option>`).join('')}</select></div><button type="button" class="remove-question">Remove</button></div><div class="q-instructions"><label>Instructions</label><textarea class="q-instructions-input" placeholder="What should the model decide?">${esc(typeof q.instructions==='string'?q.instructions:q.instructions==null?'':JSON.stringify(q.instructions))}</textarea></div><div class="q-fields"></div>`;
   $('.q-type',card).value=type;
-  renderTypeFields(card,type,q);
+  renderTypeFields(card,type,q); rememberOriginal(card,type,q);
   card.addEventListener('input',e=>{
     if(e.target.matches('[data-f="criteria"]')&&$('.q-type',card).value==='act')renderCostMatrix(card);
     syncRequest();
