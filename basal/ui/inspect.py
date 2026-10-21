@@ -28,7 +28,7 @@ class Inspector:
     page's /viz/api/explain awaits on."""
 
     def __init__(self):
-        self.ex, self.model, self.state_name, self.error = None, None, "idle", None
+        self.ex, self.model, self.state_name, self.error, self.calibration = None, None, "idle", None, None
         self.loop, self.worker, self.gen = None, None, 0
 
     def bind(self, loop):
@@ -40,15 +40,17 @@ class Inspector:
             raise RuntimeError("no model is being inspected: start one in basal-ui's Inspect view")
         return self.ex
 
-    def start(self, job, variant, local_dir, hw, calibration=None):
+    def start(self, job, variant, local_dir, hw, calibration=None, orders=None):
         """The inspect job: load the Explainer (minutes for a large model), then run its worker on the loop. A stop()
-        meanwhile discards the loaded model (the job ends cancelled)."""
+        meanwhile discards the loaded model (the job ends cancelled). orders: 1 or 2 option orders (None: the
+        model's own, as basal-serve without --orders)."""
         self.stop()
         gen = self.gen
         self.model, self.state_name, self.error = variant.id, "loading", None
+        self.calibration = calibration
         job.progress("loading model")
         try:
-            ex = Explainer(SimpleNamespace(model=str(local_dir), dtype="bfloat16", device=device(hw), orders=None,
+            ex = Explainer(SimpleNamespace(model=str(local_dir), dtype="bfloat16", device=device(hw), orders=orders,
                                            calibration=calibration))
         except BaseException as exc:
             if gen == self.gen:
@@ -69,7 +71,7 @@ class Inspector:
         worker, self.worker = self.worker, None
         if worker is not None:
             worker.cancel()
-        self.ex, self.model, self.state_name, self.error = None, None, "idle", None
+        self.ex, self.model, self.state_name, self.error, self.calibration = None, None, "idle", None, None
         gc.collect()
         try:
             import torch
@@ -81,4 +83,10 @@ class Inspector:
             pass
 
     def state(self) -> dict:
-        return {"model": self.model, "state": self.state_name, "error": self.error}
+        """What the Playground's handoff compares with the served model: the engine, option orders and calibration."""
+        out = {"model": self.model, "state": self.state_name, "error": self.error}
+        if self.ex is not None and self.state_name == "ready":
+            info = self.ex.info
+            out.update(mode=info["mode"], device=info["device"], orders=info["orders"], calibration=self.calibration,
+                       temperatures=info["temperatures"], temperature_per_bucket=info["temperature_per_bucket"])
+        return out

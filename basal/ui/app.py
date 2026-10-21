@@ -1228,7 +1228,10 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         local_dir = downloaded(variant)
         cal = body.get("calibration")
         if cal is not None and cal not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
-            raise HTTPException(400, f"{cal!r} is not a calibration basal-ui fitted for {variant.id}")
+            raise HTTPException(400, f"{cal!r} is not one of the calibrations of {variant.id} in basal-ui")
+        orders = body.get("orders")
+        if orders not in (None, 1, 2):
+            raise HTTPException(400, "orders must be 1, 2 or null (the model's own)")
         job = fleet.jobs.get("inspect")
         if job is not None and job.running:
             raise HTTPException(409, "the inspector is loading a model")
@@ -1242,7 +1245,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
 
         def start(job):
             try:
-                return inspector.start(job, variant, local_dir, current, cal)
+                return inspector.start(job, variant, local_dir, current, cal, orders)
             except BaseException:
                 fleet.release("inspect")
                 raise

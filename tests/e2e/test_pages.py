@@ -200,9 +200,46 @@ def test_inspect_view_embeds_basal_viz_and_explains_a_playground_decision(page, 
     sync_api.expect(page.locator("#pageTitle")).to_have_text("Inspect")
     sync_api.expect(frame.locator("#out .result").first).to_be_visible()
     sync_api.expect(frame.locator("#out")).to_contain_text("Do którego działu")
+    notice = page.locator("#inspectNotice")
+    sync_api.expect(notice).to_be_visible()
+    if page.input_value("#playgroundModel") != bf16_model["id"]:  # the served decision came from other weights
+        sync_api.expect(notice).to_contain_text("weights: served")
     page.click("#stopInspect")
     sync_api.expect(frame_el).to_be_hidden()
     assert ui.get("/api/inspect")["state"] == "idle"
+
+
+def test_the_inspect_handoff_names_every_difference_and_refuses_what_it_cannot_explain(page, text_model):
+    """inspectHandoff on a served model whose engine, option orders and temperatures differ from the inspector's."""
+    probe = """([model, request]) => {
+      const saved = statusCache, served = statusCache.models.find(x => x.id === model);
+      statusCache = {...saved, inspect: {model, state: 'ready', mode: 'eager', device: 'mps', orders: 1,
+                                         temperatures: {choice: 9}},
+                     models: [{...served, mode: 'mlx', options: {think: true},
+                               entry: {...served.entry, orders: 2, temperature_per_prim: {choice: 1.2}}}]};
+      try { return inspectHandoff({model, ...request}); } finally { statusCache = saved; }
+    }"""
+    mixed = {"state": "s", "think": "auto", "early_exit": "0.99", "facts": "auto", "questions": {
+        "dept": {"type": "choice", "criteria": {"a": "A", "b": "B"}},
+        "intent": {"type": "classify", "labels": {"x": "X", "y": "Y"}}}}
+    handoff = page.evaluate(probe, [text_model["id"], mixed])
+    assert list(handoff["body"]["questions"]) == ["dept"] and handoff["body"]["facts"] == "auto"
+    assert not {"model", "think", "early_exit"} & set(handoff["body"])
+    notes = " | ".join(handoff["notes"])
+    for part in ("intent: task questions are left out", "engine: served mlx, explained eager on mps",
+                 "option orders: served 2, explained 1", "calibration: the served temperatures differ",
+                 "thinking: explained without the reasoning", "early exit 0.99"):
+        assert part in notes, notes
+    assert "media" in page.evaluate(probe, [text_model["id"], {**mixed, "media": [{"type": "image"}]}])["blocked"]
+    only_tasks = {"state": "s", "questions": {"intent": mixed["questions"]["intent"]}}
+    assert "only task questions" in page.evaluate(probe, [text_model["id"], only_tasks])["blocked"]
+    other = page.evaluate("""([model, request]) => {
+      const saved = statusCache; statusCache = {...saved, inspect: {model: 'Remek/basal-1.0-max', state: 'ready'}};
+      try { return inspectHandoff({model, ...request}); } finally { statusCache = saved; }
+    }""", [text_model["id"], mixed])
+    assert "the inspector runs Remek/basal-1.0-max" in other["blocked"]
+
+
 def test_the_tool_builder_sets_the_selection_of_several_tools(page):
     view(page, "playground")
     tools = [{"name": "refund", "description": "zwrot"}, {"name": "track", "description": "śledzenie"}]
