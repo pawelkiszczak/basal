@@ -264,6 +264,18 @@ answer is scored once (accuracy overall and per file). The set is either the bun
 per model stay in the stats file and are shown side by side. Benchmark requests are not counted in the statistics or
 the history.
 
+### Custom calibration
+
+**Models → Loaded → Calibration** runs `basal-calibrate` for a downloaded model on your labelled requests
+([CALIBRATION.md](CALIBRATION.md#input); the simple `basal-run` items with `gold` work too) at the 1% and / or 5%
+`max_error` targets. basal-ui starts a temporary `basal-serve --no-calibration` of the model on loopback (its memory is
+counted in the budget while it runs), calls `basal-calibrate --url` on it and stops it; the job's output is under
+**Logs → job:calibrate**. The files go to `calibrations/<org>--<model>/` next to the settings file, each with its report
+(`.report.txt`); the table compares them with the shipped file (decisions per type, certified thresholds, automation on
+CERT). **Use** selects one for the model: basal-ui then starts its `basal-serve` with `--calibration FILE`, and a
+loaded model shows **Restart to apply**. Task questions (`classify`, `verify`, `extract` with `gold`) need the engine in
+process: run `basal-calibrate --model` for them.
+
 ### History and logs
 
 **History** lists every decision basal-ui answered — from the playground, the API server and MCP — newest first:

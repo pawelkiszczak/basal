@@ -1236,12 +1236,13 @@ def main(argv=None):
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
             raise SystemExit(f"--url {a.url}: no basal server answers ({e})") from None
         mode = a.mode or entry.get("mode")
-        model, engine = a.model or entry.get("name"), f"{mode} at {base}"
+        engine = f"{mode} at {base}"
         orders = entry.get("orders")  # the server's option orders (servers before this field: unknown)
         kind, quant = MODES.get(mode, ("", None, False))[:2]
         preset = entry.get("vllm_preset")  # --mode vllm: the server's preset (servers before 2.2.1: none)
         md = resolve(a.model, a.revision, metadata_only=True) if a.model else None
-        revision = model_identity(a.model, md)[1] if md is not None else None
+        # a Hugging Face cache snapshot is recorded as its repo id and commit, as basal-serve names it
+        model, revision = model_identity(a.model, md) if md is not None else (entry.get("name"), None)
         fmt = entry.get("prompt_format") or (model_format(md) if md is not None else 1)
         baseline, base_file = compared(md, kind, a.calibration, quant, orders, a.no_calibration, preset)
         settle(asyncio.run(over_http(base + "/v1/systemone", bodies, a.concurrency)) if bodies else [])
@@ -1254,7 +1255,7 @@ def main(argv=None):
         kind, quant, fmt, orders = srv.kind, a.quant or MODES[mode][1], srv.fmt, srv.orders
         preset = getattr(srv.backend, "preset", None)
         baseline, base_file = compared(srv.md, srv.kind, a.calibration, quant, orders, a.no_calibration, preset)
-        model, revision = a.model, model_identity(a.model, srv.md)[1]
+        model, revision = model_identity(a.model, srv.md)
         engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
             + (f" --vllm-preset {preset}" if preset not in (None, "default") else "")
         _, task_responses = asyncio.run(two_passes(srv, bodies, task_bodies, a.concurrency, settle))

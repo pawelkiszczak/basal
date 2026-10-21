@@ -24,6 +24,12 @@
   `verify`, `compress` and `extract` next to choice / noul / score, with `max_error`, evidence, `facts` and `lang`
   controls, a dedicated result view per type and the state shown with evidence spans, kept / dropped units and
   extracted fields highlighted; `basal/examples/advanced.jsonl` has one full request per type.
+- **`basal-ui` custom calibration**: fit a calibration file on your labelled requests for a downloaded model (a
+  temporary uncalibrated `basal-serve` plus `basal-calibrate --url`, in the background), read its report, compare it
+  with the shipped file and select it per model. Benchmarks and calibrations run as background jobs with their own log.
+  `basal-calibrate --model <Hugging Face snapshot directory>` now records the repo id and revision, so basal-serve no
+  longer warns that such a file belongs to another model.
+  [SERVING.md](SERVING.md#custom-calibration)
 - **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
   aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 

@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from . import catalog, hardware, settings
 from .gateway import Gateway
 from .history import History, make_record
+from .jobs import Jobs, LogBuffer
 from .stats import Stats
 
 STATIC = Path(__file__).parent / "static"
@@ -71,28 +72,6 @@ def rss_by_pgid() -> dict[int, int]:
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             totals[int(parts[0])] = totals.get(int(parts[0]), 0) + int(parts[1]) * 1024
     return totals
-
-
-class LogBuffer:
-    """The last lines of one source (a basal-serve child or basal-ui's own events), numbered for incremental reads."""
-
-    def __init__(self, maxlen=1000):
-        self.lines = deque(maxlen=maxlen)
-        self.seq = 0
-        self.lock = threading.Lock()
-
-    def append(self, text):
-        with self.lock:
-            self.seq += 1
-            self.lines.append({"seq": self.seq, "ts": time.time(), "text": text})
-
-    def since(self, seq=0):
-        with self.lock:
-            return [line for line in self.lines if line["seq"] > seq]
-
-    def last(self):
-        with self.lock:
-            return self.lines[-1]["text"] if self.lines else None
 
 
 class Downloads:
@@ -153,9 +132,10 @@ class Downloads:
         return out
 
 
-def _child_settings(serve):
-    """The serve settings a basal-serve child is started with (the rest belongs to the API server)."""
-    return {"log_decisions": serve["log_decisions"], "max_len": serve["max_len"]}
+def _child_settings(serve, calibration=None):
+    """The settings a basal-serve child is started with (the rest belongs to the API server): the decision log, the
+    vLLM / SGLang context and the calibration file selected for the model (None: the shipped one)."""
+    return {"log_decisions": serve["log_decisions"], "max_len": serve["max_len"], "calibration": calibration}
 
 
 class Runner:
@@ -183,6 +163,7 @@ class Runner:
         self.media_requested, self.media = False, []
         self.est_memory_bytes, self.models_entry, self.ready_at = None, None, None
         self.serve_snapshot = None  # the child settings the running basal-serve was started with
+        self.extra_args, self.temporary = (), False
 
     @property
     def pid(self):
@@ -194,15 +175,19 @@ class Runner:
                 self.state = "error"
                 self.error = f"basal-serve exited ({self.process.returncode}): {self.log.last() or ''}"
                 self.event("error", f"{self.model}: {self.error}")
-            restart_required = (self.state == "ready" and self.serve_snapshot is not None
-                                and self.serve_snapshot != _child_settings(self.settings_mod.serve_settings()))
+            restart_required = (self.state == "ready" and self.serve_snapshot is not None and not self.temporary
+                                and self.serve_snapshot != _child_settings(
+                                    self.settings_mod.serve_settings(),
+                                    self.settings_mod.calibration_selection().get(self.model)))
             return {"id": self.model, "model": self.model, "repo": self.model_repo, "state": self.state,
                     "mode": self.mode, "command": self.command, "progress": self.progress, "error": self.error,
                     "media_requested": self.media_requested, "media": self.media,
                     "restart_required": restart_required, "est_memory_bytes": self.est_memory_bytes,
                     "rss_bytes": self.rss_bytes, "base_url": self.base_url, "entry": self.models_entry}
 
-    def load(self, assessment, media=False):
+    def load(self, assessment, media=False, extra_args=(), temporary=False):
+        """temporary: a private child for a job (basal-calibrate): no API key (it is reached on loopback without one),
+        no calibration selected in basal-ui, not remembered for auto-load; extra_args go to basal-serve last."""
         with self.lock:
             if self.state in ("downloading", "starting"):
                 raise RuntimeError("the model is already loading; unload it first")
@@ -211,6 +196,7 @@ class Runner:
             self.mode = "eager" if media else assessment.mode
             self.media_requested, self.media = media, []
             self.est_memory_bytes = assessment.est_memory_bytes
+            self.extra_args, self.temporary = tuple(extra_args), temporary
             gen = self.gen
             cache_dir = self.models_dir_fn()
             serve = self.settings_mod.serve_settings()
@@ -238,18 +224,24 @@ class Runner:
             raise record["error"]
         return Path(record["path"])
 
+    def _calibration(self, v):
+        return None if self.temporary else self.settings_mod.calibration_selection().get(v.id)
+
     def _build_command(self, v, path, assessment, media, port, serve):
         """The child is private: loopback, a free port, the internal key (basal-ui's admin key) required."""
         command = [sys.executable, "-m", "basal.server",
                    *catalog.serve_args(v, path, assessment.mode, self.platform_fn() if media else None),
-                   "--name", v.id, "--host", "127.0.0.1", "--port", str(port),
-                   "--api-keys", str(self.settings_mod.internal_keys_file(hashlib.sha256(
-                       self.internal_secret.encode()).hexdigest()))]
-        if serve["log_decisions"]:
+                   "--name", v.id, "--host", "127.0.0.1", "--port", str(port)]
+        if not self.temporary:
+            command += ["--api-keys", str(self.settings_mod.internal_keys_file(hashlib.sha256(
+                self.internal_secret.encode()).hexdigest()))]
+        if self._calibration(v):
+            command += ["--calibration", self._calibration(v)]
+        if serve["log_decisions"] and not self.temporary:
             command += ["--log-decisions", serve["log_decisions"]]
         if assessment.mode in ("vllm", "sglang"):
             command += ["--max-len", str(serve["max_len"])]
-        return command
+        return command + list(self.extra_args)
 
     def _models_entry(self, media):
         """The child's GET /v1/models entry and, with media, its media kinds (required then, best effort else)."""
@@ -287,7 +279,7 @@ class Runner:
                     return
                 self.state, self.progress, self.command = "starting", None, command
                 self.base_url = f"http://127.0.0.1:{port}"
-                self.serve_snapshot = _child_settings(serve)
+                self.serve_snapshot = _child_settings(serve, self._calibration(v))
                 self.process = proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                                        text=True, bufsize=1, **options)
             self.event("info", f"{v.id}: basal-serve starting on 127.0.0.1:{port}: {shlex.join(map(str, command))}")
@@ -305,7 +297,8 @@ class Runner:
                                 return
                             self.state, self.media = "ready", media_kinds
                             self.models_entry, self.ready_at = entry, time.time()
-                            self.settings_mod.remember_loaded(v.id, media)
+                            if not self.temporary:
+                                self.settings_mod.remember_loaded(v.id, media)
                         self.event("info", f"{v.id}: ready")
                         return
                 except httpx.HTTPError:
@@ -394,8 +387,8 @@ class Fleet:
         self.runners: dict[str, Runner] = {}
         self.logs: dict[str, LogBuffer] = {"basal-ui": LogBuffer()}
         self.downloads = Downloads(self.event)
-        self.bench_state = None
-        self.bench_cancel = threading.Event()
+        self.jobs = Jobs(self.logs, self.event)
+        self.temporary: dict[str, Runner] = {}  # private children of jobs (basal-calibrate's uncalibrated server)
         self._lan_ip = None
         self.retiring: dict[Runner, int | None] = {}  # unloaded runners whose child is still being terminated
         self._rss_cache = (0.0, {})
@@ -416,11 +409,43 @@ class Fleet:
         hw = self.hardware_fn()
         budget = config["budget_bytes"] or hw.memory_bytes
         committed = (sum(r.est_memory_bytes or 0 for r in self.runners.values() if r.state not in ("idle", "error"))
+                     + sum(r.est_memory_bytes or 0 for r in self.temporary.values() if r.state not in ("idle", "error"))
                      + sum(est or 0 for est in self.retiring.values()))
         return {"budget_bytes": budget, "reserve_bytes": config["reserve_bytes"],
                 "hardware_budget_bytes": hw.memory_bytes, "available_bytes": hw.available_bytes,
                 "committed_bytes": committed, "rss_bytes": rss_total,
                 "over": committed > budget - config["reserve_bytes"]}
+
+    def check_budget(self, needed):
+        """RuntimeError when `needed` more bytes would go over the memory budget (call under the fleet lock)."""
+        memory = self._memory()  # an errored load being replaced has no process and does not count
+        limit = memory["budget_bytes"] - memory["reserve_bytes"]
+        if memory["committed_bytes"] + (needed or 0) > limit:
+            raise RuntimeError(
+                f"over memory budget: {_fmt(memory['committed_bytes'])} loaded + {_fmt(needed or 0)} needed > "
+                f"{_fmt(limit)} ({_fmt(memory['budget_bytes'])} budget − {_fmt(memory['reserve_bytes'])} kept "
+                "free); unload a model or raise the budget")
+
+    def _runner(self, log):
+        return Runner(models_dir_fn=self.models_dir_fn, platform_fn=self.platform_fn, settings_mod=self.settings_mod,
+                      downloads=self.downloads, internal_secret=self.internal_secret, log=log, event=self.event)
+
+    def start_temporary(self, kind, assessment, log, extra_args=()) -> Runner:
+        """A private, unremembered child for a job (its memory counted in the budget); stop_temporary ends it."""
+        with self.lock:
+            if kind in self.temporary:
+                raise RuntimeError(f"a {kind} child is already running")
+            self.check_budget(assessment.est_memory_bytes)
+            runner = self.temporary[kind] = self._runner(log)
+            runner.load(assessment, extra_args=extra_args, temporary=True)
+        self.event("info", f"{kind}: temporary basal-serve for {assessment.variant.id}")
+        return runner
+
+    def stop_temporary(self, kind):
+        with self.lock:
+            runner = self.temporary.pop(kind, None)
+        if runner is not None:
+            runner.unload()
 
     def load(self, assessment, media=False):
         model_id = assessment.variant.id
@@ -429,19 +454,10 @@ class Fleet:
             state = existing.status()["state"] if existing is not None else "idle"
             if state not in ("idle", "error"):
                 raise RuntimeError(f"model {model_id} is already {'loaded' if state == 'ready' else 'loading'}")
-            memory = self._memory()  # an errored load being replaced has no process and does not count
-            limit = memory["budget_bytes"] - memory["reserve_bytes"]
-            needed = assessment.est_memory_bytes or 0
-            if memory["committed_bytes"] + needed > limit:
-                raise RuntimeError(
-                    f"over memory budget: {_fmt(memory['committed_bytes'])} loaded + {_fmt(needed)} needed > "
-                    f"{_fmt(limit)} ({_fmt(memory['budget_bytes'])} budget − {_fmt(memory['reserve_bytes'])} kept "
-                    "free); unload a model or raise the budget")
+            self.check_budget(assessment.est_memory_bytes)
             self.logs.pop(model_id, None)
             self.logs[model_id] = log = LogBuffer()  # most recent last; a reload starts a fresh log
-            runner = Runner(models_dir_fn=self.models_dir_fn, platform_fn=self.platform_fn,
-                            settings_mod=self.settings_mod, downloads=self.downloads,
-                            internal_secret=self.internal_secret, log=log, event=self.event)
+            runner = self._runner(log)
             self.runners[model_id] = runner
             self._prune_logs()
             runner.load(assessment, media=media)
@@ -451,7 +467,8 @@ class Fleet:
         return self.status()
 
     def _prune_logs(self):
-        unloaded = [key for key in self.logs if key != "basal-ui" and key not in self.runners]
+        unloaded = [key for key in self.logs
+                    if key != "basal-ui" and not key.startswith("job:") and key not in self.runners]
         for key in unloaded[:max(0, len(self.logs) - 1 - MODEL_LOGS_KEPT)]:
             del self.logs[key]
 
@@ -477,6 +494,9 @@ class Fleet:
             with self.lock:
                 self.retiring.pop(runner, None)
             self.event("info", f"unloaded: {i}")
+        if model_id is None:  # every model: the private children of jobs too (their job then fails)
+            for kind in list(self.temporary):
+                self.stop_temporary(kind)
         return self.status()
 
     def restart(self, assessment, media=False):
@@ -505,8 +525,7 @@ class Fleet:
             models.append(runner.status())
         with self.lock:
             memory = self._memory(sum(m["rss_bytes"] or 0 for m in models))
-            bench = dict(self.bench_state) if self.bench_state else None
-        return {"models": models, "downloads": self.downloads.status(), "memory": memory, "benchmark": bench}
+        return {"models": models, "downloads": self.downloads.status(), "memory": memory, "jobs": self.jobs.states()}
 
     def _rss(self):
         """rss_by_pgid() at most every RSS_INTERVAL_S: the UI polls every second while a model loads."""
@@ -542,12 +561,12 @@ class Fleet:
         loading model comes from it."""
         with self.lock:
             return self.downloads.alive(repo) or any(r.model_repo == repo and r.state != "idle"
-                                                     for r in self.runners.values())
+                                                     for r in [*self.runners.values(), *self.temporary.values()])
 
     def while_idle(self, fn):
-        """fn() with no model and no download running, atomically with load()."""
+        """fn() with no model, job child and download running, atomically with load()."""
         with self.lock:
-            if self.runners or self.downloads.any_alive():
+            if self.runners or self.temporary or self.downloads.any_alive():
                 raise RuntimeError("unload every model before changing the models directory")
             return fn()
 
@@ -600,52 +619,8 @@ class Fleet:
                      (time.perf_counter() - t0) * 1000)
         return response
 
-    def benchmark(self, model_id, paths, label):
-        """Benchmark one ready model in the background; one benchmark at a time (RuntimeError otherwise)."""
-        from . import bench
-
-        with self.lock:
-            if self.bench_state and self.bench_state["running"]:
-                raise RuntimeError("a benchmark is already running")
-            self.ready(model_id)
-            self.bench_cancel.clear()
-            self.bench_state = {"model": model_id, "set": label, "phase": "warm-up", "done": 0, "total": 0,
-                                "error": None, "running": True}
-            state = dict(self.bench_state)
-
-        def progress(phase, done, total):
-            with self.lock:
-                self.bench_state.update(phase=phase, done=done, total=total)
-
-        def run():
-            try:
-                result = asyncio.run(bench.run_benchmark(self, model_id, paths, label, progress=progress,
-                                                         cancel=self.bench_cancel))
-                if self.stats is not None:
-                    self.stats.add_benchmark(model_id, result)
-                with self.lock:
-                    self.bench_state.update(phase="done", running=False)
-                self.event("info", f"benchmark finished: {model_id} on {label}")
-            except bench.Cancelled:
-                with self.lock:
-                    self.bench_state.update(phase="cancelled", running=False)
-                self.event("info", f"benchmark cancelled: {model_id}")
-            except Exception as exc:  # shown in the UI
-                with self.lock:
-                    self.bench_state.update(phase="error", error=str(exc), running=False)
-                self.event("error", f"benchmark failed: {model_id}: {exc}")
-
-        self.event("info", f"benchmark started: {model_id} on {label}")
-        threading.Thread(target=run, name="basal-ui-benchmark", daemon=True).start()
-        return state
-
-    def cancel_benchmark(self):
-        self.bench_cancel.set()
-        with self.lock:
-            return dict(self.bench_state) if self.bench_state else None
-
     def shutdown(self):
-        self.bench_cancel.set()
+        self.jobs.cancel_all()
         self.unload(forget=False)
 
 
@@ -996,7 +971,8 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         try:
-            return fleet.benchmark(model_id, paths, label)
+            fleet.ready(model_id)
+            return fleet.jobs.start("benchmark", model_id, label, bench.benchmark_job, fleet, model_id, paths, label)
         except KeyError as exc:
             raise HTTPException(404, f"model {model_id!r} is not loaded") from exc
         except RuntimeError as exc:
@@ -1004,7 +980,96 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
 
     @app.delete("/api/benchmark")
     def cancel_benchmark():
-        return fleet.cancel_benchmark()
+        return fleet.jobs.cancel("benchmark")
+
+    def downloaded(variant):
+        local_dir = catalog.is_downloaded(variant, settings_mod.models_dir())
+        if not local_dir:
+            raise HTTPException(400, f"download {variant.id} first")
+        return Path(local_dir)
+
+    @app.post("/api/calibrate", status_code=202)
+    def post_calibrate(body: dict = Body(...)):
+        from . import calibration
+
+        variant = find_variant(body.get("id"))
+        local_dir = downloaded(variant)
+        source = body.get("input")
+        if not isinstance(source, str) or not source.strip():
+            raise HTTPException(400, "input must be the path of a labelled JSONL file (docs/CALIBRATION.md)")
+        source = Path(source).expanduser()
+        try:
+            with open(source, "rb") as f:
+                f.read(1)
+        except OSError as exc:
+            raise HTTPException(400, f"cannot read {source}: {exc.strerror or exc}") from exc
+        targets = body.get("targets") or list(calibration.TARGETS)
+        try:
+            if not isinstance(targets, list) or not targets or not all(0 < float(t) < 1 for t in targets):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise HTTPException(400, "targets must be a list of max_error values between 0 and 1") from None
+        assessment = catalog.assess(variant, hw())
+        if not assessment.runnable:
+            raise HTTPException(400, assessment.reason)
+        out = settings_mod.calibrations_dir(variant.id) / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
+        try:
+            with fleet.lock:
+                fleet.check_budget(assessment.est_memory_bytes)
+            return fleet.jobs.start("calibrate", variant.id, f"{variant.id} on {source.name}",
+                                    calibration.run_calibration, fleet, assessment, local_dir, source, out,
+                                    [str(float(t)) for t in targets])
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.delete("/api/calibrate")
+    def cancel_calibrate():
+        state = fleet.jobs.cancel("calibrate")
+        fleet.stop_temporary("calibrate")  # basal-calibrate's requests then fail and the job ends
+        return state
+
+    def calibrations_response(variant):
+        from . import calibration
+
+        local_dir = catalog.is_downloaded(variant, settings_mod.models_dir())
+        shipped = None
+        if local_dir:
+            path = calibration.shipped_file(local_dir, catalog.assess(variant, hw()).mode)
+            shipped = {"file": str(path)}
+            try:
+                shipped.update(calibration.summary(path))
+            except (OSError, ValueError) as exc:
+                shipped["error"] = str(exc)
+        return {"selected": settings_mod.calibration_selection().get(variant.id),
+                "files": calibration.listing(variant.id, settings_mod), "shipped": shipped}
+
+    @app.get("/api/calibrations")
+    def get_calibrations(id: str):
+        return calibrations_response(find_variant(id))
+
+    @app.post("/api/calibrations/select")
+    def select_calibration(body: dict = Body(...)):
+        from . import calibration
+
+        variant = find_variant(body.get("id"))
+        path = body.get("file")
+        if path is not None and path not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
+            raise HTTPException(400, f"{path!r} is not a calibration basal-ui fitted for {variant.id}")
+        settings_mod.select_calibration(variant.id, path)
+        fleet.event("info", f"calibration for {variant.id}: {path or 'shipped'} (applies at the next start)")
+        return calibrations_response(variant)
+
+    @app.get("/api/calibrations/report")
+    def get_calibration_report(id: str, file: str):
+        from . import calibration
+
+        variant = find_variant(id)
+        if file not in {f["file"] for f in calibration.listing(variant.id, settings_mod)}:
+            raise HTTPException(404, f"{file!r} is not a calibration basal-ui fitted for {variant.id}")
+        try:
+            return {"report": Path(file).with_suffix(".report.txt").read_text()}
+        except OSError as exc:
+            raise HTTPException(404, f"no report for {file}") from exc
 
     @app.get("/api/benchmarks")
     def get_benchmarks():
@@ -1037,8 +1102,12 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
             raise HTTPException(404, f"unknown log source {source!r}")
         sources = [{"id": "basal-ui", "state": "ui"}]
         loaded = [key for key in runners if key in buffers]
-        gone = [key for key in buffers if key != "basal-ui" and key not in runners]
+        jobs = fleet.jobs.states()
+        job_logs = [key for key in buffers if key.startswith("job:")]
+        gone = [key for key in buffers if key != "basal-ui" and key not in runners and key not in job_logs]
         sources += [{"id": key, "state": runners[key].state} for key in loaded]
+        sources += [{"id": key, "state": "running" if jobs.get(key[4:], {}).get("running") else "done"}
+                    for key in job_logs]
         sources += [{"id": key, "state": "gone"} for key in gone]
         return {"sources": sources, "lines": buffers[source].since(after)}
 

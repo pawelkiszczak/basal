@@ -240,6 +240,28 @@ def history_path() -> Path:
     return _sibling("history.jsonl")
 
 
+def calibrations_dir(model_id: str) -> Path:
+    """Where basal-ui writes the calibration files it fits for a model: <settings dir>/calibrations/<org>--<name>/."""
+    return _settings_path().parent / "calibrations" / model_id.replace("/", "--")
+
+
+def calibration_selection() -> dict:
+    """{model id: calibration file basal-serve is started with}; a model without an entry uses its shipped file."""
+    value = load().get("calibration")
+    return {k: v for k, v in value.items() if isinstance(v, str)} if isinstance(value, dict) else {}
+
+
+@_locked
+def select_calibration(model_id: str, path: str | None) -> None:
+    """Use `path` for the model from its next start; None returns it to the shipped calibration."""
+    data = load()
+    selection = calibration_selection() | ({model_id: path} if path else {})
+    if not path:
+        selection.pop(model_id, None)
+    data["calibration"] = selection
+    save(data)
+
+
 def keys() -> list[dict]:
     value = load().get("api_keys", [])
     return value if isinstance(value, list) else []
