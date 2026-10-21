@@ -297,7 +297,7 @@ No authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway i
 |---|---|
 | [INSTALL](docs/INSTALL.md) | engines, the model files and every install path: NVIDIA (bf16, FP8), vLLM, SGLang, Apple Silicon, Ollama / llama.cpp, CPU, basal-omni |
 | [API](docs/API.md) | Complete basal-serve HTTP reference: upstream question types and confidence guidance, System One, Decisions, authentication, errors, media and client setups |
-| [SERVING](docs/SERVING.md) | serving modes, basal-ui walkthrough, batch inference, visualization and benchmarks |
+| [SERVING](docs/SERVING.md) · [BENCHMARK_SETS](docs/BENCHMARK_SETS.md) | serving modes, basal-ui walkthrough (several models on one port), batch inference, visualization and benchmarks; preparing your own benchmark set |
 | [RESULTS](docs/RESULTS.md) | results against basal-1.5: Werdykt, other benchmarks, speed |
 | [MCP](docs/MCP.md) · [THINKING](docs/THINKING.md) · [OMNI](docs/OMNI.md) | MCP server and bridge; the experimental thinking mode; basal-omni on the engine |
 | [FEATURES](docs/FEATURES.md) · [CALIBRATION](docs/CALIBRATION.md) | `multi`, `act`, `tool` and evidence in detail; calibrating on your own data |

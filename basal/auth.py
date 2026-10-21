@@ -1,11 +1,13 @@
-"""API-key authentication for basal-serve."""
+"""API-key authentication for basal-serve (and the basal-ui API server)."""
 import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 import time
+import uuid
 
 
 class ApiKeys:
@@ -91,6 +93,7 @@ def protect(app, keys, cors_origins=()):
                 await _json(send, 401, body, ((b"www-authenticate", b"Bearer"),))
                 return
             keys.touch(record["name"])
+            scope["basal.api_key"] = record  # routes behind protect() may check admin rights
         if path == "/v1/keys" and method == "GET":
             if record is not None and not record.get("admin", False):
                 await _json(send, 403, {"error": "admin key required", "code": "FORBIDDEN"})
@@ -108,3 +111,20 @@ def protect(app, keys, cors_origins=()):
     return auth_app
 
 
+def request_ids(app):
+    """Echo X-Request-Id (or a generated req_<hex>) as x-request-id and x-typesafe-request-id on every response."""
+    async def with_request_id(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+        supplied = dict(scope.get("headers", ())).get(b"x-request-id", b"").decode("latin1")
+        request_id = supplied if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied) else f"req_{uuid.uuid4().hex}"
+
+        async def send_with_id(message):
+            if message["type"] == "http.response.start":
+                message = dict(message)
+                message["headers"] = list(message.get("headers", [])) + [
+                    (b"x-request-id", request_id.encode()), (b"x-typesafe-request-id", request_id.encode())]
+            await send(message)
+        await app(scope, receive, send_with_id)
+    return with_request_id

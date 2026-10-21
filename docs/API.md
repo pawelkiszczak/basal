@@ -208,7 +208,7 @@ The default base URL in examples is `http://127.0.0.1:8000`. Authentication is o
 | `/mcp` | Streamable HTTP MCP, when started with `--mcp on` | Configured key, if enabled |
 
 The response `model` is the served name, not a routing instruction. basal-serve does not validate or route by the
-request's `model` value. Set the served name with `--name`; basal-ui passes the variant repository id (for example
+request's `model` value (basal-ui's API server does: [below](#several-models-behind-basal-ui)). Set the served name with `--name`; basal-ui passes the variant repository id (for example
 `Remek/basal-2.0-mini-MLX-8bit`). If omitted, the server reports the last component of its `--model` value.
 
 For example, a request may name any `model`; the server returns its configured name:
@@ -232,6 +232,36 @@ For example, a request may name any `model`; the server returns its configured n
 ```
 
 The live response contains full-precision floats; values are rounded here to four decimal places.
+
+### Several models behind basal-ui
+
+basal-ui's API server ([SERVING.md](SERVING.md#api-server)) serves every model loaded in the app on one port and
+routes by the request's `model`, which is therefore **required** there, on `/v1/systemone`, `/v1/basal`,
+`/v1/decisions` and `/decisions`. Use a model id from `GET /v1/models` (the variant repository id, for example
+`Remek/basal-2.0-mini-MLX-8bit`). The body is otherwise the one above; the answer is the model's own response.
+
+| Case | Status | `code` |
+|---|---|---|
+| no `model` (or not a string) | 400 | `MODEL_REQUIRED` — the message lists the loaded models |
+| `model` not loaded or not ready | 404 | `MODEL_NOT_FOUND` — the message lists the loaded models |
+| the model was unloaded while the request arrived | 409 | `MODEL_NOT_READY` |
+| its `basal-serve` cannot be reached | 502 | `UPSTREAM_ERROR` |
+
+Errors use the basal envelope (`{"error", "code"}`) on the System One paths and the OpenAI envelope on the Decisions
+paths, like basal-serve's own errors.
+
+`GET /v1/models` lists the ready models in both shapes: `models` holds each model's basal-serve entry (as above) and
+`data` the OpenAI list (`{"id", "object": "model", "created", "owned_by": "basal"}`), with `"object": "list"`.
+`GET /health` answers `{"status": "ok", "models": [ids]}`.
+
+`GET /v1/stats` returns basal-ui's statistics: `{"models": {id: {"requests", "questions", "errors", "input_tokens",
+"avg_latency_ms", "p50_ms", "p95_ms", "avg_best_prob", "first_used", "last_used", "by_type": {type: {"questions",
+"avg_best_prob"}}}}, "benchmarks": {id: [results]}}`. With **Require an API key** it needs an admin key (only
+basal-ui's internal key is one; user keys get 403), otherwise it is open like `/v1/keys`.
+
+MCP on this port: `decide` and `decide_many` take a required `model` argument and a third tool, `list_models`, returns
+`{"models": [ids]}`. The stdio bridge passes the model with `basal-mcp --url http://127.0.0.1:8000 --model <id>`;
+without `--model` the gateway answers 400 and the tool call fails with that message.
 
 ### Media input
 

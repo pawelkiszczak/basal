@@ -34,7 +34,6 @@ import os
 import re
 import threading
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -1429,7 +1428,7 @@ def build_app(srv, a):
     from starlette.responses import JSONResponse
     from starlette.routing import Route
 
-    from .auth import ApiKeys, protect
+    from .auth import ApiKeys, protect, request_ids
     from .compat import decision_body, decision_response, openai_error, systemone_media, validate_systemone
 
     async def systemone(request):
@@ -1501,24 +1500,9 @@ def build_app(srv, a):
         Route("/v1/models", models), Route("/health", health), *mcp_routes
     ], lifespan=lifespan)
 
-    async def with_request_id(scope, receive, send):
-        if scope["type"] != "http":
-            await protected(scope, receive, send)
-            return
-        supplied = dict(scope.get("headers", ())).get(b"x-request-id", b"").decode("latin1")
-        request_id = supplied if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied) else f"req_{uuid.uuid4().hex}"
-        async def send_with_id(message):
-            if message["type"] == "http.response.start":
-                message = dict(message)
-                message["headers"] = list(message.get("headers", [])) + [
-                    (b"x-request-id", request_id.encode()), (b"x-typesafe-request-id", request_id.encode())]
-            await send(message)
-        await protected(scope, receive, send_with_id)
-
     origins = [origin.strip() for origin in a.cors_origins.split(",") if origin.strip()]
     keys = ApiKeys(a.api_keys) if a.api_keys else None
-    protected = protect(app, keys, origins)
-    return with_request_id
+    return request_ids(protect(app, keys, origins))
 
 
 def main():

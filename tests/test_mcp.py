@@ -2,6 +2,7 @@
 --mcp on serves the tools at /mcp next to /v1/systemone (Host checked on a loopback bind), the basal-mcp bridge
 forwards over HTTP, and --mcp on without the package is refused before a model loads."""
 import asyncio
+import json
 import socket
 import sys
 import threading
@@ -169,6 +170,34 @@ def test_bridge_api_key_authenticates_model_lookup_and_decisions(monkeypatch):
     decide = mcp_server.remote("http://basal:8000", transport=transport, api_key="secret")
     asyncio.run(decide({"state": "x"}))
     assert seen == [("/v1/models", "Bearer secret"), ("/v1/systemone", "Bearer secret")]
+
+
+def test_several_models_add_a_required_model_argument_and_list_models():
+    eng = Engine()
+
+    async def go():
+        async with Client(mcp_server.build(eng.decide, models=lambda: ["a", "b"])) as c:
+            tools = {t.name: t for t in (await c.list_tools()).tools}
+            listed = await c.call_tool("list_models", {})
+            await c.call_tool("decide_many", {"model": "b", "state": "s", "questions": {}})
+            return tools, listed
+    tools, listed = asyncio.run(go())
+    assert set(tools) == {"decide", "decide_many", "list_models"}
+    assert tools["decide"].input_schema["required"] == ["model", "state", "question"]
+    assert listed.structured_content == {"models": ["a", "b"]}
+    assert eng.bodies[-1] == {"model": "b", "state": "s", "questions": {}}
+
+
+def test_bridge_model_option_names_the_model_in_every_request():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"answers": {}})
+
+    decide = mcp_server.remote("http://basal:8000", transport=httpx.MockTransport(handler), model="Remek/m")
+    asyncio.run(decide({"state": "x"}))
+    assert seen == [{"model": "Remek/m", "state": "x"}]
 
 
 def test_mcp_without_the_package_fails_before_model_loading(monkeypatch):
