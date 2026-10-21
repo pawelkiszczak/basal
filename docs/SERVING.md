@@ -239,6 +239,19 @@ outcome in a short notification. On a narrow window the menu becomes a top bar.
   latency. Requests go to the selected model's `POST /v1/systemone`. With a media server, up to 8 images or audio
   files (20 MiB each) go along as `media`, with the image `detail` and the audio `lang`.
 
+### Load options
+
+**⚙ Options** next to every Load button (and **⚙** next to a loaded model's Restart) opens the load options of that
+model: the **engine mode** (every `basal-serve --mode`, the ones this machine or variant cannot use greyed out with
+the reason — CUDA graph modes need an NVIDIA GPU, vLLM / SGLang their extra, MLX Apple Silicon, TPU a TPU VM, Strix
+an AMD Strix Halo; Ollama and llama-server take the URL of the running service), quantisation, attention kernels,
+the vLLM preset and GPU share, determinism, option orders and the `auto` band, batching, the state and prefix
+caches, the scheduler and long-request lane, and the **context policy** (truncate the middle of the state, or refuse
+with 422; the share kept from the beginning; `--max-len`). Only the values that differ from basal-serve's defaults are
+passed, and a combination basal-serve refuses shows its own message on the model's row. **Remember for this model**
+keeps them for its next plain Load; a restart and auto-load reuse the options the model runs with. The row lists them
+as chips.
+
 ### Memory budget
 
 The budget is the hardware budget shown under Hardware unless set in **API server → Memory** (at least 1 GiB), and

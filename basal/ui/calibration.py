@@ -61,12 +61,12 @@ def listing(model_id, settings_mod) -> list[dict]:
     return files
 
 
-def run_calibration(job, fleet, assessment, local_dir, input_path, out_path, targets=TARGETS):
+def run_calibration(job, fleet, assessment, local_dir, input_path, out_path, targets=TARGETS, options=None):
     """The calibrate job: a temporary basal-serve --no-calibration child, basal-calibrate --url on it, the child
     stopped; -> the file, the report (basal-calibrate's output, also written to <file>.report.txt) and its summary.
     basal-calibrate's output is redirected for the whole process while it runs (one calibration at a time)."""
     job.progress("starting model")
-    runner = fleet.start_temporary("calibrate", assessment, job.log, extra_args=["--no-calibration"])
+    runner = fleet.start_temporary("calibrate", assessment, job.log, options, extra_args=["--no-calibration"])
     writer = _Lines(job.log)
     try:
         while (state := runner.status())["state"] != "ready":

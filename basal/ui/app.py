@@ -9,8 +9,8 @@ or unloaded model never takes the UI down.
 """
 import argparse
 import asyncio
-from collections import deque
 from contextlib import asynccontextmanager
+import dataclasses
 import hashlib
 import os
 from pathlib import Path
@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import catalog, hardware, settings
+from . import options as load_options
 from .gateway import Gateway
 from .history import History, make_record
 from .jobs import Jobs, LogBuffer
@@ -163,7 +164,7 @@ class Runner:
         self.media_requested, self.media = False, []
         self.est_memory_bytes, self.models_entry, self.ready_at = None, None, None
         self.serve_snapshot = None  # the child settings the running basal-serve was started with
-        self.extra_args, self.temporary = (), False
+        self.extra_args, self.temporary, self.options = (), False, {}
 
     @property
     def pid(self):
@@ -183,11 +184,16 @@ class Runner:
                     "mode": self.mode, "command": self.command, "progress": self.progress, "error": self.error,
                     "media_requested": self.media_requested, "media": self.media,
                     "restart_required": restart_required, "est_memory_bytes": self.est_memory_bytes,
-                    "rss_bytes": self.rss_bytes, "base_url": self.base_url, "entry": self.models_entry}
+                    "rss_bytes": self.rss_bytes, "base_url": self.base_url, "entry": self.models_entry,
+                    "options": dict(self.options)}
 
-    def load(self, assessment, media=False, extra_args=(), temporary=False):
-        """temporary: a private child for a job (basal-calibrate): no API key (it is reached on loopback without one),
+    def load(self, assessment, media=False, options=None, extra_args=(), temporary=False):
+        """options: load options (basal/ui/options.py; their mode replaces the assessment's, except with media);
+        temporary: a private child for a job (basal-calibrate): no API key (it is reached on loopback without one),
         no calibration selected in basal-ui, not remembered for auto-load; extra_args go to basal-serve last."""
+        options = load_options.non_default(load_options.validate(options, assessment.mode))
+        if options.get("mode") and not media:
+            assessment = dataclasses.replace(assessment, mode=options["mode"])
         with self.lock:
             if self.state in ("downloading", "starting"):
                 raise RuntimeError("the model is already loading; unload it first")
@@ -196,7 +202,7 @@ class Runner:
             self.mode = "eager" if media else assessment.mode
             self.media_requested, self.media = media, []
             self.est_memory_bytes = assessment.est_memory_bytes
-            self.extra_args, self.temporary = tuple(extra_args), temporary
+            self.extra_args, self.temporary, self.options = tuple(extra_args), temporary, options
             gen = self.gen
             cache_dir = self.models_dir_fn()
             serve = self.settings_mod.serve_settings()
@@ -239,9 +245,9 @@ class Runner:
             command += ["--calibration", self._calibration(v)]
         if serve["log_decisions"] and not self.temporary:
             command += ["--log-decisions", serve["log_decisions"]]
-        if assessment.mode in ("vllm", "sglang"):
+        if assessment.mode in ("vllm", "sglang") and self.options.get("max_len") is None:
             command += ["--max-len", str(serve["max_len"])]
-        return command + list(self.extra_args)
+        return command + load_options.args(self.options) + list(self.extra_args)
 
     def _models_entry(self, media):
         """The child's GET /v1/models entry and, with media, its media kinds (required then, best effort else)."""
@@ -298,7 +304,7 @@ class Runner:
                             self.state, self.media = "ready", media_kinds
                             self.models_entry, self.ready_at = entry, time.time()
                             if not self.temporary:
-                                self.settings_mod.remember_loaded(v.id, media)
+                                self.settings_mod.remember_loaded(v.id, media, self.options)
                         self.event("info", f"{v.id}: ready")
                         return
                 except httpx.HTTPError:
@@ -430,14 +436,14 @@ class Fleet:
         return Runner(models_dir_fn=self.models_dir_fn, platform_fn=self.platform_fn, settings_mod=self.settings_mod,
                       downloads=self.downloads, internal_secret=self.internal_secret, log=log, event=self.event)
 
-    def start_temporary(self, kind, assessment, log, extra_args=()) -> Runner:
+    def start_temporary(self, kind, assessment, log, options=None, extra_args=()) -> Runner:
         """A private, unremembered child for a job (its memory counted in the budget); stop_temporary ends it."""
         with self.lock:
             if kind in self.temporary:
                 raise RuntimeError(f"a {kind} child is already running")
             self.check_budget(assessment.est_memory_bytes)
             runner = self.temporary[kind] = self._runner(log)
-            runner.load(assessment, extra_args=extra_args, temporary=True)
+            runner.load(assessment, options=options, extra_args=extra_args, temporary=True)
         self.event("info", f"{kind}: temporary basal-serve for {assessment.variant.id}")
         return runner
 
@@ -447,7 +453,7 @@ class Fleet:
         if runner is not None:
             runner.unload()
 
-    def load(self, assessment, media=False):
+    def load(self, assessment, media=False, options=None):
         model_id = assessment.variant.id
         with self.lock:
             existing = self.runners.get(model_id)
@@ -460,7 +466,7 @@ class Fleet:
             runner = self._runner(log)
             self.runners[model_id] = runner
             self._prune_logs()
-            runner.load(assessment, media=media)
+            runner.load(assessment, media=media, options=options)
         if existing is not None:
             existing.unload()
         self.event("info", f"load requested: {model_id}{' with media' if media else ''}")
@@ -499,10 +505,15 @@ class Fleet:
                 self.stop_temporary(kind)
         return self.status()
 
-    def restart(self, assessment, media=False):
+    def restart(self, assessment, media=False, options=None):
+        """Unload and load again; options None keeps the running child's load options."""
+        with self.lock:
+            current = self.runners.get(assessment.variant.id)
+        if options is None:
+            options = current.options if current is not None else {}
         self.event("info", f"restart: {assessment.variant.id}")
         self.unload(assessment.variant.id, forget=False)
-        return self.load(assessment, media=media)
+        return self.load(assessment, media=media, options=options)
 
     def download(self, variant) -> bool:
         """Start a runner-less download into the models directory; False when the model is on disk already.
@@ -667,6 +678,24 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
     def hw():
         return hardware_fn()
 
+    def prepare(variant, media, options):
+        """(assessment, the non-default load options) of a load; ValueError says why this machine cannot load it so:
+        an unavailable mode, invalid options, or a variant the default mode cannot serve."""
+        current = hw()
+        assessment = catalog.assess(variant, current)
+        merged = load_options.validate(options, assessment.mode)
+        if media:
+            if assessment.media_mode is None:
+                raise ValueError(assessment.media_reason)
+        elif merged["mode"]:
+            mode = next(m for m in load_options.available_modes(variant, current, assessment)
+                        if m["mode"] == merged["mode"])
+            if not mode["available"]:
+                raise ValueError(f"--mode {merged['mode']}: {mode['reason']}")
+        elif not assessment.runnable:
+            raise ValueError(assessment.reason)
+        return assessment, load_options.non_default(merged)
+
     auto_load_stop = threading.Event()
     auto_load_lock = threading.Lock()
 
@@ -684,14 +713,10 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
                 variant = next((v for v in variants if v.id == last["id"]), None)
                 if variant is None:
                     raise ValueError("model is unknown")
-                assessment = catalog.assess(variant, hw())
-                if not assessment.runnable and not last.get("media"):
-                    raise ValueError(assessment.reason)
-                if last.get("media") and assessment.media_mode is None:
-                    raise ValueError(assessment.media_reason)
+                assessment, options = prepare(variant, last.get("media", False), last.get("options"))
                 with auto_load_lock:
                     if not auto_load_stop.is_set():
-                        fleet.load(assessment, media=last.get("media", False))
+                        fleet.load(assessment, media=last.get("media", False), options=options)
                         fleet.event("info", f"auto-load: {last['id']}")
             except Exception as exc:
                 print(f"basal-ui: auto-load of {last['id']} skipped: {exc}", file=sys.stderr)
@@ -829,7 +854,13 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         if variant is None:
             raise HTTPException(400, "loaded model is no longer available")
         try:
-            fleet.restart(catalog.assess(variant, hw()), media=current.get("media_requested", False))
+            options = body.get("options")
+            assessment, options = prepare(variant, current.get("media_requested", False),
+                                          current.get("options") if options is None else options)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            fleet.restart(assessment, media=current.get("media_requested", False), options=options)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return full_status()
@@ -879,6 +910,29 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
              "downloaded": on_disk[a.variant.id] is not None, "downloaded_bytes": on_disk[a.variant.id]}
             for a in assessed]}
 
+    @app.get("/api/models/options")
+    def get_model_options(id: str):
+        variant = find_variant(id)
+        current = hw()
+        assessment = catalog.assess(variant, current)
+        saved = settings_mod.load_options(variant.id)
+        try:
+            merged = load_options.validate(saved, assessment.mode)
+        except ValueError:  # options saved by another basal-ui version
+            merged = dict(load_options.DEFAULTS)
+        return {"modes": load_options.available_modes(variant, current, assessment), "options": merged,
+                "saved": bool(saved), "defaults": load_options.DEFAULTS}
+
+    @app.put("/api/models/options")
+    def put_model_options(body: dict = Body(...)):
+        variant = find_variant(body.get("id"))
+        try:
+            merged = load_options.validate(body.get("options"), catalog.assess(variant, hw()).mode)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        settings_mod.set_load_options(variant.id, load_options.non_default(merged))
+        return get_model_options(variant.id)
+
     @app.post("/api/models/delete")
     def delete_model(body: dict = Body(...)):
         variant = find_variant(body.get("id"))
@@ -901,13 +955,13 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         media = body.get("media", False)
         if not isinstance(media, bool):
             raise HTTPException(400, "media must be a boolean")
-        assessment = catalog.assess(variant, hw())
-        if not assessment.runnable and not media:
-            raise HTTPException(400, assessment.reason)
-        if media and assessment.media_mode is None:
-            raise HTTPException(400, assessment.media_reason)
         try:
-            fleet.load(assessment, media=media)
+            options = body["options"] if "options" in body else settings_mod.load_options(variant.id)  # remembered
+            assessment, options = prepare(variant, media, options)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            fleet.load(assessment, media=media, options=options)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return full_status()
@@ -1009,16 +1063,17 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
                 raise ValueError
         except (TypeError, ValueError):
             raise HTTPException(400, "targets must be a list of max_error values between 0 and 1") from None
-        assessment = catalog.assess(variant, hw())
-        if not assessment.runnable:
-            raise HTTPException(400, assessment.reason)
+        try:  # the engine the model is served with: its remembered load options
+            assessment, options = prepare(variant, False, settings_mod.load_options(variant.id))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         out = settings_mod.calibrations_dir(variant.id) / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
         try:
             with fleet.lock:
                 fleet.check_budget(assessment.est_memory_bytes)
             return fleet.jobs.start("calibrate", variant.id, f"{variant.id} on {source.name}",
                                     calibration.run_calibration, fleet, assessment, local_dir, source, out,
-                                    [str(float(t)) for t in targets])
+                                    [str(float(t)) for t in targets], options)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -1034,7 +1089,9 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         local_dir = catalog.is_downloaded(variant, settings_mod.models_dir())
         shipped = None
         if local_dir:
-            path = calibration.shipped_file(local_dir, catalog.assess(variant, hw()).mode)
+            mode = (settings_mod.load_options(variant.id).get("mode") or catalog.assess(variant, hw()).mode
+                    or "eager")  # the mode the model is served with; eager names the default CALIBRATION.json
+            path = calibration.shipped_file(local_dir, mode)
             shipped = {"file": str(path)}
             try:
                 shipped.update(calibration.summary(path))

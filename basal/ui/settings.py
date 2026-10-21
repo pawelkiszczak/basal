@@ -174,15 +174,35 @@ def set_auto_load(enabled: bool) -> bool:
 
 
 @_locked
-def remember_loaded(model_id: str, media: bool) -> None:
-    """A model that reached ready, for auto-load at the next start (load order kept)."""
+def remember_loaded(model_id: str, media: bool, options: dict | None = None) -> None:
+    """A model that reached ready, for auto-load at the next start (load order kept), with the load options it was
+    started with (only the ones that differ from basal-serve's defaults)."""
     data = load()
     entries = last_models(data)
+    entry = {"id": model_id, "media": bool(media), **({"options": options} if options else {})}
     if any(e["id"] == model_id for e in entries):
-        entries = [{**e, "media": bool(media)} if e["id"] == model_id else e for e in entries]
+        entries = [entry if e["id"] == model_id else e for e in entries]
     else:
-        entries.append({"id": model_id, "media": bool(media)})
+        entries.append(entry)
     data["last_models"] = entries
+    save(data)
+
+
+def load_options(model_id: str) -> dict:
+    """The load options remembered for a model ({} = basal-serve's defaults)."""
+    value = (load().get("load_options") or {}).get(model_id)
+    return value if isinstance(value, dict) else {}
+
+
+@_locked
+def set_load_options(model_id: str, options: dict | None) -> None:
+    data = load()
+    saved = data.get("load_options") if isinstance(data.get("load_options"), dict) else {}
+    if options:
+        saved[model_id] = options
+    else:
+        saved.pop(model_id, None)
+    data["load_options"] = saved
     save(data)
 
 
