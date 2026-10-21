@@ -158,6 +158,12 @@ def test_the_load_options_dialog_lists_the_modes(page, text_model):
     assert dialog.locator('input[name="optMode"]').count() == 16
     assert dialog.locator('input[name="optMode"][disabled]').count() >= 1
     sync_api.expect(dialog.locator("#optExperimentalNote")).not_to_be_empty()
+    for key, modes in (("gemma_attn", "fast"), ("eager_attn", "eager"), ("merge", "fast"), ("ple_offload", "eager")):
+        field = dialog.locator(f'[data-opt="{key}"]')  # each switch shows for the backend that reads it
+        assert modes in field.get_attribute("data-modes").split() and ("eager" in field.get_attribute(
+            "data-modes").split()) == (modes == "eager")
+        if text_model["mode"] not in field.get_attribute("data-modes").split():
+            sync_api.expect(field).to_be_hidden()
     page.click("#optionsCancel")
     sync_api.expect(dialog).to_be_hidden()
 

@@ -1,7 +1,8 @@
 """Load options of a model in basal-ui: the engine mode and the basal-serve runtime settings (attention, determinism,
-option orders, batching, caching, scheduling, context policy, thinking, early exit). DEFAULTS are basal-serve's own
-defaults, and args() emits only the options that differ from them. Incompatible combinations are not re-checked here:
-the child refuses them with basal-serve's own message, shown on the model's row and in its log."""
+option orders, batching, caching, scheduling, context policy, the CUDA graph engine's kernel switches, the Gemma 4
+eager forward, calibration strictness, thinking, early exit). DEFAULTS are basal-serve's own defaults, and args()
+emits only the options that differ from them. Incompatible combinations are not re-checked here: the child refuses
+them with basal-serve's own message, shown on the model's row and in its log."""
 import re
 
 from basal.engine import VLLM_PRESETS
@@ -15,24 +16,39 @@ DEFAULTS = {
     "vllm_preset": "default", "gpu_memory": 0.6, "ollama_url": "http://127.0.0.1:11434", "ollama_model": None,
     "llamacpp_url": "http://127.0.0.1:8080", "http_parallel": 1, "device": None, "think": False, "think_tokens": 256,
     "think_python": None, "think_url": None, "early_exit": "off",
+    # the CUDA graph engine's kernel switches
+    "merge": "auto", "lean": "off", "tree": "dense", "batches": "auto", "readout_layer": "off", "template_prefix": "auto",
+    "fp8_accum": "fast",
+    # --mode eager with a Gemma 4 model (basal-omni)
+    "eager_attn": "math", "eager_forward": None, "ple_offload": False,
+    "vllm_fast_prefill": "auto", "dtype": "bfloat16", "exit_heads": None, "strict_calibration": False,
+    "think_calibration": None, "think_model": None, "think_adapter": None, "think_memory": 0.3, "think_max_len": 8192,
+    "think_log": "basal-think-vllm.log",
 }
 CHOICES = {
     "quant": (None, "fp8", "nvfp4", "q8"), "attn": ("auto", "fa2", "fa3", "fa4", "cudnn"),
     "gemma_attn": ("auto", "math", "flex", "fa3", "fa3+math"), "scheduler": ("auto", "on", "off"),
     "context_overflow": ("truncate", "refuse"), "vllm_preset": tuple(VLLM_PRESETS), "device": (None, "cuda", "mps", "cpu"),
     "early_exit": ("off", "0.999", "0.995", "0.99", "0.98"),
+    "merge": ("auto", "on", "off"), "lean": ("auto", "on", "pass2", "off"), "tree": ("auto", "dense", "flex"),
+    "batches": ("auto", "compact", "default", "fine"), "readout_layer": ("auto", "on", "off"),
+    "template_prefix": ("auto", "on", "off"), "fp8_accum": ("fast", "full"), "eager_forward": (None, "basal", "hf"),
+    "vllm_fast_prefill": ("auto", "off"), "dtype": ("bfloat16", "float16", "float32"),
 }
-BOOLS = ("deterministic", "soam", "prefix_cache", "long_lane", "think")
+BOOLS = ("deterministic", "soam", "prefix_cache", "long_lane", "think", "ple_offload", "strict_calibration")
 # key: (minimum, maximum, integer, minimum excluded)
 NUMBERS = {
     "auto_tau": (0, 1, False, False), "max_batch": (1, None, True, False), "wait_ms": (0, None, False, False),
     "batch_window_ms": (0, None, False, False), "state_cache_gb": (0, None, False, False),
     "long_tokens": (1, None, True, False), "long_share": (0, 1, False, False), "long_slice_ms": (0, None, False, False),
     "truncate_head": (0, 1, False, False), "gpu_memory": (0, 1, False, True), "http_parallel": (1, None, True, False),
-    "think_tokens": (1, None, True, False),
+    "think_tokens": (1, None, True, False), "think_memory": (0, 1, False, True), "think_max_len": (512, None, True, False),
 }
-TEXTS = ("ollama_url", "ollama_model", "llamacpp_url", "think_python", "think_url")
+TEXTS = ("ollama_url", "ollama_model", "llamacpp_url", "think_python", "think_url", "exit_heads", "think_calibration",
+         "think_model", "think_adapter", "think_log")
 ORDERS = re.compile(r"1|2|auto|2le([2-9]|\d{2,})\Z")
+KERNELS = "sdpa|efficient|cudnn|fa3|fa4"
+EAGER_ATTN = re.compile(rf"math|auto|sliding=({KERNELS}),full=({KERNELS})\Z")
 # the order of the Engine section; the GPU graph modes first
 MODE_ORDER = ("fast", "fast-nocompile", "fast-exit", "fp8", "nvfp4", "eager", "vllm", "sglang", "mlx", "mlx-q8", "mps",
               "gguf", "strix", "tpu", "ollama", "llamacpp")
@@ -87,6 +103,9 @@ def validate(options: dict | None, default_mode: str | None = None) -> dict:
         elif key == "max_len":
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 512 <= value <= 131072):
                 raise ValueError("load option max_len must be an integer between 512 and 131072")
+        elif key == "eager_attn":
+            if not (isinstance(value, str) and EAGER_ATTN.fullmatch(value)):
+                raise ValueError(f"load option eager_attn must be math, auto or sliding=K,full=K with K in {KERNELS}")
         out[key] = value
     if out["quant"] and (out["mode"] or default_mode):
         try:
@@ -112,9 +131,9 @@ def args(options: dict) -> list[str]:
         flag = "--" + key.replace("_", "-")
         if key == "mode":
             continue
-        if key in ("deterministic",):
+        if key in ("deterministic", "strict_calibration"):
             flags.append(flag)
-        elif key in ("soam", "prefix_cache", "long_lane"):
+        elif key in ("soam", "prefix_cache", "long_lane", "ple_offload"):
             flags += [flag, "on" if value else "off"]
         elif key == "think":
             flags += [flag, "auto"]
