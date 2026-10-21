@@ -16,6 +16,14 @@
   a **History** of every decision (playground, API, MCP) with replay in the playground and a **Logs** view of every
   `basal-serve`. `basal-mcp --model` names the model on such a server.
   [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
+- **`basal-ui` decision safety**: every playground answer shows whether it was deferred to a person (and the action or
+  tool refused), whether its confidence clears the model's certified 1% / 5% thresholds, whether its calibration is
+  validated, unvalidated or fitted on text, and when the state was truncated to the context; `GET /v1/models` now
+  carries `certified` and `context`. History marks deferred and truncated decisions.
+- **`basal-ui` builders for every question type**: `multi`, `act` (simple costs or a cost matrix), `tool`, `classify`,
+  `verify`, `compress` and `extract` next to choice / noul / score, with `max_error`, evidence, `facts` and `lang`
+  controls, a dedicated result view per type and the state shown with evidence spans, kept / dropped units and
+  extracted fields highlighted; `basal/examples/advanced.jsonl` has one full request per type.
 - **HTTP API compatibility**: basal-serve now returns TypeSafe-style errors and request IDs, accepts vLLM-style media
   aliases, and translates OpenAI Decisions requests; see the [HTTP API reference](API.md#http-api-reference).
 
