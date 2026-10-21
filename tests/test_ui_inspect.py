@@ -61,7 +61,7 @@ def test_inspector_serves_basal_viz_for_a_bf16_model_and_stops(client):
     while client.get("/api/inspect").json()["state"] != "ready" and time.monotonic() < deadline:
         time.sleep(0.01)
     assert client.get("/api/inspect").json() == {"model": "mini", "state": "ready", "error": None}
-    assert client.get("/viz/api/info").json() == {"model": "stub", "device": "cpu", "layers": 2}
+    assert client.get("/viz/api/info").json() == {"model": "mini", "device": "cpu", "layers": 2}  # the variant's id
     explained = client.post("/viz/api/explain", json={"state": "s", "questions": {}})
     assert explained.json() == {"questions": [], "state": "s", "served": {}}
     assert client.fleet.reserved["inspect"] == catalog.assess(BF16, HW).est_memory_bytes
