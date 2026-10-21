@@ -193,14 +193,16 @@ class Runner:
         temporary: a private child for a job (basal-calibrate): no API key (it is reached on loopback without one),
         no calibration selected in basal-ui, not remembered for auto-load; extra_args go to basal-serve last."""
         options = load_options.non_default(load_options.validate(options, assessment.mode))
-        if options.get("mode") and not media:
+        if media:  # --media on: eager, or vLLM where chosen (prepare checks it can run)
+            assessment = dataclasses.replace(assessment, mode="vllm" if options.get("mode") == "vllm" else "eager")
+        elif options.get("mode"):
             assessment = dataclasses.replace(assessment, mode=options["mode"])
         with self.lock:
             if self.state in ("downloading", "starting"):
                 raise RuntimeError("the model is already loading; unload it first")
             old, _ = self.detach()
             self.state, self.model, self.model_repo = "downloading", assessment.variant.id, assessment.variant.repo
-            self.mode = "eager" if media else assessment.mode
+            self.mode = assessment.mode
             self.media_requested, self.media = media, []
             self.est_memory_bytes = assessment.est_memory_bytes
             self.extra_args, self.temporary, self.options = tuple(extra_args), temporary, options
@@ -705,8 +707,12 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         assessment = catalog.assess(variant, current)
         merged = load_options.validate(options, assessment.mode)
         if media:
-            if assessment.media_mode is None:
-                raise ValueError(assessment.media_reason)
+            modes = {m["mode"]: m for m in load_options.available_media_modes(assessment, current)}
+            chosen = modes.get(merged["mode"] or "eager")
+            if chosen is None:
+                raise ValueError("--media on needs --mode eager or vllm (the media paths of basal-omni)")
+            if not chosen["available"]:
+                raise ValueError(chosen["reason"])
         elif merged["mode"]:
             mode = next(m for m in load_options.available_modes(variant, current, assessment)
                         if m["mode"] == merged["mode"])
@@ -714,7 +720,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
                 raise ValueError(f"--mode {merged['mode']}: {mode['reason']}")
         elif not assessment.runnable:
             raise ValueError(assessment.reason)
-        load_options.check_combination(variant, current, merged, assessment.mode)
+        load_options.check_combination(variant, current, merged, "eager" if media else assessment.mode)
         return assessment, load_options.non_default(merged)
 
     auto_load_stop = threading.Event()
@@ -948,6 +954,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         family_ok = variant.family == "basal-2.0" and variant.tier == "4.5B"
         return {"modes": load_options.available_modes(variant, current, assessment), "options": merged,
                 "saved": bool(saved), "defaults": load_options.DEFAULTS,
+                "media_modes": load_options.available_media_modes(assessment, current),
                 "think": {"model": family_ok, "vllm": "vllm" in current.engines,
                           "reason": None if family_ok else load_options.THINK_REASON}}
 
@@ -984,7 +991,12 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         if not isinstance(media, bool):
             raise HTTPException(400, "media must be a boolean")
         try:
-            options = body["options"] if "options" in body else settings_mod.load_options(variant.id)  # remembered
+            if "options" in body:
+                options = body["options"]
+            else:  # remembered; their engine mode applies with media only when it is a media mode
+                options = settings_mod.load_options(variant.id)
+                if media and options.get("mode") not in (None, "eager", "vllm"):
+                    options = {k: v for k, v in options.items() if k != "mode"}
             assessment, options = prepare(variant, media, options)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

@@ -76,6 +76,19 @@ def test_every_engine_switch_reaches_basal_serve_as_it_reads_it():
     assert {k: getattr(defaults, k) for k in chosen} == {k: options.DEFAULTS[k] for k in chosen}
 
 
+def test_media_loads_are_eager_or_vllm_where_cuda_has_vllm():
+    omni = Variant("omni", "Remek/basal-omni-1.0-mini", "basal-omni-1.0", "mini", "bf16", "bf16", None, 100, True,
+                   media=("image", "audio"))
+    media_cuda = Hardware("cuda", "NVIDIA H100", 80 * 1024**3, None, (9, 0), frozenset({"cuda", "vllm", "media"}))
+    no_vllm = Hardware("cuda", "NVIDIA H100", 80 * 1024**3, None, (9, 0), frozenset({"cuda", "media"}))
+    modes = lambda hw: {m["mode"]: m["available"] for m in options.available_media_modes(catalog.assess(omni, hw), hw)}
+    assert modes(media_cuda) == {"eager": True, "vllm": True}
+    assert modes(no_vllm) == {"eager": True, "vllm": False}
+    assert modes(CUDA) == {"eager": False, "vllm": False}  # no basal[media]
+    assert catalog.serve_args(omni, "/m", "vllm", "cuda")[-4:] == ["--mode", "vllm", "--media", "on"]
+    assert catalog.serve_args(omni, "/m", "eager", "apple")[-4:] == ["--media", "on", "--device", "mps"]
+
+
 def test_available_modes_follow_the_hardware_and_the_variant():
     assert available(BF16, CPU) == {"eager", "ollama", "llamacpp"}
     gguf_cpu = Hardware("cpu", "cpu", 1024**4, None, None, frozenset({"gguf"}))

@@ -343,9 +343,11 @@ def delete(v: Variant, cache_dir: Path) -> int:
 
 
 def serve_args(v: Variant, local_dir: Path, mode: str, media_platform: str | None = None) -> list[str]:
-    """basal-serve arguments; media_platform (the Hardware.platform) serves with images / audio: --mode eager
-    --media on, on the Apple GPU or the CPU where there is no CUDA."""
+    """basal-serve arguments; media_platform (the Hardware.platform) serves with images / audio (--media on): --mode
+    vllm when `mode` is vllm (CUDA), else --mode eager, on the Apple GPU or the CPU where there is no CUDA."""
     if media_platform:
+        if mode == "vllm":
+            return ["--model", str(local_dir), "--mode", "vllm", "--media", "on"]
         args = ["--model", str(local_dir), "--mode", "eager", "--media", "on"]
         return args + {"apple": ["--device", "mps"], "cpu": ["--device", "cpu"]}.get(media_platform, [])
     args = ["--model", str(local_dir), "--mode", mode]

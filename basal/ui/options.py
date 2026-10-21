@@ -184,6 +184,16 @@ def available_modes(v, hw, assessment) -> list[dict]:
             for m in MODE_ORDER]
 
 
+def available_media_modes(assessment, hw) -> list[dict]:
+    """The modes of a load with media (--media on): eager wherever basal[media] is installed, vLLM on CUDA with
+    basal[vllm] (basal-serve refuses the checkpoints vLLM reads differently, basal-omni-1.1-max)."""
+    reason = assessment.media_reason if assessment.media_mode is None else None
+    vllm = reason or (None if hw.platform == "cuda" and "vllm" in hw.engines else
+                      "vLLM media serving needs an NVIDIA GPU with basal[vllm] (docs/OMNI.md)")
+    return [{"mode": "eager", "available": reason is None, "reason": reason, "default": True},
+            {"mode": "vllm", "available": vllm is None, "reason": vllm, "default": False}]
+
+
 THINK_REASON = "thinking is available for basal-2.0 4.5B with basal[vllm] (docs/THINKING.md)"
 
 

@@ -1302,15 +1302,17 @@ function optionInput(key, value) {
   return `<label for="${id}">${esc(f.label)}</label>${input}`;
 }
 function renderOptionsForm(values) {
-  const d=optionsState.data, defaultMode=d.modes.find(m=>m.default)?.mode, mode=values.mode||defaultMode;
-  const modes=`<div class="option-modes">${d.modes.map(m=>`<label class="option-mode${m.available?'':' unavailable'}" title="${esc(m.reason||'')}"><input type="radio" name="optMode" value="${esc(m.mode)}"${m.mode===mode?' checked':''}${m.available&&!optionsState.media?'':' disabled'}> <span>${esc(m.mode)}${m.default?' <span class="chip">default</span>':''}</span>${m.reason?`<small>${esc(m.reason)}</small>`:''}</label>`).join('')}</div>${optionsState.media?'<p class="muted">With media the model is served with --mode eager.</p>':''}`;
+  const d=optionsState.data, list=optionsState.media?d.media_modes:d.modes, defaultMode=list.find(m=>m.default)?.mode;
+  const mode=list.some(m=>m.mode===values.mode)?values.mode:defaultMode;
+  const modes=`<div class="option-modes">${list.map(m=>`<label class="option-mode${m.available?'':' unavailable'}" title="${esc(m.reason||'')}"><input type="radio" name="optMode" value="${esc(m.mode)}"${m.mode===mode?' checked':''}${m.available?'':' disabled'}> <span>${esc(m.mode)}${m.default?' <span class="chip">default</span>':''}</span>${m.reason?`<small>${esc(m.reason)}</small>`:''}</label>`).join('')}</div>${optionsState.media?'<p class="muted">With media (--media on) the model is served with --mode eager, or with --mode vllm on an NVIDIA GPU with basal[vllm].</p>':''}`;
   const experimental='<p class="muted option-note" id="optExperimentalNote"></p>';
   $('#optionsForm').innerHTML=OPTION_SECTIONS.map(([title,keys])=>`<fieldset class="option-section"><legend>${esc(title)}</legend>${title==='Engine'?modes:''}<div class="option-grid">${keys.map(k=>`<div class="opt-field" data-opt="${k}"${OPTION_FIELDS[k].modes?` data-modes="${OPTION_FIELDS[k].modes.join(' ')}"`:''}>${optionInput(k,values[k])}</div>`).join('')}</div>${title==='Experimental'?experimental:''}</fieldset>`).join('');
   $('#optionsForm').querySelectorAll('input[type=range]').forEach(r=>r.oninput=()=>{$(`#${r.id}-out`).textContent=`${r.value}%`;});
   $('#optionsForm').onchange=()=>updateOptionVisibility();
   updateOptionVisibility();
 }
-function selectedOptionMode() { return optionsState.media?'eager':$('#optionsForm input[name=optMode]:checked')?.value||optionsState.data.modes.find(m=>m.default)?.mode; }
+const optionModes=()=>optionsState.media?optionsState.data.media_modes:optionsState.data.modes;
+function selectedOptionMode() { return $('#optionsForm input[name=optMode]:checked')?.value||optionModes().find(m=>m.default)?.mode; }
 function updateOptionVisibility() {
   const mode=selectedOptionMode(), think=optionsState.data.think||{};
   $('#optionsForm').querySelectorAll('[data-modes]').forEach(x=>x.hidden=!x.dataset.modes.split(' ').includes(mode));
@@ -1326,8 +1328,8 @@ function updateOptionVisibility() {
   $('#optExperimentalNote').textContent=notes.join(' ');
 }
 function collectOptions() {
-  const d=optionsState.data, out={}, defaultMode=d.modes.find(m=>m.default)?.mode, mode=selectedOptionMode();
-  out.mode=optionsState.media||mode===defaultMode?null:mode;
+  const d=optionsState.data, out={}, defaultMode=optionModes().find(m=>m.default)?.mode, mode=selectedOptionMode();
+  out.mode=mode===defaultMode?null:mode;
   for(const [key,f] of Object.entries(OPTION_FIELDS)) {
     if(f.kind==='band'){const lo=$(`#opt-${key}-lo`)?.value, hi=$(`#opt-${key}-hi`)?.value;out[key]=!lo||!hi?d.defaults[key]:[Number(lo),Number(hi)];continue;}
     const el=$(`#opt-${key}`);
