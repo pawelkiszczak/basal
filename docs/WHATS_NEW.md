@@ -11,6 +11,15 @@
   [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
 - The `basal-ui` can expose the loaded models as an API server, with optional named API keys, CORS, decision logging,
   MCP and auto-load. [API server walkthrough](SERVING.md#serving-models-from-basal-ui)
+- **`basal-ui` community models**: the catalog adds the `pawelkiszczak` (basal-1.0 GGUF, MLX 8-bit, oMLX oQ6e) and
+  `agentGreg` (basal-1.5-mini MLX 6-bit, bf16) conversions, marked community; weights-only GGUF files are served with
+  their base repository's tokenizer and calibration. [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
+- **`basal-ui` model cards, presets, shortcuts, dark theme and update notices**: a card per model (provenance,
+  calibration, loaded entry, README), named load-option and request presets with export / import, Ctrl/⌘+Enter, Alt+1…9
+  and `?`, light / dark / system theme, a notice for a newer basal release and for new catalog models; load options
+  take a `revision`; calibration takes basal-calibrate's advanced controls (`--strict`, `--reference`, minimum counts,
+  `--report-only`, `--save-rows` and a `--from-rows` refit); results show `branches`, `second_order_branches` and
+  `lane`, loaded rows the prompt format, option orders and vLLM preset.
 - **`basal-ui` with several models**: load several models at once, all served on one API port where every request
   names its `"model"` (`GET /v1/models` lists them); a memory budget with a keep-free reserve refuses loads that do not
   fit and shows each model's resident memory; per-model statistics (requests, average best-answer probability,

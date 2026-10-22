@@ -228,7 +228,12 @@ for exploring, not serving: every question runs one extra forward per option ord
 
 `basal-ui` is a local web app in the style of LM Studio: it detects the machine, lists every basal model on Hugging
 Face with what this machine can do with it, downloads the one you choose, starts `basal-serve` for it and gives you a
-playground for decisions.
+playground for decisions. The catalog covers the official `Remek/basal-*` repositories and the community conversions
+of `pawelkiszczak` (basal-1.0 GGUF, MLX 8-bit and oMLX oQ6e) and `agentGreg` (basal-1.5-mini MLX 6-bit and bf16),
+marked **community**; suggestions use the official ones only. A weights-only GGUF conversion is served with the
+tokenizer, prompt format and calibration of its base repository (the model card's `base_model`, pinned to its
+`base_model_revision` when the card has one; `--model <base> --gguf <file>`), whose small metadata files are downloaded
+with it; one whose card names no base model is listed as not runnable.
 
 ```bash
 uv pip install "basal[ui,mlx]"        # [ui] adds FastAPI; add the engine extra of your machine (mlx, gguf, fp8, vllm)
@@ -242,7 +247,16 @@ Restart / Logs / Unload) above a memory budget bar, the recommended model for th
 disk and the API server; **Models**, **Model manager**, **Playground**, **API server**, **History** and **Logs** hold
 the features below. The menu's footer shows how many models are ready, their names, the API server's URL and an
 **Unload all** button. Deleting a model or revoking a key asks for confirmation in a dialog, and actions report their
-outcome in a short notification. On a narrow window the menu becomes a top bar.
+outcome in a short notification. On a narrow window the menu becomes a top bar. **ⓘ** on every model opens its model
+card: repository and author (base repository for a conversion), family, tier, port, size, media, the mode this machine
+would use and why, fit, the revisions in the cache, `basal.json`, the shipped calibration of the mode it is served in
+with its certified thresholds, the `GET /v1/models` entry of a loaded model (mode, option orders, prompt format, vLLM
+preset, context) and the README (of the `revision` load option when one is set). The menu's footer switches the theme
+(light, dark, or the system's). Keyboard: Ctrl/⌘+Enter sends the Playground decision, Alt+1…9 (Option+1…9 on macOS,
+any keyboard layout) opens the views in menu order, `?` lists the shortcuts. Overview says when a newer basal release
+is out (GitHub's latest release of rkinas/basal, checked at most every 6 hours, 10 minutes after a failed check) and
+when new models appeared in the Hugging Face catalog (the offline catalog of the models on disk does not count);
+**Check for updates** turns the release check off.
 
 - **Hardware.** NVIDIA GPU (name, compute capability, memory), Apple Silicon (MLX's recommended working set) or CPU
   (60% of RAM), the engines installed (`mlx`, `llama-cpp-python`, `vllm`, `media`), and the memory available now
@@ -300,8 +314,12 @@ embedding offload (`--eager-forward`, `--eager-attn`, `--ple-offload`), the exit
 orders and the `auto` band, batching, the state and prefix caches, the scheduler and long-request lane, the **context
 policy** (truncate the middle of the state, or refuse with 422; the share kept from the beginning; `--max-len`), the
 CUDA graph engine's kernel switches (`--gemma-attn`, `--merge`, `--lean`, `--tree`, `--batches`, `--readout-layer`,
-`--template-prefix`, `--fp8-accum`) and `--strict-calibration`. Each field shows only for the modes that read it. Only
-the values that differ from basal-serve's defaults are
+`--template-prefix`, `--fp8-accum`), `--strict-calibration` and a **revision** (a commit, tag or branch of the
+repository: downloaded and served as that snapshot, which calibration and Inspect then read too; a **revision** chip
+marks the model in the catalog and on its loaded row). Each field shows only for the modes that read it. **Presets**
+save a set of options under a name to apply to any model; the Playground saves requests the same way (**Saved
+requests** in the examples list), and both export to and import from one `presets.json`. Only the values that differ
+from basal-serve's defaults are
 passed, and a combination basal-serve refuses shows its own message on the model's row. **Remember for this model**
 keeps them for its next plain Load; a restart and auto-load reuse the options the model runs with. The row lists them
 as chips. **Experimental**: **Thinking** (`--think auto`, with the reasoning budget, and the Python of an environment
@@ -419,7 +437,12 @@ with its line before a model is loaded. The job's output is under **Logs → job
 with the shipped file (decisions per type, certified thresholds of the types and tasks, automation on CERT).
 **Import** copies a file fitted elsewhere (with its report next to it) into the list; one fitted on another model or
 revision shows basal-serve's warning. **Use** selects one for the model: basal-ui then starts its `basal-serve` with
-`--calibration FILE`, and a loaded model shows **Restart to apply**.
+`--calibration FILE`, and a loaded model shows **Restart to apply**. **Advanced** passes basal-calibrate's own
+controls: `--strict` with a `--reference`, `--min-per-type`, `--min-blend`, `--min-family`, `--min-per-set`,
+`--concurrency`, the file to compare with (shipped, none: `--no-calibration`, or a path; a path and a `--reference`
+file are checked before the run starts), `--report-only` (the run uses the same engine as a fit, the report opens, no
+file is written) and `--save-rows`, which keeps the uncalibrated probabilities next to the file; such a file gets
+**Refit**, a `--from-rows` fit on them without loading any model (no load options, no memory check).
 
 ### History and logs
 
