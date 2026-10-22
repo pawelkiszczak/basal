@@ -1,6 +1,7 @@
 """Exercise Make recipes with an argument-recording stub, without installing or launching basal."""
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,10 @@ class MakefileTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         directory = Path(self.temporary.name)
         self.stub = directory / "fake python"
-        self.stub.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+        self.stub.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -c "
+            "'import json, sys; print(json.dumps(sys.argv[1:]))' \"$@\"\n"
+        )
         self.stub.chmod(0o755)
         self.input = directory / "input with spaces.jsonl"
         self.input.write_text('{}\n')
@@ -80,6 +84,16 @@ class MakefileTest(unittest.TestCase):
                 result = self.command(target, **variables)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, "")
+
+    def test_interpreter_path_with_spaces(self):
+        environment = Path(self.temporary.name) / "venv with spaces"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(environment)], check=True)
+        result = subprocess.run(
+            [str(environment / "bin/python"), "-B", str(Path(__file__).resolve()),
+             "MakefileTest.test_modes_and_quoted_values"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
