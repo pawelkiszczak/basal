@@ -52,7 +52,8 @@ class MakefileTest(unittest.TestCase):
         self.assertEqual(self.arguments("bench"), ["-m", "basal.bench", "--model", "Remek/basal-1.0-4.5B"])
 
     def test_modes_and_quoted_values(self):
-        for mode in "eager fast fast-nocompile fast-exit fp8 nvfp4 vllm mlx mlx-q8 mps gguf ollama".split():
+        modes = "eager fast fast-nocompile fast-exit fp8 nvfp4 vllm sglang mlx mlx-q8 mps gguf strix tpu ollama llamacpp"
+        for mode in modes.split():  # basal.server.MODES (2.4.1)
             with self.subTest(mode=mode):
                 args = self.arguments("serve", MODE=mode, MODEL="owner's model; literal", GGUF=self.input,
                                       OLLAMA_MODEL="local import", HOST="127.0.0.1", PORT="8001",

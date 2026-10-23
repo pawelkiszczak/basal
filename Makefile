@@ -25,7 +25,7 @@ help:
 	  'make run      Batch requests to URL; requires INPUT and OUTPUT paths' \
 	  'make loadtest Load-test URL; optional INPUT contains simple JSONL questions' \
 	  'Variables: PYTHON UV EXTRAS MODEL MODE HOST PORT URL INPUT OUTPUT GGUF OLLAMA_MODEL ARGS' \
-	  'MODE: eager fast fast-nocompile fast-exit fp8 nvfp4 vllm mlx mlx-q8 mps gguf ollama' \
+	  'MODE: eager fast fast-nocompile fast-exit fp8 nvfp4 vllm sglang mlx mlx-q8 mps gguf strix tpu ollama llamacpp' \
 	  'GGUF mode requires GGUF=<file>; Ollama mode requires OLLAMA_MODEL=<import name>' \
 	  'ARGS appends CLI options (shell quoting applies); see README for setup and examples.'
 
