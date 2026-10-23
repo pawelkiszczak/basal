@@ -90,3 +90,7 @@ remain enabled. Incremental long-lane reuse can return when prefix extension sup
 These follow-up checks use the existing virtualenv, HTTP stubs and tiny local CPU models; no downloads or real GPU,
 browser, latency, or throughput acceptance was performed for these two fixes. The partial-prefix long-lane fallback
 trades incremental prefill speed for preserved scheduling. Publication remains with the coordinator.
+
+**Reverted:** the long-lane part of this follow-up. `GraphBackend.run_long` runs upstream's prefix extension
+(`_extend_states`) again, as in rkinas/basal, and `test_growing_state_in_long_lane_still_yields_and_matches_uncached_answers`
+is removed. The request validation above stays.
