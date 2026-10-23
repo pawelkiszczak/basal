@@ -7,6 +7,10 @@
   for the basal-omni-1.0 checkpoints that have encoders (`--mode eager`, or `--mode vllm` on an NVIDIA GPU with
   `basal[vllm]`).
   [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
+- **`basal-ui` on narrower windows and phones**: light, dark and system themes; a 212 px sidebar below 1280 px and a
+  top bar below 900 px whose menu scrolls to the open view; tables that scroll inside their card instead of squeezing
+  their columns (History shows the source under the model); form fields that shrink with their row; dialogs that fit a
+  390 px screen.
 - The `basal-ui` can expose the loaded models as an API server, with optional named API keys, CORS, decision logging,
   MCP and auto-load. [API server walkthrough](SERVING.md#serving-models-from-basal-ui)
 - **`basal-ui` community models**: the catalog adds the `pawelkiszczak` (basal-1.0 GGUF, MLX 8-bit, oMLX oQ6e) and
