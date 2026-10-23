@@ -2,6 +2,16 @@
 
 - Integrated upstream 2.3.1 through `621bc57004bde3df6cefa078e3421f21af7f795b`, including the facts fixes, while preserving fork authentication, Decisions, MCP, request IDs, and error envelopes. The UI adds CPU packed execution, Blackwell omni routing, opt-in MLX packed rows, graph-batch guidance, sampled child load counters, HTTP error diagnostics, and calibration completion warnings. See [Serving](SERVING.md#engine-integration-in-231) and [the release gate](E2E.md).
 
+- Integrated upstream 2.4.0 through `615fe32` (2.3.2-2.4.0). `basal-ui` follows it: **basal-omni-pico** (Qwen3.5,
+  text only) is in the catalog, with a "lightest" suggestion; its modes are basal-serve 2.4's: `fast` /
+  `fast-nocompile` on CUDA with flash-linear-attention (the default on Hopper), `eager` elsewhere, and `fast-exit`,
+  `fp8`, `nvfp4`, `mps` and MLX shown as unavailable with the reason, as are the graph-engine options 2.4 refuses for
+  it. `fp8` is unavailable below compute capability 8.9 before loading. The memory estimate of the CUDA graph engine
+  adds 4 GiB for graphs and compile workspace (2.3.3-2.3.5 measurements). The model card shows the repository's
+  quantisation (`config.json` `quantization_config` / `quantization`, `basal.json` `quantization` and `engine`, also
+  before download), the Apple recommendation points to `--mlx-packed`, text files are read and written as UTF-8, and
+  the memory of Windows hosts is read with `GlobalMemoryStatusEx`.
+
 - **`basal-ui`**, a local browser app (extra `basal[ui]`): detects the hardware and the memory available now,
   suggests models that fit (recommended, best quality, fastest, multimodal), lists every basal model with its fit and
   serving mode, downloads the model into a directory of your choice, lists and
