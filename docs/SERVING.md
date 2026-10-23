@@ -319,7 +319,10 @@ the reason — CUDA graph modes need an NVIDIA GPU, vLLM / SGLang their extra, M
 an AMD Strix Halo; Ollama and llama-server take the URL of the running service), quantisation, attention kernels,
 dtype, the vLLM preset, GPU share and KV-sharing fast prefill, the Gemma 4 eager forward, attention and per-layer
 embedding offload (`--eager-forward`, `--eager-attn`, `--ple-offload`), the exit heads directory, determinism, option
-orders and the `auto` band, batching, the state and prefix caches, the scheduler and long-request lane, the **context
+orders and the `auto` band, batching, the state and prefix caches, the scheduler and long-request lane, the **prompt
+layout** (`--layout canonical`, `state_twice` or `qfirst` for prompt-format-2 models trained on it; default: the
+model's basal.json; a non-canonical layout is refused with the state or prefix cache, and a loaded row shows it as a
+`layout` chip), the **context
 policy** (truncate the middle of the state, or refuse with 422; the share kept from the beginning; `--max-len`), the
 CUDA graph engine's kernel switches (`--gemma-attn`, `--merge`, `--lean`, `--tree`, `--batches`, `--readout-layer`,
 `--template-prefix`, `--fp8-accum`), `--strict-calibration` and a **revision** (a commit, tag or branch of the

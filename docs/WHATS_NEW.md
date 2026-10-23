@@ -12,6 +12,11 @@
   before download), the Apple recommendation points to `--mlx-packed`, text files are read and written as UTF-8, and
   the memory of Windows hosts is read with `GlobalMemoryStatusEx`.
 
+- Integrated upstream 2.4.1 through `b20f0f9` (one warm-up per CUDA graph, prompt layouts). `basal-ui` offers the
+  **prompt layout** in the load options (`--layout`; default: the model's basal.json), refuses a non-canonical layout
+  with the state or prefix cache before loading (basal-serve's own message), and shows it as a `layout` chip on the
+  loaded row and in the model card.
+
 - **`basal-ui`**, a local browser app (extra `basal[ui]`): detects the hardware and the memory available now,
   suggests models that fit (recommended, best quality, fastest, multimodal), lists every basal model with its fit and
   serving mode, downloads the model into a directory of your choice, lists and
