@@ -3,6 +3,11 @@ import json
 import sys
 
 
+def reject_constant(name):
+    """NaN, Infinity and -Infinity are accepted by json.loads, not by strict JSON readers."""
+    raise ValueError(f"{name} is not valid JSON")
+
+
 def main(filenames):
     failed = False
     for filename in filenames:
@@ -12,7 +17,7 @@ def main(filenames):
                     if not line.strip():  # The batch runner also skips blank lines.
                         continue
                     try:
-                        json.loads(line)
+                        json.loads(line, parse_constant=reject_constant)
                     except ValueError as error:
                         print(f"{filename}:{number}: {error}")
                         failed = True

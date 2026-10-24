@@ -453,7 +453,7 @@ torchao modes require compatible NVIDIA hardware. See [Serving modes](#serving-m
 ```bash
 make serve                                      # automatic backend selection
 make serve MODE=mlx MODEL=Remek/basal-1.0-1.5B
-make serve MODE=fast-nocompile HOST=127.0.0.1 PORT=8001
+make serve MODE=fast-nocompile PORT=8001
 make serve MODE=fast-exit ARGS='--early-exit 0.99'
 make serve MODE=gguf GGUF='/path with spaces/model.gguf'
 make serve MODE=ollama OLLAMA_MODEL=basal         # existing Ollama safetensors import
@@ -463,7 +463,8 @@ make bench ARGS='--modes eager-fp32 mps mlx --n 44'
 make loadtest INPUT=basal/examples/questions.jsonl ARGS='--n-seq 20 --n-conc 100'
 ```
 
-`MODE` selects one backend for `serve` or `bench`; omit it to retain the CLI's automatic defaults. The benchmark
+`MODE` selects one backend for `serve` or `bench`; omit it to retain the CLI's automatic defaults, as an empty `MODEL`
+keeps their default model. The benchmark
 also accepts its native modes such as `eager-fp32` and `fast-exit@0.99`. For multiple benchmark modes, use `ARGS`
 as above; provide `GGUF` and `OLLAMA_MODEL` when the list includes those backends. GGUF still uses `MODEL` for
 tokenizer/calibration, and Ollama requires a running service and a compatible import; see [hardware docs](docs/HARDWARE.md).
@@ -471,11 +472,14 @@ Required GGUF/Ollama values are checked early when selected through `MODE`; flag
 handled by the application. Serving or benchmarking can download and load models.
 
 `INPUT` and `OUTPUT` are required for `run`; they are optional for `bench` and `loadtest` (which otherwise use
-bundled simple questions). Output files are overwritten by the CLI. HTTP clients use
+bundled simple questions). Output files are overwritten by the CLI; an `OUTPUT` that is the `INPUT` file is refused
+before anything runs. HTTP clients use
 `URL=http://127.0.0.1:8000/v1/systemone` by default, follow `PORT` overrides, and require a running server.
-The server's default `HOST=0.0.0.0` listens on all interfaces; use `HOST=127.0.0.1` for local access only.
-Quote variable values containing spaces. `ARGS` is appended as shell command text for additional CLI options;
-use shell quoting inside it when an option value contains spaces. Inspect commands without launching with `make -n`.
+`make serve` listens on `HOST=127.0.0.1` (this machine only); `HOST=0.0.0.0` exposes the unauthenticated server on
+every interface.
+Quote variable values containing spaces. `ARGS` is appended as shell command text for additional CLI options, so
+pass only trusted text (as with any Make variable, it runs in the shell); use shell quoting inside it when an option
+value contains spaces. Inspect commands without launching with `make -n`.
 
 ## Development checks
 

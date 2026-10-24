@@ -25,6 +25,15 @@ class CheckJsonlTest(unittest.TestCase):
             self.assertIn(f"{bad}:2:", invalid.stdout)
             self.assertEqual(before, {path: path.read_bytes() for path in before})
 
+    def test_non_standard_constants_are_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for constant in ("NaN", "Infinity", "-Infinity"):
+                path = Path(directory) / f"{constant}.jsonl"
+                path.write_text(f'{{"gold": {constant}}}\n', encoding="utf-8")
+                result = subprocess.run([sys.executable, str(HOOK), str(path)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, constant)
+                self.assertIn(f"{path}:1: {constant} is not valid JSON", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

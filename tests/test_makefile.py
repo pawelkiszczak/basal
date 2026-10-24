@@ -47,9 +47,9 @@ class MakefileTest(unittest.TestCase):
                          ["pip", "install", "--python", str(self.stub), "-e", ".[test,mlx]"])
         self.assertEqual(self.arguments("check"), ["tool", "run", "pre-commit==4.7.0", "run", "--all-files"])
         self.assertEqual(self.arguments("test"), ["-m", "pytest"])
-        self.assertEqual(self.arguments("serve"), ["-m", "basal.server", "--model", "Remek/basal-1.0-4.5B",
-                                                   "--host", "0.0.0.0", "--port", "8000"])
-        self.assertEqual(self.arguments("bench"), ["-m", "basal.bench", "--model", "Remek/basal-1.0-4.5B"])
+        # MODEL empty: the CLIs pick their own default model; the server listens on this machine only
+        self.assertEqual(self.arguments("serve"), ["-m", "basal.server", "--host", "127.0.0.1", "--port", "8000"])
+        self.assertEqual(self.arguments("bench"), ["-m", "basal.bench"])
 
     def test_modes_and_quoted_values(self):
         modes = "eager fast fast-nocompile fast-exit fp8 nvfp4 vllm sglang mlx mlx-q8 mps gguf strix tpu ollama llamacpp"
@@ -80,6 +80,9 @@ class MakefileTest(unittest.TestCase):
         cases += [("run", {}), ("run", {"INPUT": self.input})]
         cases += [(target, {"INPUT": "missing.jsonl", "OUTPUT": "out.jsonl"})
                   for target in ("run", "bench", "loadtest")]
+        same = str(Path(self.input).parent / "." / Path(self.input).name)  # the input under another spelling
+        cases += [(target, {"INPUT": self.input, "OUTPUT": output})
+                  for target in ("run", "bench", "loadtest") for output in (str(self.input), same)]
         for target, variables in cases:
             with self.subTest(target=target, variables=variables):
                 result = self.command(target, **variables)
