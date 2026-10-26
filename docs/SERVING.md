@@ -143,6 +143,23 @@ your hardware (`basal-ui`), a look inside one decision with `basal-viz`, and ben
   elsewhere) and any other server error 500, all with `{"error": "..."}`. `GET /health` returns the requests in flight
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md).
+- **LoRA adapters:** `--adapter DIR` (basal-serve, basal-calibrate, basal-bench, the basal-ui load options) loads a
+  LoRA adapter with the model: an mlx-lm directory (`adapter_config.json` + `adapters.safetensors`) or a PEFT one
+  (`adapter_config.json` + `adapter_model.safetensors`; `use_rslora` read, DoRA and per-module ranks refused). The
+  served name is `<model>+<adapter>` unless `--name`; `GET /v1/models` reports `"adapter": "<name>@<sha256[:12]>"`.
+
+  | engine | adapter |
+  |---|---|
+  | `eager`, `mps`, `fast`, `fast-nocompile`, `fast-exit`, `fp8` / `nvfp4` (`--quant`), `strix`, `tpu` | merged into the bf16 weights at load, before the projection merge and any quantisation |
+  | `mlx`, `mlx-q8`, the `-MLX-8bit` exports | merged at load; a quantised export is dequantised, merged and re-quantised (mlx-lm's fuse) |
+  | `vllm`, `sglang` | served natively as one LoRA (untested on CUDA so far) |
+  | `gguf`, `ollama`, `llamacpp`, FP8 checkpoints (`-FP8`) | refused: `basal-fuse-adapter --model M --adapter DIR --out FUSED` writes the merged checkpoint, then `basal-export-gguf` |
+
+  The merge is mlx-lm's `LoRALinear.fuse` on every framework (`(scale · B) @ A` in fp32, added in the weight's dtype):
+  on basal-2.0-mini with a rank-16 adapter in 16 layers (112 linear layers), `--mode mlx --adapter` and
+  `basal-fuse-adapter` gave weights bit-identical to `mlx_lm fuse`. A calibration file in the adapter directory comes
+  before the model's; the model's own file is then loaded for its temperatures only
+  ([CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to)).
 
 ## API access
 

@@ -1,5 +1,12 @@
 # Unreleased (fork)
 
+- **LoRA adapters at load:** `--adapter DIR` (mlx-lm or PEFT) on basal-serve, basal-calibrate, basal-bench and the
+  basal-ui load options merges the adapter into the weights at load on every in-process engine (bit-identical to
+  `mlx_lm fuse` on basal-2.0-mini, also for the `-MLX-8bit` export), passes it natively to vLLM / SGLang and refuses it
+  with a message on GGUF / Ollama / llama.cpp and FP8 checkpoints, for which the new `basal-fuse-adapter` writes the
+  merged checkpoint. Calibration files carry `fitted_on.adapter`; the adapter directory's own file comes first.
+  [SERVING.md](SERVING.md#serving-modes), [CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to)
+
 - Integrated upstream 2.3.1 through `621bc57004bde3df6cefa078e3421f21af7f795b`, including the facts fixes, while preserving fork authentication, Decisions, MCP, request IDs, and error envelopes. The UI adds CPU packed execution, Blackwell omni routing, opt-in MLX packed rows, graph-batch guidance, sampled child load counters, HTTP error diagnostics, and calibration completion warnings. See [Serving](SERVING.md#engine-integration-in-231) and [the release gate](E2E.md).
 
 - Integrated upstream 2.4.0 through `615fe32` (2.3.2-2.4.0). `basal-ui` follows it: **basal-omni-pico** (Qwen3.5,
