@@ -1,3 +1,12 @@
+# Unreleased
+
+- **LoRA adapters at load:** `--adapter DIR` (mlx-lm or PEFT) on basal-serve, basal-calibrate and basal-bench merges
+  the adapter into the weights at load on every in-process engine (bit-identical to `mlx_lm fuse` on basal-2.0-mini,
+  also for the `-MLX-8bit` export), passes it natively to vLLM / SGLang and refuses it with a message on GGUF / Ollama /
+  llama.cpp and FP8 checkpoints, for which the new `basal-fuse-adapter` writes the merged checkpoint. Calibration files
+  carry `fitted_on.adapter`; the adapter directory's own file comes first.
+  [SERVING.md](SERVING.md#serving-modes), [CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to)
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture

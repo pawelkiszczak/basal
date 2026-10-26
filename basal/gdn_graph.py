@@ -33,6 +33,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from . import adapter as adapter_module
 from .engine import GraphBackend, PREFILL, _copy_same, set_attention
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
@@ -401,7 +402,7 @@ class GDNGraphBackend(GraphBackend):
 
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
-                 readout_layer="off", template="off", gemma_attn="auto"):
+                 readout_layer="off", template="off", gemma_attn="auto", adapter=None):
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)  # before loading
         if why:
             raise ValueError(f"{model_dir}: {why}")
@@ -414,6 +415,7 @@ class GDNGraphBackend(GraphBackend):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype))
+        self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0  # --adapter
         self.model = self.model.to("cuda" if cuda else "cpu").eval()
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL

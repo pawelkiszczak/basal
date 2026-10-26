@@ -23,20 +23,23 @@ from pathlib import Path
 
 import torch
 
+from . import adapter as adapter_module
 from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend, MLXBackend,
                      MPSBackend, OllamaBackend, SGLangBackend, VLLMBackend, resolve)
 from .prompt import letter_ids, max_options, model_format, render
-from .server import MODES, default_mode
+from .server import MODES, adapter_refused, default_mode
 
 GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: --model gives tokenizer and calibration
 
 
 def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="http://127.0.0.1:11434",
-          llamacpp_url="http://127.0.0.1:8080", fmt=1, mlx_packed=False):
+          llamacpp_url="http://127.0.0.1:8080", fmt=1, mlx_packed=False, adapter=None):
+    """adapter: a LoRA adapter (basal.adapter.read) merged at load / served natively (main refuses the GGUF kinds)."""
+    ad = dict(adapter=adapter)
     if mode == "eager-fp32":
-        return EagerBackend(md, "float32")
+        return EagerBackend(md, "float32", **ad)
     if mode.startswith("fast-exit@"):
-        return ExitGraphBackend(md, "bfloat16", compile=True, default_policy=mode.split("@")[1])
+        return ExitGraphBackend(md, "bfloat16", compile=True, default_policy=mode.split("@")[1], **ad)
     if mode == "gguf" or mode.startswith("gguf@"):
         path = mode.split("@", 1)[1] if "@" in mode else gguf
         if not path:
@@ -44,30 +47,30 @@ def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="h
         return GGUFBackend(md, path)
     if mode in ("tpu", "tpu-fp32"):  # Google TPU (basal[tpu]); tpu-fp32: the same engine in fp32 (parity reference)
         from .tpu import TPUBackend
-        return TPUBackend(md, "float32" if mode == "tpu-fp32" else "bfloat16", warm=False)
+        return TPUBackend(md, "float32" if mode == "tpu-fp32" else "bfloat16", warm=False, **ad)
     if mode.startswith("vllm@"):  # vllm@<preset>: basal-serve --mode vllm --vllm-preset <preset>
-        return VLLMBackend(vllm_model or md, max_options=max_options(fmt), preset=mode.split("@", 1)[1])
+        return VLLMBackend(vllm_model or md, max_options=max_options(fmt), preset=mode.split("@", 1)[1], **ad)
     kind, quant, comp = MODES[mode]
     if kind == "eager":
-        return EagerBackend(md, "bfloat16")
+        return EagerBackend(md, "bfloat16", **ad)
     if kind == "vllm":
-        return VLLMBackend(vllm_model or md, max_options=max_options(fmt))
+        return VLLMBackend(vllm_model or md, max_options=max_options(fmt), **ad)
     if kind == "sglang":
-        return SGLangBackend(md)
+        return SGLangBackend(md, **ad)
     if kind == "mlx":
-        return MLXBackend(md, quant=quant, packed=mlx_packed)
+        return MLXBackend(md, quant=quant, packed=mlx_packed, **ad)
     if kind == "mps":
-        return MPSBackend(md, "bfloat16")
+        return MPSBackend(md, "bfloat16", **ad)
     if kind == "ollama":
         return OllamaBackend(md, ollama_url, ollama_model)
     if kind == "llamacpp":
         return LlamaCppBackend(md, llamacpp_url)
     if kind == "strix":
         from .strix import StrixHaloFastBackend
-        return StrixHaloFastBackend(md, "bfloat16")
+        return StrixHaloFastBackend(md, "bfloat16", **ad)
     if kind == "exit":
-        return ExitGraphBackend(md, "bfloat16", quant, compile=comp)
-    return GraphBackend(md, "bfloat16", quant, compile=comp, shared=True)
+        return ExitGraphBackend(md, "bfloat16", quant, compile=comp, **ad)
+    return GraphBackend(md, "bfloat16", quant, compile=comp, shared=True, **ad)
 
 
 def default_modes(model=None):
@@ -210,6 +213,7 @@ def measure(be, groups, lat_n):
                      lat2_p95_ms=two[int(0.95 * len(two))] * 1000, dec_s=len(chunk) / t)
 
 
+
 def main():
     import sys
     if "--identity" in sys.argv[1:]:  # the identity gate of the fast path (basal/identity.py)
@@ -218,6 +222,7 @@ def main():
         return 0 if all(r["gate"] == "pass" for r in rows) else 1  # the exit status of basal-bench --identity
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Remek/basal-1.5-4.5B")
+    ap.add_argument("--adapter", default=None, help="LoRA adapter directory, as basal-serve --adapter")
     ap.add_argument("--vllm-model", dest="vllm_model", default=None, help="checkpoint for --modes vllm (e.g. the NVFP4 repo)")
     ap.add_argument("--gguf", default=None, help="GGUF weights for --modes gguf (several files: gguf@<file> per mode)")
     ap.add_argument("--ollama-model", dest="ollama_model", default=None, help="Ollama model name for --modes ollama")
@@ -239,6 +244,10 @@ def main():
                     help="mlx modes: the packed forward of short Llama groups (basal-serve --mlx-packed)")
     a = ap.parse_args()
     a.modes = a.modes or default_modes(a.model)
+    adapter = adapter_module.read(a.adapter) if a.adapter else None
+    for m in a.modes if adapter else ():  # before anything is loaded
+        if MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS:
+            raise SystemExit(adapter_refused(adapter.name, f"--modes {m}"))
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)
@@ -247,7 +256,7 @@ def main():
     for mode in a.modes:
         reset_memory()
         t0 = time.time()
-        be = build(mode, md, vm, a.gguf, a.ollama_model, a.ollama_url, a.llamacpp_url, fmt, a.mlx_packed)
+        be = build(mode, md, vm, a.gguf, a.ollama_model, a.ollama_url, a.llamacpp_url, fmt, a.mlx_packed, adapter)
         load_s = time.time() - t0
         groups = groups_for(be.tok, qs, fmt)
         dec, r = measure(be, groups, min(a.lat_n, len(groups) - 5))
