@@ -37,6 +37,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from . import adapter as adapter_module
 from .prompt import PREFILL, RequestError
 
 
@@ -110,7 +111,7 @@ class EagerBackend:
     sdpa_kernels = None  # eager_sdpa_kernels: the SDPA kernels of the transformers forward (None: every enabled one)
 
     def __init__(self, model_dir, dtype="bfloat16", device=None, media=False, forward=None, ple_offload=False,
-                 attn="math"):
+                 attn="math", adapter=None):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.padding_side = "left"
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
@@ -132,6 +133,7 @@ class EagerBackend:
             _memo_media(self.proc)
         self.lock, self.media_lock = threading.Lock(), threading.Lock()
         self.model = cls.from_pretrained(model_dir, dtype=getattr(torch, dtype))
+        self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0  # --adapter
         if ple_offload:  # --ple-offload on (Gemma 4 E2B / E4B): the per-layer embedding table stays in host memory
             from .gemma4 import offload_ple
             if not offload_ple(self.model):
@@ -960,7 +962,7 @@ class GraphBackend(EagerBackend):
 
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
-                 readout_layer="off", template="off", gemma_attn="auto"):
+                 readout_layer="off", template="off", gemma_attn="auto", adapter=None):
         what = recurrent_layers(model_dir)  # before anything is loaded
         if what:
             from .gdn_graph import is_gdn
@@ -989,11 +991,16 @@ class GraphBackend(EagerBackend):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         if self.fp8_checkpoint:
+            if adapter:
+                raise ValueError(f"--adapter {adapter.name}: {model_dir} is an FP8 checkpoint; its weights cannot take "
+                                 "a merge, serve the bf16 repository with --quant fp8")
             if quant not in (None, "fp8"):
                 raise ValueError(f"{model_dir} is an FP8 checkpoint; serve it without --quant {quant}")
             self.model, quant = load_modelopt_fp8(model_dir, "cuda", getattr(torch, dtype)), None
         else:
             self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).cuda().eval()
+        # --adapter: merged before the projection merge and the torchao quantisation
+        self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL
         if gemma4_graph.is_gemma4(self.model):
@@ -2445,8 +2452,9 @@ class ExitGraphBackend(GraphBackend):
     BATCHES = [1, 2, 4, 8, 16, 32]
 
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, heads_dir=None, default_policy="off",
-                 attn="auto", merge="auto"):
-        super().__init__(model_dir, dtype, quant, compile=False, shared=True, warm=False, attn=attn, merge=merge)
+                 attn="auto", merge="auto", adapter=None):
+        super().__init__(model_dir, dtype, quant, compile=False, shared=True, warm=False, attn=attn, merge=merge,
+                         adapter=adapter)
         hd = Path(heads_dir) if heads_dir else Path(model_dir) / "exit_heads"
         ck = torch.load(hd / "heads.pt", map_location="cpu")
         th = json.loads((hd / "thresholds.json").read_text(encoding="utf-8"))
@@ -2565,14 +2573,14 @@ class MPSBackend(GraphBackend):
 
     streams, inflight = False, 1  # its own run_shared: no early readouts, one call at a time
 
-    def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None):
+    def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None, adapter=None):
         what = recurrent_layers(model_dir) if shared else None  # without sharing: EagerBackend's forwards (exact)
         if what:
             from .gdn_graph import is_gdn
             raise ValueError(recurrent_refused(model_dir, what, is_gdn(model_dir)))
         mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
         device = device or ("mps" if mps else "cpu")
-        EagerBackend.__init__(self, model_dir, dtype, device)
+        EagerBackend.__init__(self, model_dir, dtype, device, adapter=adapter)
         self.dev = torch.device(device)
         self.shared = shared
         self._wrows = {}
@@ -2673,9 +2681,10 @@ class VLLMBackend:
     LOGPROB_TOKEN_IDS = 128  # longest logprob_token_ids list vLLM accepts
     lock = threading.Lock()  # one vLLM call at a time (text batches and media requests); a class default for tests
     media_kinds, max_audio_s = (), None
+    lora = None  # --adapter: the LoRARequest of every call (a class default for tests)
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, max_options=10, preset="default",
-                 fast_prefill=True, media=False):
+                 fast_prefill=True, media=False, adapter=None):
         cfg_file = Path(model_dir) / "config.json"
         cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
         kw, env = vllm_args(cfg, preset, media=media, fast_prefill=fast_prefill)
@@ -2698,9 +2707,15 @@ class VLLMBackend:
         self.prefill = PREFILL
         self.preset, self.engine_args, self.lock = preset, kw, threading.Lock()
         from vllm import LLM
+        self.lora, lora_kw = None, {}
+        if adapter:  # --adapter: served natively as one LoRA (unverified on CUDA — keyword names from vLLM's API docs)
+            from vllm.lora.request import LoRARequest
+            self.lora = LoRARequest("adapter", 1, str(adapter_module.peft_dir(adapter)))
+            lora_kw = dict(enable_lora=True, max_loras=1, max_lora_rank=max(8, 1 << (adapter.rank - 1).bit_length()))
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
         self.llm = LLM(**{**dict(model=str(model_dir), dtype=dtype, gpu_memory_utilization=mem, max_model_len=max_len,
                                  enable_prefix_caching=True, logprobs_mode="processed_logprobs",
-                                 max_logprobs=max(16, max_options)), **kw})
+                                 max_logprobs=max(16, max_options)), **kw, **lora_kw})
         self.context = max_len - 1  # longest prompt: max_model_len holds the one generated token too
         self.context_reason = f"vLLM's --max-len {max_len}"
 
@@ -2719,7 +2734,7 @@ class VLLMBackend:
                                  else {}))
                for ids in ids_list]
         with self.lock:
-            outs = self.llm.generate(reqs, sps, use_tqdm=False)
+            outs = self.llm.generate(reqs, sps, use_tqdm=False, **(dict(lora_request=self.lora) if self.lora else {}))
         res = []
         for o, ids in zip(outs, ids_list):
             lp = o.outputs[0].logprobs[0]
@@ -2763,13 +2778,19 @@ class SGLangBackend:
     at the answer position (`token_ids_logprob`), and the softmax over them equals the readout of the other backends
     (a softmax over a subset of log-softmax values is the softmax over the same logits). RadixAttention shares the
     state between the option orders of one question and between the questions of one request."""
+    lora = False  # --adapter: every call names the LoRA (a class default for tests)
 
-    def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096):
+    def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, adapter=None):
         import sglang
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
+        # --adapter: served natively as one LoRA (unverified on CUDA — argument names from SGLang's LoRA docs)
+        lora_kw = dict(enable_lora=True, lora_paths=[f"adapter={adapter_module.peft_dir(adapter)}"],
+                       max_loras_per_batch=1) if adapter else {}
+        self.lora = adapter is not None
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
         self.llm = sglang.Engine(model_path=str(model_dir), dtype=dtype, mem_fraction_static=mem,
-                                 context_length=max_len, log_level="error")
+                                 context_length=max_len, log_level="error", **lora_kw)
         self.context = max_len - 1  # longest prompt: the context holds the one generated token too
         self.context_reason = f"SGLang's --max-len {max_len}"
 
@@ -2783,7 +2804,8 @@ class SGLangBackend:
         enc = [list(ids) for ids in EagerBackend.encode(self, prompts)]
         outs = self.llm.generate(input_ids=enc, sampling_params=[{"max_new_tokens": 1, "temperature": 0.0}] * len(enc),
                                  return_logprob=True, logprob_start_len=-1,
-                                 token_ids_logprob=[list(ids) for ids in ids_list])
+                                 token_ids_logprob=[list(ids) for ids in ids_list],
+                                 **(dict(lora_path=["adapter"] * len(enc)) if self.lora else {}))
         return [torch.softmax(torch.tensor(self._letters(o["meta_info"], ids), dtype=torch.float32), -1).tolist()
                 for o, ids in zip(outs, ids_list)]
 
@@ -2862,18 +2884,20 @@ class MLXBackend:
     # (TOKEN_BUDGET) gave 9-11% fewer decisions/s than chunks of 2,048 tokens (44 bench examples, two orders)
     CACHE_BYTES = 2 << 30  # MLX buffer cache limit (and wired headroom above the weights)
 
-    def __init__(self, model_dir, max_rows=None, quant=None, packed=False):
+    def __init__(self, model_dir, max_rows=None, quant=None, packed=False, adapter=None):
         from concurrent.futures import ThreadPoolExecutor
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
         self.max_rows = max_rows or self.MAX_ROWS
-        self.pool.submit(self._load, Path(model_dir), quant, packed).result()
+        self.pool.submit(self._load, Path(model_dir), quant, packed, adapter).result()
 
-    def _load(self, md, quant=None, packed=False):
+    def _load(self, md, quant=None, packed=False, adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
-        load time from bf16 weights (the embeddings and the LM head stay bf16); the -MLX-8bit exports need no quant."""
+        load time from bf16 weights (the embeddings and the LM head stay bf16); the -MLX-8bit exports need no quant.
+        adapter: a LoRA adapter merged into the loaded weights (bf16, or dequantised and re-quantised for an export),
+        before q8."""
         import mlx.core as mx
         from mlx_lm.utils import load_model
         self.mx = mx
@@ -2882,6 +2906,7 @@ class MLXBackend:
             raise ValueError(f"unknown MLX quantisation {quant!r} (q8)")
         # lazy for q8: the weights are materialised once, after quantisation (never the full bf16 copy)
         self.model, self.config = load_model(md, lazy=bool(quant), model_config=mlx_config_overrides(cfg))
+        self.adapter_modules = adapter_module.merge_mlx(self.model, adapter) if adapter else 0  # --adapter
         # the final logit softcap of the decoder (Gemma) is applied to the fp32 code logits
         self.softcap = getattr(self.lm.args, "final_logit_softcapping", None)
         self.quantization = self.config.get("quantization")
