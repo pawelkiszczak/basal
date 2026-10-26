@@ -61,14 +61,44 @@ def test_both_formats_read_to_the_same_deltas(tmp_path):
     assert rs.scale == pytest.approx(4 / math.sqrt(2))
     assert mlx.identity == adapter_module.identity(tmp_path / "m") and mlx.identity.startswith("m@")
     assert len(mlx.identity) == len("m@") + 12 and mlx.identity != adapter_module.identity(tmp_path / "p")
+    rescaled = write_adapter(tmp_path / "x" / "m", "mlx", ds, scale=4.0)  # same name and weights, another scale
+    assert adapter_module.identity(rescaled) != mlx.identity
+
+
+def test_peft_dir_round_trips_an_mlx_adapter(tmp_path):
+    ds = deltas()
+    mlx = adapter_module.read(write_adapter(tmp_path / "m", "mlx", ds, scale=3.0))
+    out = adapter_module.peft_dir(mlx)
+    assert out.name.startswith("basal-adapter-")
+    cfg = json.loads((out / "adapter_config.json").read_text(encoding="utf-8"))
+    assert (cfg["r"], cfg["lora_alpha"], cfg["target_modules"]) == (2, 6.0, ["down_proj", "q_proj"])
+    back = adapter_module.read(out)
+    assert (back.fmt, back.scale, back.deltas.keys()) == ("peft", 3.0, mlx.deltas.keys())
+    assert all(np.array_equal(x, y) for k in ds for x, y in zip(back.deltas[k], mlx.deltas[k]))
+    peft = adapter_module.read(write_adapter(tmp_path / "p", "peft", ds))
+    assert adapter_module.peft_dir(peft) == peft.path  # its own directory, keys as trained
+    mm = tmp_path / "omni"
+    mm.mkdir()
+    (mm / "config.json").write_text(json.dumps({"text_config": {}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="multimodal"):
+        adapter_module.peft_dir(mlx, mm)
 
 
 def test_framework_prefixes_are_canonical():
     for key in ("model.layers.16.self_attn.q_proj", "base_model.model.model.layers.16.self_attn.q_proj",
                 "language_model.model.layers.16.self_attn.q_proj"):
         assert adapter_module.canonical(key) == "layers.16.self_attn.q_proj"
-    with pytest.raises(SystemExit, match="lm_head"):
+    with pytest.raises(ValueError, match="lm_head"):
         adapter_module.canonical("lm_head")
+
+
+def test_tensors_outside_the_decoder_layers_are_refused(tmp_path):
+    ad = write_adapter(tmp_path / "head", "peft", {"layers.0.self_attn.q_proj": deltas()[Q]})
+    t = load_file(str(ad / "adapter_model.safetensors"))
+    t = {k.replace("model.layers.0.self_attn.q_proj", "lm_head"): v for k, v in t.items()}
+    save_file(t, str(ad / "adapter_model.safetensors"))
+    with pytest.raises(SystemExit, match=r"--adapter head: .*lm_head: not a module of a decoder layer"):
+        adapter_module.read(ad)
 
 
 def test_what_cannot_be_merged_is_refused_naming_the_directory(tmp_path):
@@ -102,6 +132,19 @@ def test_torch_merge_adds_the_scaled_delta_in_the_weight_dtype(tmp_path):
         assert torch.equal(after[name], before[name] + ((2.0 * b) @ a).to(torch.bfloat16))
     assert all(torch.equal(after[k], v) for k, v in before.items() if k not in (f"model.{Q}.weight",
                                                                                f"model.{DOWN}.weight"))
+
+
+def test_torch_merge_finds_the_decoder_of_a_multimodal_wrapper(tmp_path):
+    m = tiny_llama(tmp_path / "model")
+    ad = adapter_module.read(write_adapter(tmp_path / "ad", "peft", deltas()))
+    wrapper = torch.nn.Module()  # Gemma 4 style: model.model.language_model.layers
+    wrapper.model = torch.nn.Module()
+    wrapper.model.language_model = m.model
+    w0 = m.model.layers[1].self_attn.q_proj.weight.detach().clone()
+    assert adapter_module.merge_torch(wrapper, ad) == 2
+    assert not torch.equal(m.model.layers[1].self_attn.q_proj.weight, w0)
+    with pytest.raises(SystemExit, match="--adapter ad: the model has no decoder layers"):
+        adapter_module.merge_torch(torch.nn.Linear(2, 2), ad)
 
 
 def test_shape_mismatch_and_unknown_modules_are_refused(tmp_path):
@@ -146,7 +189,15 @@ def _mlx_fused(path, adapter_dir, quantize=False):
     return model
 
 
-@pytest.mark.parametrize("quantize", [False, True], ids=["bf16", "8bit"])
+def _module(model, key):
+    _, n, rest = key.split(".", 2)
+    mod = model.model.layers[int(n)]
+    for attr in rest.split("."):
+        mod = getattr(mod, attr)
+    return mod
+
+
+@pytest.mark.parametrize("quantize", [False, True], ids=["full", "8bit"])
 def test_mlx_merge_equals_mlx_lm_fuse_bit_for_bit(tmp_path, quantize):
     mx = pytest.importorskip("mlx.core")
     import mlx.nn as nn
@@ -155,15 +206,36 @@ def test_mlx_merge_equals_mlx_lm_fuse_bit_for_bit(tmp_path, quantize):
     be = mlx_stub(tmp_path / "model")
     if quantize:  # an -MLX-8bit export: dequantised, merged, re-quantised
         nn.quantize(be.model, group_size=64, bits=8)
-    assert adapter_module.merge_mlx(be.model, adapter_module.read(ad_dir)) == 2
+    w0 = {key: _module(be.model, key).weight for key in (Q, DOWN)}
+    ad = adapter_module.read(ad_dir)
+    assert adapter_module.merge_mlx(be.model, ad) == 2
     ref = _mlx_fused(tmp_path / "model", ad_dir, quantize)
     for key in (Q, DOWN):
-        _, n, rest = key.split(".", 2)
-        mine, theirs = be.model.model.layers[int(n)], ref.model.layers[int(n)]
-        for attr in rest.split("."):
-            mine, theirs = getattr(mine, attr), getattr(theirs, attr)
+        mine, theirs = _module(be.model, key), _module(ref, key)
         assert type(mine) is type(theirs) is (nn.QuantizedLinear if quantize else nn.Linear)
         for p in ("weight", "scales", "biases") if quantize else ("weight",):
+            assert mx.array_equal(getattr(mine, p), getattr(theirs, p))
+        if not quantize:  # the formula itself, independent of mlx-lm: w + (scale * b) @ a
+            want = np.array(w0[key]) + adapter_module.delta(ad, key)
+            np.testing.assert_allclose(np.array(mine.weight), want, rtol=1e-5, atol=1e-6)
+
+
+def test_mlx_q8_quantises_the_merged_weights(tmp_path):
+    mx = pytest.importorskip("mlx.core")
+    import mlx.nn as nn
+    tiny_llama(tmp_path / "model")
+    ad = adapter_module.read(write_adapter(tmp_path / "ad", "mlx", deltas()))
+    q8 = mlx_stub(tmp_path / "model")  # --mode mlx-q8: a lazy load, the merge, then q8
+    q8.pool.submit(q8._load, tmp_path / "model", "q8", False, ad).result()
+    ref = mlx_stub(tmp_path / "model")  # the eager load merged, then quantised as MLXBackend's q8
+    adapter_module.merge_mlx(ref.model, ad)
+    nn.quantize(ref.model, group_size=64, bits=8, class_predicate=lambda path, m: isinstance(m, nn.Linear)
+                and path.startswith("model.layers."))
+    assert q8.adapter_modules == 2
+    for key in (Q, DOWN):
+        mine, theirs = _module(q8.model, key), _module(ref.model, key)
+        assert isinstance(mine, nn.QuantizedLinear)
+        for p in ("weight", "scales", "biases"):
             assert mx.array_equal(getattr(mine, p), getattr(theirs, p))
 
 
@@ -237,16 +309,75 @@ def test_fuse_adapter_writes_a_merged_checkpoint(tmp_path, monkeypatch, capsys):
     (md / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     (md / "CALIBRATION.json").write_text("{}", encoding="utf-8")  # the base model's: not the merged model's
     ad = write_adapter(tmp_path / "edu", "peft", deltas())
-    (ad / "CALIBRATION.json").write_text('{"adapter": 1}', encoding="utf-8")
+    ident = adapter_module.identity(ad)
+    fitted = {"model": "Remek/basal", "revision": "0123456789abcdef", "adapter": ident, "data": "cal.jsonl"}
+    (ad / "CALIBRATION.json").write_text(json.dumps(dict(SHIPPED, fitted_on=fitted)), encoding="utf-8")
+    stale = dict(fitted, adapter="edu@000000000000")  # fitted with an older version of the adapter
+    (ad / "CALIBRATION.mlx.json").write_text(json.dumps(dict(SHIPPED, fitted_on=stale)), encoding="utf-8")
     out = tmp_path / "fused"
     monkeypatch.setattr(sys, "argv", ["basal-fuse-adapter", "--model", str(md), "--adapter", str(ad), "--out", str(out)])
     adapter_module.main()
-    assert f"fused 2 layers of edu into {out}" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert f"fused 2 layers of edu into {out}" in printed and "CALIBRATION.mlx.json was fitted with another" in printed
     adapter_module.merge_torch(m, adapter_module.read(ad))
     fused = AutoModelForCausalLM.from_pretrained(out, dtype=torch.bfloat16)
     for k, v in m.state_dict().items():
         assert torch.equal(fused.state_dict()[k], v), k
-    assert (out / "tokenizer_config.json").exists()
-    assert json.loads((out / "CALIBRATION.json").read_text(encoding="utf-8")) == {"adapter": 1}
+    assert (out / "tokenizer_config.json").exists() and not (out / "CALIBRATION.mlx.json").exists()
+    cal = json.loads((out / "CALIBRATION.json").read_text(encoding="utf-8"))
+    assert cal["fitted_on"] == {"model": "fused", "data": "cal.jsonl", "fused_from": f"Remek/basal@0123456789ab+{ident}"}
+    assert cal["thresholds"] == SHIPPED["thresholds"]
+    # served as its own model, the copied file belongs to it
+    assert server_module.calibration_mismatch(cal, str(out), out) is None
     with pytest.raises(SystemExit, match="not empty"):
         adapter_module.main()
+    monkeypatch.setattr(sys, "argv", ["basal-fuse-adapter", "--model", str(md), "--adapter", str(ad), "--out",
+                                      str(md / "config.json")])
+    with pytest.raises(SystemExit, match="not a directory"):
+        adapter_module.main()
+
+
+class _ProbeTok:
+    def __call__(self, text):
+        return {"input_ids": [ord(c) % 64 for c in text]}
+
+
+@pytest.mark.parametrize("applied", [True, False])
+def test_vllm_refuses_to_start_when_the_lora_changes_nothing(monkeypatch, applied):
+    from types import ModuleType, SimpleNamespace
+
+    from basal.engine import VLLMBackend
+    vllm, inputs = ModuleType("vllm"), ModuleType("vllm.inputs")
+    vllm.SamplingParams = lambda **kw: kw
+    inputs.TokensPrompt = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "vllm", vllm)
+    monkeypatch.setitem(sys.modules, "vllm.inputs", inputs)
+
+    class LLM:
+        def generate(self, req, sp, use_tqdm=False, lora_request=None):
+            lp = -0.5 if lora_request and applied else -0.7
+            return [SimpleNamespace(outputs=[SimpleNamespace(logprobs=[{7: SimpleNamespace(logprob=lp)}])])]
+    be = VLLMBackend.__new__(VLLMBackend)
+    be.tok, be.llm, be.lora = _ProbeTok(), LLM(), object()
+    if applied:
+        be._check_lora()
+    else:
+        with pytest.raises(SystemExit, match="vLLM answered the probe prompt with and without the LoRA identically"):
+            be._check_lora()
+
+
+@pytest.mark.parametrize("applied", [True, False])
+def test_sglang_refuses_to_start_when_the_lora_changes_nothing(applied):
+    from basal.engine import SGLangBackend
+
+    class Engine:
+        def generate(self, lora_path=None, **kw):
+            lp = -0.5 if lora_path == ["adapter"] and applied else -0.7
+            return [{"meta_info": {"output_top_logprobs": [[(lp, 7, "x")]]}}]
+    be = SGLangBackend.__new__(SGLangBackend)
+    be.tok, be.llm, be.lora = _ProbeTok(), Engine(), True
+    if applied:
+        be._check_lora()
+    else:
+        with pytest.raises(SystemExit, match="SGLang answered the probe prompt"):
+            be._check_lora()

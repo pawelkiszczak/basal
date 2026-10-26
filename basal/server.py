@@ -620,6 +620,12 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
     return {"models": [entry]}
 
 
+def adapter_refused(name, mode):
+    """Why an engine that serves weights basal cannot touch refuses --adapter (basal-serve, basal-bench)."""
+    return (f"--adapter {name}: {mode} serves weights the engine cannot merge into (a GGUF file / another process); "
+            "fuse them with basal-fuse-adapter and convert with basal-export-gguf")
+
+
 def refuse_layout_caches(layout, a):
     """--state-cache-gb and --prefix-cache cache the prompt up to the end of the state, which only the canonical layout
     starts with."""
@@ -679,7 +685,8 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     for its temperatures without its thresholds, fitted fallback thresholds and task thresholds (max_error defers,
     tasks report automated: null), and the answers are marked unvalidated. An explicit --calibration file is not replaced.
     adapter (--adapter): the adapter directory's own files come first; the model's file is the base model's, kept the
-    same way as a file of other orders."""
+    same way as a file of other orders. An explicit --calibration file is applied as it is under an adapter too (it may
+    be fitted with one); calibration_mismatch checks its fitted_on.adapter."""
     layout = layout or "canonical"
     cal = calibration_file(md, kind, path, quant, preset, layout, adapter.path if adapter else None)
     data = {} if off or not cal.exists() else json.loads(cal.read_text(encoding="utf-8"))
@@ -760,9 +767,7 @@ class Server:
         # --adapter: read (and refused when it is not a plain LoRA) before any weights are downloaded
         self.adapter = adapter_module.read(a.adapter) if getattr(a, "adapter", None) else None
         if self.adapter and kind in ("gguf", "ollama", "llamacpp"):
-            raise SystemExit(f"--adapter {self.adapter.name}: --mode {a.mode} serves weights the engine cannot merge "
-                             "into (a GGUF file / another process); fuse them with basal-fuse-adapter and convert with "
-                             "basal-export-gguf")
+            raise SystemExit(adapter_refused(self.adapter.name, f"--mode {a.mode}"))
         if kind == "gguf" and not a.gguf:
             raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
         if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
@@ -873,6 +878,8 @@ class Server:
                                         readout_layer=getattr(a, "readout_layer", "off"),
                                         template=getattr(a, "template_prefix", "off"),
                                         gemma_attn=getattr(a, "gemma_attn", "auto"), adapter=self.adapter)
+        if self.adapter:  # every backend has consumed the factors (merged, or written to its PEFT directory)
+            self.adapter.deltas.clear()
         self.tok = self.backend.tok
         self.states_cached = bool(getattr(a, "state_cache_gb", 0))  # --state-cache-gb: requests are cut at their state
         model = getattr(self.backend, "model", None)  # evidence head: needs the in-process HF model
@@ -883,12 +890,10 @@ class Server:
                                                                 a.no_calibration, getattr(a, "vllm_preset", None),
                                                                 self.layout, self.adapter)
         check_calibration(self.cal, self.fmt, cal)
+        self.cal_file = cal if self.cal else None  # named in the start-up line
         # a file of your own (--calibration) or the adapter's (fitted with an adapter); the files in the model directory
         # belong to it
-        from_adapter = bool(self.adapter) and cal.parent == self.adapter.path and not a.no_calibration
-        if from_adapter:
-            print(f"basal: calibration {cal} (the adapter's)", flush=True)
-        own = a.calibration or from_adapter
+        own = a.calibration or (bool(self.adapter) and cal.parent == self.adapter.path)
         self.cal_mismatch = calibration_mismatch(self.cal, a.model, md, self.adapter) if own and not a.no_calibration \
             else None
         if self.cal_mismatch:
@@ -1790,7 +1795,8 @@ def main():
     rows = getattr(srv.backend, "compact_kernel", None)
     info = (f" attention {attn}" if attn else "") + (f" compact rows {rows}" if rows else "") \
         + (" template prefix" if rows and getattr(srv.backend, "template", None) else "") \
-        + (f" adapter {srv.adapter.name} ({srv.backend.adapter_modules} layers)" if srv.adapter else "")
+        + (f" adapter {srv.adapter.name} ({srv.backend.adapter_modules} layers)" if srv.adapter else "") \
+        + (f" calibration {srv.cal_file}" if srv.cal_file else " uncalibrated")
     gc.collect()
     gc.freeze()
     print(f"basal: model {a.model} mode {a.mode}{info} ready in {time.time() - t0:.0f}s on port {a.port}", flush=True)

@@ -2666,6 +2666,16 @@ def vllm_args(cfg, preset="default", media=False, fast_prefill=True):
     return kw, env
 
 
+VLLM_MAX_LORA_RANK = 512  # the largest max_lora_rank vLLM accepts
+LORA_PROBE = "Ala ma kota, a kot ma Alę. The cat sat on the mat."  # --adapter (vLLM / SGLang): base vs LoRA prompt
+
+
+def lora_inert(engine):
+    return (f"--adapter: {engine} answered the probe prompt with and without the LoRA identically, so it did not apply "
+            "the adapter (an adapter with zero lora_B, or an engine version whose LoRA arguments differ); refusing to "
+            "serve the base model under the adapter's name")
+
+
 class VLLMBackend:
     """vLLM backend: bf16 checkpoints and the ModelOpt FP8 / NVFP4 ports, with the engine settings of a --vllm-preset
     (VLLM_PRESETS, vllm_args). One generated token restricted to the option letters; with
@@ -2708,9 +2718,12 @@ class VLLMBackend:
         self.preset, self.engine_args, self.lock = preset, kw, threading.Lock()
         from vllm import LLM
         self.lora, lora_kw = None, {}
-        if adapter:  # --adapter: served natively as one LoRA (unverified on CUDA — keyword names from vLLM's API docs)
+        if adapter:  # --adapter: served natively as one LoRA (keyword names from vLLM's API docs; _check_lora proves it)
             from vllm.lora.request import LoRARequest
-            self.lora = LoRARequest("adapter", 1, str(adapter_module.peft_dir(adapter)))
+            if adapter.rank > VLLM_MAX_LORA_RANK:
+                raise SystemExit(f"--adapter {adapter.name}: rank {adapter.rank}; vLLM serves LoRA ranks up to "
+                                 f"{VLLM_MAX_LORA_RANK} (merge it with basal-fuse-adapter)")
+            self.lora = LoRARequest("adapter", 1, str(adapter_module.peft_dir(adapter, model_dir)))
             lora_kw = dict(enable_lora=True, max_loras=1, max_lora_rank=max(8, 1 << (adapter.rank - 1).bit_length()))
         self.adapter_modules = len(adapter.deltas) if adapter else 0
         self.llm = LLM(**{**dict(model=str(model_dir), dtype=dtype, gpu_memory_utilization=mem, max_model_len=max_len,
@@ -2718,6 +2731,20 @@ class VLLMBackend:
                                  max_logprobs=max(16, max_options)), **kw, **lora_kw})
         self.context = max_len - 1  # longest prompt: max_model_len holds the one generated token too
         self.context_reason = f"vLLM's --max-len {max_len}"
+        if self.lora:
+            self._check_lora()
+
+    def _check_lora(self):
+        """--adapter: one prompt with and without the LoRA; equal log-probabilities mean vLLM did not apply it (the
+        base model would be served under the adapter's name)."""
+        from vllm import SamplingParams
+        from vllm.inputs import TokensPrompt
+        req = [TokensPrompt(prompt_token_ids=self.tok(LORA_PROBE)["input_ids"])]
+        sp = SamplingParams(max_tokens=1, temperature=0.0, logprobs=5)
+        top = lambda **kw: {t: lp.logprob for t, lp in
+                            self.llm.generate(req, sp, use_tqdm=False, **kw)[0].outputs[0].logprobs[0].items()}
+        if top() == top(lora_request=self.lora):
+            raise SystemExit(lora_inert("vLLM"))
 
     def run(self, prompts, ids_list):
         from vllm.inputs import TokensPrompt
@@ -2784,15 +2811,29 @@ class SGLangBackend:
         import sglang
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
-        # --adapter: served natively as one LoRA (unverified on CUDA — argument names from SGLang's LoRA docs)
-        lora_kw = dict(enable_lora=True, lora_paths=[f"adapter={adapter_module.peft_dir(adapter)}"],
-                       max_loras_per_batch=1) if adapter else {}
+        # --adapter: served natively as one LoRA (argument names from SGLang's LoRA docs; _check_lora proves it). Two
+        # slots per batch: the adapter and the base model, which the probe of _check_lora runs on
+        lora_kw = dict(enable_lora=True, lora_paths={"adapter": str(adapter_module.peft_dir(adapter, model_dir))},
+                       max_loras_per_batch=2) if adapter else {}
         self.lora = adapter is not None
         self.adapter_modules = len(adapter.deltas) if adapter else 0
         self.llm = sglang.Engine(model_path=str(model_dir), dtype=dtype, mem_fraction_static=mem,
                                  context_length=max_len, log_level="error", **lora_kw)
         self.context = max_len - 1  # longest prompt: the context holds the one generated token too
         self.context_reason = f"SGLang's --max-len {max_len}"
+        if self.lora:
+            self._check_lora()
+
+    def _check_lora(self):
+        """--adapter: one prompt with and without the LoRA; equal log-probabilities mean SGLang did not apply it."""
+        ids = self.tok(LORA_PROBE)["input_ids"]
+
+        def top(**kw):
+            o = self.llm.generate(input_ids=[ids], sampling_params=[{"max_new_tokens": 1, "temperature": 0.0}],
+                                  return_logprob=True, logprob_start_len=-1, top_logprobs_num=5, **kw)
+            return [(int(x[1]), float(x[0])) for x in o[0]["meta_info"]["output_top_logprobs"][0]]
+        if top() == top(lora_path=["adapter"]):
+            raise SystemExit(lora_inert("SGLang"))
 
     @staticmethod
     def _letters(meta, ids):
@@ -2906,7 +2947,9 @@ class MLXBackend:
             raise ValueError(f"unknown MLX quantisation {quant!r} (q8)")
         # lazy for q8: the weights are materialised once, after quantisation (never the full bf16 copy)
         self.model, self.config = load_model(md, lazy=bool(quant), model_config=mlx_config_overrides(cfg))
-        self.adapter_modules = adapter_module.merge_mlx(self.model, adapter) if adapter else 0  # --adapter
+        # --adapter: merged before q8 quantises the merged bf16 weights; merge_mlx evaluates only the adapter's layers,
+        # so q8 still never materialises the full bf16 copy (keep this order)
+        self.adapter_modules = adapter_module.merge_mlx(self.model, adapter) if adapter else 0
         # the final logit softcap of the decoder (Gemma) is applied to the fp32 code logits
         self.softcap = getattr(self.lm.args, "final_logit_softcapping", None)
         self.quantization = self.config.get("quantization")

@@ -230,7 +230,8 @@ them with the served model: on another model, or another revision, it warns at s
 matches its Hugging Face name by the last part of the path (`/data/basal-omni-1.0-max` = `Remek/basal-omni-1.0-max`).
 The files that ship in a model's directory are not checked.
 
-With `--adapter`, `basal-calibrate` records the adapter as `fitted_on.adapter` (`<name>@<sha256 of its weights>[:12]`)
+With `--adapter`, `basal-calibrate` records the adapter as `fitted_on.adapter` (`<name>@<sha256 of its
+adapter_config.json and weights>[:12]`, so a rescaled adapter is another one)
 and basal-serve compares it like the model: a file fitted with another adapter, or with one when none is served (or
 the reverse), warns or, with `--strict-calibration`, refuses. Without `--calibration`, a `CALIBRATION[.<engine>].json`
 in the adapter directory is loaded first (and checked); the model's own file is the base model's, so it is loaded for

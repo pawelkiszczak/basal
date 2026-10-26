@@ -9,8 +9,10 @@ Formats, by the files in the directory:
           keys base_model.model.<path>.lora_A.weight [r, in] / .lora_B.weight [out, r]
 
 The merge is mlx-lm's LoRALinear.fuse on every framework: delta = (scale * b) @ a in float32 ([out, in]), cast to the
-weight's dtype, added in the weight's dtype."""
+weight's dtype, added in the weight's dtype. The factors are float32 whatever their stored dtype (PEFT's own merge
+multiplies them in the weight's dtype): one rounding, at the cast, on every framework."""
 import argparse
+import atexit
 import functools
 import hashlib
 import json
@@ -33,22 +35,26 @@ _PEFT_KEY = re.compile(r"^(.+)\.lora_([AB])(?:\.[^.]+)?\.weight$")
 class Adapter:
     path: Path
     name: str  # the directory's basename
-    identity: str  # name@sha256(weights file)[:12]: what a calibration file is fitted with
+    identity: str  # name@sha256(adapter_config.json + weights file)[:12]: what a calibration file is fitted with
     scale: float
     rank: int
     fmt: str  # "mlx" | "peft"
     deltas: dict = field(default_factory=dict)  # canonical key -> (a [r, in], b [out, r]), float32
 
 
+def _name(path):
+    return Path(path).resolve().name
+
+
 def _fail(path, why):
-    raise SystemExit(f"--adapter {path}: {why}")
+    raise SystemExit(f"--adapter {_name(path)}: {why}")
 
 
-def _config(path):
-    """-> (fmt, weights file, config dict, scale); refuses what is not a plain LoRA adapter."""
+def validate(path):
+    """Refuse (SystemExit) what is not a plain LoRA adapter directory -> (fmt, weights file, scale)."""
     p = Path(path)
     if not (p / CONFIG).is_file():
-        _fail(path, f"no {CONFIG} (an mlx-lm or PEFT LoRA adapter directory)")
+        _fail(path, f"no {CONFIG} in {p} (an mlx-lm or PEFT LoRA adapter directory)")
     cfg = json.loads((p / CONFIG).read_text(encoding="utf-8"))
     if "peft_type" in cfg:
         if cfg["peft_type"] != "LORA":
@@ -73,42 +79,43 @@ def _config(path):
         fmt, weights, scale = "mlx", p / MLX_WEIGHTS, float(lp["scale"])
     if not weights.is_file():
         _fail(path, f"no {weights.name} next to its {fmt} {CONFIG}")
-    return fmt, weights, cfg, float(scale)
-
-
-def _sha12(f):
-    h = hashlib.sha256()
-    with open(f, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()[:12]
+    return fmt, weights, float(scale)
 
 
 def identity(path):
-    """The adapter's identity (name@sha256 of its weights file, 12 hex) without reading the tensors."""
-    _, weights, _, _ = _config(path)
-    return f"{Path(path).resolve().name}@{_sha12(weights)}"
+    """The adapter's identity without reading the tensors: name@sha256 of adapter_config.json (scale, rank) followed by
+    the weights file, 12 hex digits."""
+    _, weights, _ = validate(path)
+    h = hashlib.sha256((Path(path) / CONFIG).read_bytes())
+    with open(weights, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return f"{_name(path)}@{h.hexdigest()[:12]}"
 
 
 def canonical(key):
     """'layers.N.<rest>' from a module path under any framework prefix (model., base_model.model.model.,
-    language_model.model. ...)."""
+    language_model.model. ...); ValueError for a module outside the decoder layers."""
     m = _LAYER.search(key)
     if not m:
-        raise SystemExit(f"--adapter: {key}: not a module of a decoder layer (layers.N.<module>)")
+        raise ValueError(f"{key}: not a module of a decoder layer (layers.N.<module>)")
     return f"layers.{m[1]}.{m[2]}"
 
 
 def read(path):
     from safetensors.numpy import load_file
-    fmt, weights, _, scale = _config(path)
+    fmt, weights, scale = validate(path)
     pat = _MLX_KEY if fmt == "mlx" else _PEFT_KEY
     parts = {}
     for k, v in load_file(str(weights)).items():
         m = pat.match(k)
         if not m:
             _fail(path, f"{k}: not a LoRA tensor (lora_a / lora_b, lora_A / lora_B)")
-        key, side = canonical(m[1]), m[2].lower()
+        try:
+            key = canonical(m[1])
+        except ValueError as e:
+            _fail(path, str(e))
+        side = m[2].lower()
         if side in parts.setdefault(key, {}):
             _fail(path, f"{k}: a second {side} tensor for {key}")
         v = np.asarray(v, dtype=np.float32)
@@ -124,13 +131,20 @@ def read(path):
     if not deltas:
         _fail(path, f"{weights.name} holds no LoRA tensors")
     p = Path(path).resolve()
-    return Adapter(path=p, name=p.name, identity=f"{p.name}@{_sha12(weights)}", scale=scale,
+    return Adapter(path=p, name=p.name, identity=identity(p), scale=scale,
                    rank=max(a.shape[0] for a, _ in deltas.values()), fmt=fmt, deltas=deltas)
 
 
 def delta(ad, key, np_dtype=np.float32):
     a, b = ad.deltas[key]
     return ((np.float32(ad.scale) * b) @ a).astype(np_dtype)
+
+
+def _layers(ad, get):
+    try:
+        return get()
+    except AttributeError:
+        raise SystemExit(f"--adapter {ad.name}: the model has no decoder layers (model.layers) to merge into") from None
 
 
 def _target(ad, layers, key):
@@ -155,7 +169,7 @@ def merge_torch(model, ad):
     import torch
     root = getattr(model, "model", model)
     root = getattr(root, "language_model", root)
-    layers = root.layers
+    layers = _layers(ad, lambda: root.layers)
     with torch.no_grad():
         for key, (a, b) in ad.deltas.items():
             _, _, mod = _target(ad, layers, key)
@@ -173,11 +187,12 @@ def merge_torch(model, ad):
 
 def merge_mlx(model, ad):
     """Merge into an mlx-lm model's decoder linears in place (QuantizedLinear: dequantised, merged and re-quantised
-    with its group size and bits, as LoRALinear.fuse) -> the number of merged modules."""
+    with its group size and bits, as LoRALinear.fuse) -> the number of merged modules. Each merged weight is evaluated
+    here, so on a lazily loaded model (MLXBackend's q8) only the adapter's layers are materialised in bf16."""
     import mlx.core as mx
     import mlx.nn as nn
     lm = getattr(model, "language_model", model)
-    layers = lm.model.layers
+    layers = _layers(ad, lambda: lm.model.layers)
     for key, (a, b) in ad.deltas.items():
         parent, attr, mod = _target(ad, layers, key)
         quantized = isinstance(mod, nn.QuantizedLinear)
@@ -220,17 +235,19 @@ def merge_numpy(weights, ad):
     return len(ad.deltas)
 
 
-def peft_dir(ad):
+def peft_dir(ad, model_dir=None):
     """A PEFT directory of the adapter (vLLM, SGLang): its own for a PEFT adapter, else a converted copy in a temporary
-    directory."""
+    directory ($TMPDIR, removed at exit). The copy names the modules base_model.model.model.layers.N.<module>, the
+    Hugging Face path of a text decoder; a multimodal model (config.json text_config) nests its decoder elsewhere, so
+    an mlx-lm adapter for one is refused (fuse it with basal-fuse-adapter, or give a PEFT adapter of that model)."""
     if ad.fmt == "peft":
         return ad.path
+    cfg = Path(model_dir) / "config.json" if model_dir else None
+    if cfg and cfg.is_file() and "text_config" in json.loads(cfg.read_text(encoding="utf-8")):
+        raise SystemExit(f"--adapter {ad.name}: an mlx-lm adapter of a multimodal model cannot be given to vLLM / SGLang "
+                         "(its module names differ from the Hugging Face model's); merge it with basal-fuse-adapter or "
+                         "use a PEFT adapter of the model")
     from safetensors.numpy import save_file
-    out = Path(tempfile.mkdtemp("basal-adapter-"))
-    cfg = {"peft_type": "LORA", "r": ad.rank, "lora_alpha": ad.scale * ad.rank,
-           "target_modules": sorted({k.rsplit(".", 1)[-1] for k in ad.deltas}), "bias": "none",
-           "task_type": "CAUSAL_LM", "fan_in_fan_out": False, "use_rslora": False}
-    (out / CONFIG).write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     tensors = {}
     for key, (a, b) in ad.deltas.items():
         if a.shape[0] != ad.rank:
@@ -238,8 +255,27 @@ def peft_dir(ad):
                              "a PEFT directory has one rank")
         tensors[f"base_model.model.model.{key}.lora_A.weight"] = a
         tensors[f"base_model.model.model.{key}.lora_B.weight"] = b
+    out = Path(tempfile.mkdtemp(prefix="basal-adapter-"))
+    atexit.register(shutil.rmtree, out, True)  # read by the engine's own process until basal-serve exits
+    cfg = {"peft_type": "LORA", "r": ad.rank, "lora_alpha": ad.scale * ad.rank,
+           "target_modules": sorted({k.rsplit(".", 1)[-1] for k in ad.deltas}), "bias": "none",
+           "task_type": "CAUSAL_LM", "fan_in_fan_out": False, "use_rslora": False}
+    (out / CONFIG).write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     save_file(tensors, str(out / PEFT_WEIGHTS))
     return out
+
+
+def fused_calibration(cal, ad, out):
+    """An adapter's calibration file for the merged checkpoint `out`: fitted_on names the merged model (no revision, no
+    adapter) and keeps the origin as fused_from; None for a file fitted with another adapter (or none)."""
+    fitted = cal.get("fitted_on")
+    if not isinstance(fitted, dict) or not fitted.get("model"):
+        return cal  # not written by basal-calibrate: copied as it is
+    if fitted.get("adapter") != ad.identity:
+        return None
+    origin = fitted["model"] + (f"@{fitted['revision'][:12]}" if fitted.get("revision") else "")
+    fitted = {k: v for k, v in fitted.items() if k not in ("revision", "adapter")}
+    return dict(cal, fitted_on=dict(fitted, model=Path(out).resolve().name, fused_from=f"{origin}+{ad.identity}"))
 
 
 def main():
@@ -253,6 +289,8 @@ def main():
     ap.add_argument("--dtype", default="bfloat16", choices=("bfloat16", "float16", "float32"))
     a = ap.parse_args()
     out = Path(a.out)
+    if out.exists() and not out.is_dir():
+        raise SystemExit(f"--out {out}: not a directory")
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"--out {out}: exists and is not empty")
     import torch
@@ -269,7 +307,11 @@ def main():
         if f.is_file() and not any(f.match(s) for s in skip) and not (out / f.name).exists():
             shutil.copy2(f, out / f.name)
     for f in sorted(ad.path.glob("CALIBRATION*.json")):  # fitted with this adapter
-        shutil.copy2(f, out / f.name)
+        cal = fused_calibration(json.loads(f.read_text(encoding="utf-8")), ad, out)
+        if cal is None:
+            print(f"basal-fuse-adapter: {f.name} was fitted with another adapter than {ad.identity}: not copied")
+        else:
+            (out / f.name).write_text(json.dumps(cal, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"fused {n} layers of {ad.name} into {out}")
 
 

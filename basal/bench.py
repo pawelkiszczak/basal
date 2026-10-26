@@ -27,16 +27,14 @@ from . import adapter as adapter_module
 from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend, MLXBackend,
                      MPSBackend, OllamaBackend, SGLangBackend, VLLMBackend, resolve)
 from .prompt import letter_ids, max_options, model_format, render
-from .server import MODES, default_mode
+from .server import MODES, adapter_refused, default_mode
 
 GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: --model gives tokenizer and calibration
 
 
 def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="http://127.0.0.1:11434",
           llamacpp_url="http://127.0.0.1:8080", fmt=1, mlx_packed=False, adapter=None):
-    """adapter: a LoRA adapter (basal.adapter.read) merged at load / served natively; the GGUF kinds refuse it."""
-    if adapter and MODES.get(mode.split("@")[0], ("",))[0] in GGUF_KINDS:
-        raise SystemExit(adapter_refused(adapter, mode))
+    """adapter: a LoRA adapter (basal.adapter.read) merged at load / served natively (main refuses the GGUF kinds)."""
     ad = dict(adapter=adapter)
     if mode == "eager-fp32":
         return EagerBackend(md, "float32", **ad)
@@ -73,11 +71,6 @@ def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="h
     if kind == "exit":
         return ExitGraphBackend(md, "bfloat16", quant, compile=comp, **ad)
     return GraphBackend(md, "bfloat16", quant, compile=comp, shared=True, **ad)
-
-
-def adapter_refused(adapter, mode):
-    return (f"--adapter {adapter.name}: --modes {mode} serves weights the engine cannot merge into (a GGUF file / "
-            "another process); fuse them with basal-fuse-adapter and convert with basal-export-gguf")
 
 
 def default_modes(model=None):
@@ -281,7 +274,7 @@ def main():
     adapter = adapter_module.read(a.adapter) if a.adapter else None
     for m in a.modes if adapter else ():  # before anything is loaded
         if MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS:
-            raise SystemExit(adapter_refused(adapter, m))
+            raise SystemExit(adapter_refused(adapter.name, f"--modes {m}"))
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)

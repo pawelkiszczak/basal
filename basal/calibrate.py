@@ -1342,8 +1342,8 @@ def main(argv=None):
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
             raise SystemExit(f"--url {a.url}: no basal server answers ({e})") from None
         mode = a.mode or entry.get("mode")
-        engine = f"{mode} at {base}"
         adapter = entry.get("adapter")  # the server's --adapter identity (name@sha256)
+        engine = f"{mode} at {base}" + (f" --adapter {adapter.split('@')[0]}" if adapter else "")
         orders = entry.get("orders")  # the server's option orders (servers before this field: unknown)
         kind, quant = MODES.get(mode, ("", None, False))[:2]
         preset = entry.get("vllm_preset")  # --mode vllm: the server's preset (servers before 2.2.1: none)
