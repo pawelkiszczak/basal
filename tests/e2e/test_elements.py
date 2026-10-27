@@ -293,6 +293,21 @@ def test_saving_bundled_element_marks_preserves_structured_options(page):
     assert criteria["2"] == {"element": "[2] I accept the terms and conditions", "role": "checkbox", "checked": False}
 
 
+def test_bundled_options_follow_a_relabelled_or_renumbered_box(page):
+    load_checkout_example(page)
+    before = page.evaluate("() => buildRequest().questions.click_target.criteria")
+    page.locator(".mark-elements").first.click()
+    page.wait_for_function("() => document.querySelector('.elements-dialog canvas').width === 800")
+    page.locator("[data-label='0']").fill("Pay")  # box 1 relabelled
+    page.locator(".elements-dialog [data-delete='1']").click()  # box 2 removed: box 3 becomes 2, box 4 becomes 3
+    page.locator(".elements-save").click()
+    page.locator(".elements-dialog").wait_for(state="detached")
+    criteria = page.evaluate("() => buildRequest().questions.click_target.criteria")
+    assert criteria["1"] == "[1] Pay"
+    assert criteria["2"] != before["2"] and criteria["2"].startswith("[2] ")  # not the removed checkbox's option
+    assert criteria["3"].startswith("[3] ") and len(criteria) == 3
+
+
 def test_bundled_element_marks_own_and_remove_the_question_when_renamed(page):
     load_checkout_example(page)
     page.locator(".q-name").nth(1).fill("renamed_target")
@@ -320,7 +335,6 @@ def test_decision_overlay_uses_media_snapshot_from_send_time(page):
     overlay = page.locator("#results .image-source svg")
     assert overlay.locator("rect").count() == 4
     assert "checkout.png" in overlay.get_attribute("aria-label")
-
 
 
 def save_request_preset(page,name):
