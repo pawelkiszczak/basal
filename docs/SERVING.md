@@ -160,9 +160,13 @@ your hardware (`basal-ui`), a look inside one decision with `basal-viz`, and ben
   | `gguf`, `ollama`, `llamacpp`, FP8 checkpoints (`-FP8`) | refused: `basal-fuse-adapter --model M --adapter DIR --out FUSED` writes the merged checkpoint, then `basal-export-gguf`; the adapter's calibration files are copied with `fitted_on` naming the merged model (`fused_from` keeps the origin), files fitted with another adapter are left out |
   | `fast-exit` | refused: its exit heads and their thresholds were trained on the base model's hidden states (serve with `fast`) |
 
-  The merge is mlx-lm's `LoRALinear.fuse` on every framework (`(scale · B) @ A` in fp32, added in the weight's dtype):
-  on basal-2.0-mini with a rank-16 adapter in 16 layers (112 linear layers), `--mode mlx --adapter` and
-  `basal-fuse-adapter` gave weights bit-identical to `mlx_lm fuse`. A calibration file in the adapter directory comes
+  The merge is mlx-lm's `LoRALinear.fuse` on every framework (`(scale · B) @ A` in fp32, added in the weight's dtype).
+  The update is computed once on the CPU for every engine (the graph engines merge before moving the model to the GPU),
+  so `--adapter` and the `basal-fuse-adapter` checkpoint have the same weights bit for bit whatever the device. On
+  basal-2.0-mini with a rank-16 adapter in 16 layers (112 linear layers): weights bit-identical to `mlx_lm fuse`, and
+  `--adapter` vs the fused checkpoint answered 84 requests (sent one at a time) byte-identically in `mlx`, `mps` and
+  `eager`; concurrent requests are batched differently from run to run, which moves bf16 probabilities by ~1e-3 on
+  any model. A calibration file in the adapter directory comes
   before the model's; the model's own file is then loaded for its temperatures only
   ([CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to)). The evidence head (`"evidence": true`) was trained
   on the base model's states too: under `--adapter` an evidence request answers HTTP 422.

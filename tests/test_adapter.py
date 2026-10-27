@@ -175,8 +175,33 @@ def test_numpy_merge_equals_the_torch_merge(tmp_path):
     assert adapter_module.merge_numpy(w, ad) == 2
     m = AutoModelForCausalLM.from_pretrained(tmp_path / "model", dtype=torch.float32)
     adapter_module.merge_torch(m, ad)
-    for key in (Q, DOWN):
-        np.testing.assert_allclose(w[f"model.{key}.weight"], m.state_dict()[f"model.{key}.weight"].numpy(), atol=1e-6)
+    for key in (Q, DOWN):  # the same CPU delta: identical
+        assert np.array_equal(w[f"model.{key}.weight"], m.state_dict()[f"model.{key}.weight"].numpy())
+
+
+def test_every_framework_and_device_merges_to_the_same_bf16_weights(tmp_path):
+    """--adapter on any engine equals the basal-fuse-adapter checkpoint bit for bit: the delta is computed once on the
+    CPU, whatever GEMM the device (CUDA, MPS, Metal through MLX) would use."""
+    tiny_llama(tmp_path / "f32")
+    AutoModelForCausalLM.from_pretrained(tmp_path / "f32", dtype=torch.bfloat16).save_pretrained(tmp_path / "model")
+    ad = adapter_module.read(write_adapter(tmp_path / "ad", "mlx", deltas()))
+    load = lambda: AutoModelForCausalLM.from_pretrained(tmp_path / "model", dtype=torch.bfloat16)  # noqa: E731
+    cpu = load()  # basal-fuse-adapter's merge
+    adapter_module.merge_torch(cpu, ad)
+    want = {k: cpu.state_dict()[f"model.{k}.weight"] for k in (Q, DOWN)}
+    if torch.backends.mps.is_available():  # the eager / mps engines (CUDA: the same code path)
+        mps = load().to("mps")
+        adapter_module.merge_torch(mps, ad)
+        assert all(torch.equal(mps.state_dict()[f"model.{k}.weight"].cpu(), v) for k, v in want.items())
+    try:
+        import mlx.core as mx
+    except ImportError:
+        return
+    be = mlx_stub(tmp_path / "model")
+    adapter_module.merge_mlx(be.model, ad)
+    for k, v in want.items():
+        mine = torch.from_numpy(np.array(_module(be.model, k).weight.astype(mx.float32)))
+        assert torch.equal(mine.to(torch.bfloat16), v), k
 
 
 def _mlx_fused(path, adapter_dir, quantize=False):
@@ -452,9 +477,25 @@ def test_merge_equals_peft_merge_and_unload_on_llama(tmp_path):
 def test_merge_equals_peft_merge_and_unload_on_gemma4(tmp_path, name):
     from tests.test_gemma4 import tiny
     m = tiny(name)  # E4B-like (KV-shared layers, per-layer inputs) and 31B-like (keys = values: no v_proj there)
+    m.save_pretrained(tmp_path / "model")
     ref = peft_merged(m, tmp_path / "ad", TARGETS)
-    assert adapter_module.merge_torch(m, adapter_module.read(tmp_path / "ad")) > 0
+    ad = adapter_module.read(tmp_path / "ad")
+    n = adapter_module.merge_torch(m, ad)
+    assert n > 0
     assert_same_weights(m, ref)
+    try:  # the same adapter through mlx-lm's Gemma 4 (--mode mlx)
+        import mlx.core as mx
+        from mlx_lm.utils import load_model
+    except ImportError:
+        return
+    from basal.engine import mlx_config_overrides
+    cfg = json.loads((tmp_path / "model" / "config.json").read_text(encoding="utf-8"))
+    mm, _ = load_model(tmp_path / "model", model_config=mlx_config_overrides(cfg))
+    assert adapter_module.merge_mlx(mm, ad) == n
+    ref = ref.state_dict()
+    for key in ad.deltas:
+        mine = np.array(_module(getattr(mm, "language_model", mm), key).weight.astype(mx.float32))
+        np.testing.assert_allclose(mine, ref[f"model.{key}.weight"].numpy(), atol=1e-6, err_msg=key)
 
 
 def test_multimodal_gemma4_merges_the_text_decoder_only(tmp_path):
