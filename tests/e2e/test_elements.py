@@ -68,6 +68,29 @@ def mark_image(page,index=0,label=""):
     page.locator(".elements-dialog").wait_for(state="detached")
 
 
+PIXEL = """([x, y]) => [...document.querySelector('.elements-dialog canvas').getContext('2d').getImageData(x, y, 1, 1).data]"""
+
+
+def test_element_editor_shows_the_image_and_badges_where_save_paints_them(page):
+    page.locator(".mark-elements").first.click()
+    page.wait_for_function("() => document.querySelector('.elements-dialog canvas').width === 1000")
+    assert page.evaluate(PIXEL, [500, 300]) == [240, 240, 240, 255]  # the screenshot, not an empty canvas
+    a, b = canvas_point(page, 300, 200), canvas_point(page, 500, 320)
+    page.mouse.move(*a); page.mouse.down(); page.mouse.move(*b, steps=5); page.mouse.up()
+    editor_badge = page.evaluate(PIXEL, [304, 190])  # the badge sits just above the box's top-left corner
+    assert editor_badge[0] > 200 and editor_badge[1] < 150 and editor_badge[2] < 80, editor_badge
+    assert page.evaluate(PIXEL, [400, 260]) == [240, 240, 240, 255]  # the box's inside stays visible
+    page.locator(".elements-save").click()
+    page.locator(".elements-dialog").wait_for(state="detached")
+    saved_badge = page.evaluate("""async () => {
+      const img = new Image(); img.src = `data:image/png;base64,${selectedMedia[0].data}`; await img.decode();
+      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+      const x = c.getContext('2d'); x.drawImage(img, 0, 0); return [...x.getImageData(304, 190, 1, 1).data];
+    }""")
+    assert saved_badge[0] > 200 and saved_badge[1] < 150 and saved_badge[2] < 80, saved_badge
+
+
+
 def test_element_editor_drawing_geometry_labels_and_cleanup(page):
     source_data = page.evaluate("() => selectedMedia[0].data")
     page.locator(".mark-elements").first.click()
