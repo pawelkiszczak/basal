@@ -81,6 +81,8 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   - **503**: the GPU ran out of memory (CUDA, MPS or Metal). The server frees the failed request's memory, so a retry,
     later or on another server, may succeed;
   - **500**: any other server error.
+  Every error body also has a `code`: `INVALID_REQUEST` (422), `OUT_OF_MEMORY` (503) or `INTERNAL_ERROR` (500).
+  A 422 adds `detail`, a one-item body-location validation error; `error` retains the message.
 - `GET /v1/models` returns `{"models": [{"name", "description", "release_date", "mode", "early_exit",
   "temperature_per_prim"}]}` (`release_date` is the engine's release date, not the model's).
 - `GET /health` returns `{"status": "ok", "running": R, "queued": Q}` (2.3.1). The counts cover the decision requests

@@ -1,3 +1,8 @@
+# Unreleased
+
+- **Serving errors:** invalid `max_error` and set bounds are rejected before inference; error responses include a `code`
+  (`INVALID_REQUEST`, `OUT_OF_MEMORY` or `INTERNAL_ERROR`) and 422 responses include `detail`.
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture

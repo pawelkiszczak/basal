@@ -281,6 +281,12 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
 
 def act_spec(name, q, outcomes):
     """Cost matrix C[action][outcome] from the full form or the short form {"wrong": W, "defer": D}."""
+    max_error = q.get("max_error")
+    if max_error is not None:
+        try:
+            max_error = float(max_error)
+        except (TypeError, ValueError, OverflowError):
+            raise RequestError(f"question {name!r}: max_error must be a number") from None
     costs = q.get("costs")
     if not isinstance(costs, dict) or not costs:
         raise RequestError(f"question {name!r}: act needs costs")
@@ -289,13 +295,13 @@ def act_spec(name, q, outcomes):
         C = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
         if "defer" in costs:
             C["defer"] = {z: float(costs["defer"]) for z in outcomes}
-        return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=q.get("max_error"))
+        return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=max_error)
     for a, row in costs.items():
         if not isinstance(row, dict) or set(row) != set(outcomes):
             raise RequestError(f"question {name!r}: costs[{a!r}] must give a cost for every outcome {outcomes}")
     C = {a: {z: float(v) for z, v in row.items()} for a, row in costs.items()}
     defer = q.get("defer_action") or next((a for a in ("defer", "human") if a in C), None)
-    return dict(costs=C, defer=defer, max_error=q.get("max_error"))
+    return dict(costs=C, defer=defer, max_error=max_error)
 
 
 NO_CERTIFICATE = "no certified threshold for this type at this max_error"
@@ -1609,8 +1615,8 @@ def parser():
 
 def http_app(srv, mode, mcp=None):
     """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models and /health; mcp: (routes, lifespan) of
-    --mcp on. A failed request answers {"error": message} with http_status: 422 invalid request, 503 out of GPU
-    memory, 500 any other server error."""
+    --mcp on. A failed request answers {"error": message, "code": code} with http_status: 422 invalid request, 503 out
+    of GPU memory, 500 any other server error."""
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
@@ -1621,7 +1627,12 @@ def http_app(srv, mode, mcp=None):
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
         if isinstance(e, torch.OutOfMemoryError):  # the failed forward's blocks back to the GPU: kept by the
             torch.cuda.empty_cache()  # allocator, they failed the next requests too (ultra, 20 Oct)
-        return JSONResponse({"error": str(e)}, status_code=http_status(e))
+        status = http_status(e)
+        code = {422: "INVALID_REQUEST", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[status]
+        body = {"error": str(e), "code": code}
+        if status == 422:
+            body["detail"] = [{"loc": ["body"], "msg": str(e), "type": "value_error"}]
+        return JSONResponse(body, status_code=status)
 
     async def systemone(request):
         try:
