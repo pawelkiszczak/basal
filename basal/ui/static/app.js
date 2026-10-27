@@ -992,6 +992,8 @@ async function sendDecision() {
     if(invalid.length){showDecideError(invalid.map(card=>`${$('.q-name',card).value||t('question')}: ${card._error}`).join('\n'));return;}
   }
   request.model=selectedModel;
+  const unsupported=[...new Set((Array.isArray(request.media)?request.media:[]).map(m=>m?.type))].filter(k=>['image','audio'].includes(k)&&!loadedMedia.includes(k));
+  if(unsupported.length){showDecideError(`${shortName(selectedModel||'This model')} does not take ${mediaTitle(unsupported)}. Remove the media, or load a basal-omni model with "Load with media" and select it.`);return;}
   if($('#editJsonToggle').checked)$('#requestJson').value=JSON.stringify(request,null,2);
   $('#sendButton').disabled=true;
   try { const response=await api('/api/decide',{method:'POST',body:JSON.stringify(request)}); renderResults(response,request); }
