@@ -9,6 +9,8 @@
 
 - Integrated upstream 2.3.1 through `621bc57004bde3df6cefa078e3421f21af7f795b`, including the facts fixes, while preserving fork authentication, Decisions, MCP, request IDs, and error envelopes. The UI adds CPU packed execution, Blackwell omni routing, opt-in MLX packed rows, graph-batch guidance, sampled child load counters, HTTP error diagnostics, and calibration completion warnings. See [Serving](SERVING.md#engine-integration-in-231) and [the release gate](E2E.md).
 
+- **basal-ui navigation and Playground:** Models now separates Suggested and All; Model manager groups Loaded statistics, benchmarks and calibration before On disk and Models directory. Language changes keep the tab's Playground draft while requiring media to be attached again. Load-option Setup explains that media mode is selected in Model manager. [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it), [E2E.md](E2E.md#what-is-tested)
+
 - Integrated upstream 2.4.0 through `615fe32` (2.3.2-2.4.0). `basal-ui` follows it: **basal-omni-pico** (Qwen3.5,
   text only) is in the catalog, with a "lightest" suggestion; its modes are basal-serve 2.4's: `fast` /
   `fast-nocompile` on CUDA with flash-linear-attention (the default on Hopper), `eager` elsewhere, and `fast-exit`,

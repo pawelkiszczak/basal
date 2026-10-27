@@ -281,7 +281,8 @@ The left menu has one view per task, each with its own address (`#overview`, `#m
 loaded models (one row each: state, mode, media, estimated → resident memory, requests and average confidence,
 Restart / Logs / Unload) above a memory budget bar, the recommended model for this machine and short summaries of the
 disk and the API server; **Models**, **Model manager**, **Playground**, **API server**, **History** and **Logs** hold
-the features below. The menu's footer shows how many models are ready, their names, the API server's URL and an
+the features below. **Models** opens Suggested (default) and All models; **Model manager** orders Loaded (statistics,
+benchmarks and calibration), On disk, then Models directory. The menu's footer shows how many models are ready, their names, the API server's URL and an
 **Unload all** button. Deleting a model or revoking a key asks for confirmation in a dialog, and actions report their
 outcome in a short notification. On a narrow window the menu becomes a top bar. **ⓘ** on every model opens its model
 card: repository and author (base repository for a conversion), family, tier, port, size, media, the mode this machine
@@ -317,6 +318,7 @@ when new models appeared in the Hugging Face catalog (the offline catalog of the
   offers **⚙ Setup** and **Delete** (a loaded model cannot be deleted), and a suggestion card links to Model manager.
 - **⚙ Setup** (Models) opens the load options and saves them for the model without loading it; the next load uses
   them. **⚙ Options** in Model manager is the same dialog with **Load**.
+  For media, the mode (eager or vLLM) is chosen when loading from Model manager.
 - **Load** (Model manager) runs `basal-serve` for the model as a subprocess on a free loopback port.
   **Several models can be loaded at once**: each gets its own private `basal-serve`; a loaded model's row shows its
   state and **Unload**, and Models shows a *loaded* chip. A load that would exceed the memory budget is refused (below).
@@ -337,6 +339,8 @@ when new models appeared in the Hugging Face catalog (the offline catalog of the
   cost matrix, `tool`, `classify`, `verify`, `compress`, `extract`, with `max_error` and evidence where the type takes
   them), `facts` and `lang` for the request, or the raw JSON request (which carries `"model"`). Question names must be
   non-blank and unique; requests containing fields or media the builder cannot restore stay visible in Edit JSON mode.
+  Changing between English and Polish keeps this tab's Playground draft across the page reload; media is not retained
+  and must be attached again.
   Each type has its own
   result view; every answer shows whether it was deferred, whether its confidence clears the model's certified 1% / 5%
   thresholds and how it is calibrated; an answer whose calibration does not hold for it (media answers on a
@@ -444,7 +448,7 @@ only partly as resident memory; the estimate is what the budget check uses.
 
 ### Statistics and benchmarks
 
-**Models → Loaded** lists, per model, the decisions basal-ui answered (playground, API server, MCP): requests,
+**Model manager → Loaded** lists, per model, the decisions basal-ui answered (playground, API server, MCP): requests,
 questions, errors, average best-answer probability (the answer's `confidence`; `set_confidence` for `multi`; the
 largest probability for `tool`), mean and p95 latency (over the last 1000 requests), input tokens and last use, with
 one line per question type. They are kept in `<settings stem>.stats.json` next to the settings file, survive restarts
@@ -472,7 +476,7 @@ in the statistics or the history.
 
 ### Custom calibration
 
-**Models → Loaded → Calibration** runs `basal-calibrate` for a downloaded model on your labelled requests
+**Model manager → Loaded → Calibration** runs `basal-calibrate` for a downloaded model on your labelled requests
 ([CALIBRATION.md](CALIBRATION.md#input); the simple `basal-run` items with `gold` work too) at the 1% and / or 5%
 `max_error` targets. For decision questions basal-ui starts a temporary `basal-serve --no-calibration` of the model on
 loopback (its memory is counted in the budget while it runs), calls `basal-calibrate --url` on it and stops it. Task
@@ -636,7 +640,7 @@ concurrent clients (`--concurrency`); `--synthetic N` uses generated items with 
 --identity` runs single prompts, option orders and multi-question requests over one state, alone and batched, and
 compares every readout with an eager forward of its own prompt (argmax agreement, max |Δp|).
 
-basal-ui runs the same measurements on a loaded model from **Models → Loaded → Benchmark**, on the bundled examples
+basal-ui runs the same measurements on a loaded model from **Model manager → Loaded → Benchmark**, on the bundled examples
 or your own file ([BENCHMARK_SETS.md](BENCHMARK_SETS.md)).
 
 **Your own data.** 44 examples are enough to check that everything works, not for precise numbers. For numbers that
