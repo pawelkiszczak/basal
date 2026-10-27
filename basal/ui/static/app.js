@@ -746,10 +746,10 @@ function setRequest(req, names=[]) {  // names: file names of req.media (bundled
 }
 const PLAYGROUND_DRAFT='basal-ui.language-draft';
 window.preparePlaygroundLanguageSwitch=()=>{
-  const hadMedia=selectedMedia.length>0;
+  let hadMedia=selectedMedia.length>0;
   if($('#editJsonToggle').checked){
-    let text=$('#requestJson').value;  // kept as typed (even invalid), without media or element originals
-    try {const request=JSON.parse(text);if(request&&typeof request==='object'&&!Array.isArray(request)&&('media' in request||'_elements' in request)){delete request.media;delete request._elements;text=JSON.stringify(request,null,2);}} catch {}
+    let text=$('#requestJson').value;
+    try {const request=JSON.parse(text);if(request&&typeof request==='object'&&!Array.isArray(request)){hadMedia=hadMedia||(Array.isArray(request.media)&&request.media.length>0);if('media' in request||'_elements' in request){delete request.media;delete request._elements;text=JSON.stringify(request,null,2);}}} catch {}
     sessionStorage.setItem(PLAYGROUND_DRAFT,JSON.stringify({json:true,text,hadMedia}));
     return;
   }

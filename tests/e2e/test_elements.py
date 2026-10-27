@@ -366,3 +366,52 @@ def test_media_attachment_clears_evidence_and_language_draft_omits_media_bytes(p
     json_draft=page.evaluate("() => JSON.parse(sessionStorage.getItem('basal-ui.language-draft'))")
     assert "data:" not in json_draft["text"] and "_elements" not in json_draft["text"]
     assert "private-image-data" not in json_draft["text"]
+
+
+def test_edit_json_media_language_switch_restores_attach_notice(page):
+    request=page.evaluate("() => buildRequest()")
+    page.evaluate("() => clearSelectedMedia()")
+    page.check("#editJsonToggle")
+    page.evaluate("request => $('#requestJson').value=JSON.stringify(request)",request)
+    page.evaluate("() => preparePlaygroundLanguageSwitch()")
+    draft=page.evaluate("() => JSON.parse(sessionStorage.getItem('basal-ui.language-draft'))")
+    assert draft["hadMedia"] is True
+    assert "media" not in json.loads(draft["text"])
+    assert request["media"][0]["data"] not in draft["text"]
+    page.evaluate("() => restorePlaygroundLanguageDraft()")
+    sync_api.expect(page.locator("#mediaError")).to_contain_text("attached again")
+
+
+def test_json_removing_linked_question_restores_unmarked_image(page):
+    mark_image(page,label="Button")
+    original=page.evaluate("() => selectedMedia[0].originalData")
+    page.check("#editJsonToggle")
+    page.evaluate("""() => {
+      const request=JSON.parse($('#requestJson').value);
+      delete request.questions.element;
+      $('#requestJson').value=JSON.stringify(request);
+    }""")
+    page.uncheck("#editJsonToggle")
+    assert page.evaluate("() => selectedMedia[0].elements") is None
+    assert page.evaluate("() => selectedMedia[0].data") == original
+    assert "element" not in page.evaluate("() => buildRequest().questions")
+
+
+def test_preset_fallback_preserves_unsupported_media_fields(page):
+    mark_image(page,label="Button")
+    page.check("#editJsonToggle")
+    request=page.evaluate("""() => {
+      const request=JSON.parse($('#requestJson').value);
+      request.vendor_extension={version:7};
+      request.media[0].vendor_attachment={source:'scanner'};
+      $('#requestJson').value=JSON.stringify(request);
+      return request;
+    }""")
+    save_request_preset(page,"unsupported media fields")
+    page.evaluate("() => setRequest({state:'reset',questions:{other:{type:'choice',criteria:{yes:null,no:null}}}})")
+    page.select_option("#examples","preset:unsupported media fields")
+    restored=json.loads(page.locator("#requestJson").input_value())
+    assert restored==request
+    assert restored["media"][0]["vendor_attachment"]=={"source":"scanner"}
+    assert page.evaluate("() => selectedMedia[0].elements.question")=="element"
+    assert page.evaluate("() => selectedMedia[0].file.name")=="screen-marked.png"

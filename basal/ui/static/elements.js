@@ -18,14 +18,14 @@ function detachElementQuestion(name) {
     try {const request=JSON.parse($('#requestJson').value);if(request.questions)delete request.questions[name];$('#requestJson').value=JSON.stringify(request,null,2);} catch {}
   }
 }
-function removeElementQuestion(item) {
+function removeElementQuestion(item, sync=true) {
   detachElementQuestion(item.elements?.question);
   if(item.originalData!==undefined){
     URL.revokeObjectURL(item.url);
     item.data=item.originalData;item.file=item.originalFile;item.url=URL.createObjectURL(item.file);
   }
   delete item.originalData;delete item.originalFile;delete item.elements;
-  renderSelectedMedia();syncRequest();
+  renderSelectedMedia();if(sync)syncRequest();
 }
 function clearElementQuestions(items=selectedMedia) {
   for(const item of items){
@@ -94,6 +94,9 @@ function restorePresetMediaFallback(request,names=[]) {
   selectedMedia=restored;renderSelectedMedia();return true;
 }
 function restoreElementMarks(records) {
+  const editingJson=$('#editJsonToggle').checked;
+  let request=null;
+  if(editingJson){try{const parsed=JSON.parse($('#requestJson').value);if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))request=parsed;}catch{}}
   for(const record of records||[]){
     const item=selectedMedia[record.index];if(!item||item.kind!=='image'||(record.markedData&&record.markedData!==item.data))continue;
     const elements={question:record.question,image:record.index,size:record.size,boxes:record.boxes,labels:record.labels};
@@ -104,13 +107,16 @@ function restoreElementMarks(records) {
         item.originalData=record.originalData;item.originalFile=new File([bytes],record.originalName||'original.png',{type:record.originalMime||'image/png'});
       } catch { continue; }
     }
+    const card=editingJson?null:[...document.querySelectorAll('.question')].find(q=>$('.q-name',q).value===record.question);
+    if(editingJson&&request&&!Object.hasOwn(request.questions||{},record.question)){removeElementQuestion(item,false);continue;}
+    if(!editingJson&&!card){removeElementQuestion(item,false);continue;}
     item.elements=elements;
-    const card=[...document.querySelectorAll('.question')].find(q=>$('.q-name',q).value===record.question);if(!card)continue;
+    if(editingJson)continue;
     card._elementOwner=record.index;card._elementItem=item;card.dataset.elementOwner=record.index;$('.q-type',card).disabled=true;
     const options=$('[data-f="criteria"]',card);if(options){options.disabled=true;const note=document.createElement('small');note.className='muted';note.textContent=t('Edit options in Mark elements.');options.after(note);}
     $('.q-name',card).addEventListener('input',e=>{item.elements.question=e.target.value;});
   }
-  renderSelectedMedia();updateMediaEvidence();syncRequest();
+  renderSelectedMedia();updateMediaEvidence();if(!editingJson)syncRequest();
 }
 function syncElementIndices() {
   selectedMedia.forEach((item,index)=>{if(!item.elements)return;item.elements.image=index;const card=[...document.querySelectorAll('.question')].find(q=>$('.q-name',q).value===item.elements.question);if(card){card._elementOwner=index;card._elementItem=item;card.dataset.elementOwner=index;}});
