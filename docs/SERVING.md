@@ -289,7 +289,8 @@ card: repository and author (base repository for a conversion), family, tier, po
 would use and why, fit, the revisions in the cache, `basal.json`, the shipped calibration of the mode it is served in
 with its certified thresholds, resolved for the active model's revision, mode, quantisation, vLLM preset, prompt
 layout and adapter (or the saved load options when unloaded), the `GET /v1/models` entry of a loaded model (mode, option orders, prompt format, vLLM
-preset, context) and the README (of the `revision` load option when one is set). The menu's footer switches the theme
+preset, context) and the README (of the `revision` load option when one is set); `basal.json`, the loaded entry and the
+README start collapsed. The menu's footer switches the theme
 (light, dark, or the system's) and the language (**EN** / **PL**, kept in the browser; coded UI-owned model, option,
 backend and job messages are translated in Polish; uncoded server errors stay English). Keyboard: Ctrl/⌘+Enter sends the Playground decision, Alt+1…9 (Option+1…9 on macOS,
 any keyboard layout) opens the views in menu order, `?` lists the shortcuts. Overview says when a newer basal release
@@ -354,7 +355,9 @@ when new models appeared in the Hugging Face catalog (the offline catalog of the
 ### Load options
 
 **⚙ Options** next to every Load button (and **⚙** next to a loaded model's Restart) opens the load options of that
-model: the **engine mode** (every `basal-serve --mode`, the ones this machine or variant cannot use greyed out with
+model in collapsible sections (Engine and any section holding a non-default value open; a section you open or close
+stays that way for the next dialog in the session; a collapsed section still saves its values):
+the **engine mode** (every `basal-serve --mode`, the ones this machine or variant cannot use greyed out with
 the reason — CUDA graph modes need an NVIDIA GPU, vLLM / SGLang their extra, MLX Apple Silicon, TPU a TPU VM, Strix
 an AMD Strix Halo; Ollama and llama-server take the URL of the running service), quantisation, attention kernels,
 dtype, the vLLM preset, GPU share and KV-sharing fast prefill, the Gemma 4 eager forward, attention and per-layer
