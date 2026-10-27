@@ -17,6 +17,22 @@ BF16 = Variant("mini", "Remek/basal-2.0-mini", "basal-2.0", "mini", "bf16", "bf1
 MLX = Variant("mini-mlx", "Remek/basal-2.0-mini-MLX-8bit", "basal-2.0", "mini", "MLX-8bit", "MLX 8-bit", None, 100,
               False)
 
+OMNI_BF16 = Variant("omni-mini", "Remek/basal-omni-1.0-mini", "basal-omni-1.0", "mini", "bf16", "bf16", None, 100,
+                    True)
+OMNI_FP8 = Variant("omni-mini-fp8", "Remek/basal-omni-1.0-mini-FP8", "basal-omni-1.0", "mini", "FP8", "FP8", None,
+                   100, True)
+OMNI_GGUF = Variant("omni-mini-gguf", "Remek/basal-omni-1.0-GGUF", "basal-omni-1.0", "mini", "GGUF", "GGUF", None,
+                    100, True)
+OMNI_MLX = Variant("omni-mini-mlx", "Remek/basal-omni-1.0-mini-MLX-8bit", "basal-omni-1.0", "mini", "MLX-8bit",
+                   "MLX 8-bit", None, 100, True)
+
+
+def test_inspect_eligibility_includes_omni_bf16_only():
+    assert inspect.inspectable(BF16) is None
+    assert inspect.inspectable(OMNI_BF16) is None
+    for variant in (OMNI_FP8, OMNI_GGUF, OMNI_MLX, MLX):
+        assert inspect.inspectable(variant) == inspect.NOT_INSPECTABLE
+
 
 class StubExplainer:
     def __init__(self, a):
