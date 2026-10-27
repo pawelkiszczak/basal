@@ -1,6 +1,8 @@
 """Playground screenshot element editing, serialization and evidence behavior."""
+import io
 import json
 import struct
+import wave
 import zlib
 
 import pytest
@@ -14,6 +16,12 @@ def png(width=1000, height=600):
     row = b"\x00" + b"\xf0\xf0\xf0" * width
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
+
+def wav():
+    out=io.BytesIO()
+    with wave.open(out,"wb") as audio:
+        audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(16000);audio.writeframes(b"\x00\x00"*160)
+    return out.getvalue()
 
 
 @pytest.fixture(scope="module")
@@ -49,6 +57,15 @@ def page(browser, ui, text_model):
 def canvas_point(page, x, y):
     box = page.locator(".elements-dialog canvas").bounding_box()
     return box["x"] + x * box["width"] / 1000, box["y"] + y * box["height"] / 600
+
+def mark_image(page,index=0,label=""):
+    page.locator(f'[data-mark="{index}"]').click()
+    page.wait_for_function("() => document.querySelector('.elements-dialog canvas').width === 1000")
+    a,b=canvas_point(page,80,70),canvas_point(page,230,190)
+    page.mouse.move(*a);page.mouse.down();page.mouse.move(*b);page.mouse.up()
+    if label:page.locator("[data-label='0']").fill(label)
+    page.locator(".elements-save").click()
+    page.locator(".elements-dialog").wait_for(state="detached")
 
 
 def test_element_editor_drawing_geometry_labels_and_cleanup(page):
@@ -206,7 +223,7 @@ def test_marked_request_payload_overlay_presets_and_evidence(page):
     page.click("#presetNameSave")
     page.wait_for_function("() => presetData.request['marked request']")
     saved=page.evaluate("() => presetData.request['marked request']")
-    assert saved["_elements"][0]["originalData"]==original
+    assert saved["_elements"]["marked"][0]["originalData"]==original
     assert "_elements" not in body
     page.evaluate("() => setRequest({state:'reset',questions:{other:{type:'choice',criteria:{yes:null,no:null}}}})")
     page.select_option("#examples","preset:marked request")
@@ -216,3 +233,136 @@ def test_marked_request_payload_overlay_presets_and_evidence(page):
     assert not page.locator("#editJsonToggle").is_checked()
     page.evaluate("() => renderResults({answers:{element:{type:'choice',choice:'1',probabilities:{'1':0.9}}}},buildRequest())")
     assert page.locator("#results .image-source svg rect").count()==1
+
+
+def save_request_preset(page,name):
+    page.click("#saveRequestPreset")
+    page.fill("#presetName",name)
+    page.click("#presetNameSave")
+    page.wait_for_function(f"() => Boolean(presetData.request[{json.dumps(name)}])")
+
+
+def test_replacing_or_clearing_media_removes_linked_element_question(page):
+    mark_image(page,label="Button")
+    assert page.evaluate("() => selectedMedia[0].elements.question")=="element"
+    page.set_input_files("#mediaInput",{"name":"replacement.png","mimeType":"image/png","buffer":png()})
+    page.wait_for_function("() => selectedMedia.length===1&&selectedMedia[0].file.name==='replacement.png'")
+    assert page.evaluate("() => selectedMedia[0].elements") is None
+    assert page.locator(".q-name").count()==1
+    assert page.locator(".q-name").first.input_value()=="question"
+
+    mark_image(page,label="Next")
+    page.evaluate("() => clearSelectedMedia()")
+    assert page.evaluate("() => selectedMedia.length") == 0
+    assert page.locator(".q-name").count()==1
+    assert page.locator(".q-name").first.input_value()=="question"
+
+
+def test_mixed_media_presets_keep_indexes_fallback_and_json_marks(page):
+    page.evaluate("() => { loadedMedia=['image','audio']; $('#mediaInput').disabled=false; }")
+    page.set_input_files("#mediaInput",[
+        {"name":"call.wav","mimeType":"audio/wav","buffer":wav()},
+        {"name":"screen.png","mimeType":"image/png","buffer":png()},
+    ])
+    page.wait_for_function("() => selectedMedia.length===2")
+    mark_image(page,index=1,label="Button")
+    save_request_preset(page,"mixed media")
+    stored=page.evaluate("() => presetData.request['mixed media']")
+    assert stored["_elements"]["mediaNames"]==["call.wav","screen-marked.png"]
+    assert stored["_elements"]["marked"][0]["index"]==1
+
+    page.evaluate("() => setRequest({state:'reset',questions:{other:{type:'choice',criteria:{yes:null,no:null}}}})")
+    page.select_option("#examples","preset:mixed media")
+    assert page.evaluate("() => selectedMedia.map(m=>m.file.name)")==["call.wav","screen-marked.png"]
+    assert page.evaluate("() => selectedMedia[1].elements.image")==1
+    assert page.evaluate("() => Boolean(selectedMedia[1].originalData)")
+    page.check("#editJsonToggle")
+    page.uncheck("#editJsonToggle")
+    assert page.evaluate("() => selectedMedia[1].elements.image===1&&Boolean(selectedMedia[1].originalData)")
+    assert page.evaluate("() => selectedMedia[1].file.name")=="screen-marked.png"
+
+    page.evaluate("() => { presetData.request['mixed media'].vendor_extension={kept:true};renderRequestPresets();$('#examples').value=''; }")
+    page.select_option("#examples","preset:mixed media")
+    assert page.locator("#editJsonToggle").is_checked()
+    assert page.evaluate("() => selectedMedia.map(m=>m.file.name)")==["call.wav","screen-marked.png"]
+    assert page.evaluate("() => selectedMedia[1].elements.image===1&&Boolean(selectedMedia[1].originalData)")
+    raw=page.evaluate("() => $('#requestJson').value")
+    assert "vendor_extension" in raw and "_elements" not in raw
+
+
+def test_bundled_element_preset_without_original_bytes_restores_and_unlinks(page):
+    index=page.evaluate("() => examples.findIndex(e=>e.id==='media-01-checkout-elements')")
+    page.select_option("#examples",str(index))
+    assert page.evaluate("() => selectedMedia[0].elements.question")=="click_target"
+    assert page.evaluate("() => selectedMedia[0].originalData") is None
+    save_request_preset(page,"bundled elements")
+    saved=page.evaluate("() => presetData.request['bundled elements']")
+    assert "originalData" not in saved["_elements"]["marked"][0]
+    page.evaluate("() => setRequest({state:'reset',questions:{other:{type:'choice',criteria:{yes:null,no:null}}}})")
+    page.select_option("#examples","preset:bundled elements")
+    assert page.evaluate("() => selectedMedia[0].elements.question")=="click_target"
+    assert page.evaluate("() => selectedMedia[0].originalData") is None
+    page.locator('[data-mark="0"]').click()
+    page.wait_for_function("() => document.querySelector('.elements-dialog canvas').width===800")
+    page.locator(".elements-save").click()
+    assert page.evaluate("() => Boolean(selectedMedia[0].originalData)")
+    page.evaluate("() => [...document.querySelectorAll('.question')].find(c=>$('.q-name',c).value==='click_target').querySelector('.remove-question').click()")
+    assert page.evaluate("() => selectedMedia[0].elements") is None
+
+
+def test_question_name_collision_and_editing_preserve_linked_instructions(page):
+    page.evaluate("() => addQuestion('element',{type:'choice',instructions:'Existing instructions',criteria:{old:'Existing option'}})")
+    mark_image(page,label="New button")
+    assert page.evaluate("() => selectedMedia[0].elements.question")=="element2"
+    assert page.locator(".q-name").nth(1).input_value()=="element"
+    assert page.locator(".q-instructions-input").nth(1).input_value()=="Existing instructions"
+    element_card=page.locator(".question").nth(2)
+    element_card.locator(".q-instructions-input").fill("Keep these instructions")
+    page.locator(".mark-elements").first.click()
+    page.wait_for_function("() => document.querySelector('.elements-dialog canvas').width===1000")
+    page.locator(".elements-save").click()
+    assert page.evaluate("() => selectedMedia[0].elements.question")=="element2"
+    assert element_card.locator(".q-name").input_value()=="element2"
+    assert element_card.locator(".q-instructions-input").input_value()=="Keep these instructions"
+    assert page.locator(".q-name").count()==3
+
+
+def test_invalid_preset_geometry_is_rejected_before_svg_rendering(page):
+    mark_image(page,label="Button")
+    save_request_preset(page,"unsafe geometry")
+    page.evaluate("""() => {
+      const boxes=presetData.request['unsafe geometry']._elements.marked[0].boxes;
+      boxes['1'][0]='0\" onload=\"alert(1)';
+      renderRequestPresets();
+    }""")
+    page.evaluate("() => setRequest({state:'reset',questions:{other:{type:'choice',criteria:{yes:null,no:null}}}})")
+    page.select_option("#examples","preset:unsafe geometry")
+    assert page.evaluate("() => selectedMedia[0].elements") is None
+    page.evaluate("() => renderResults({answers:{element:{type:'choice',choice:'1',probabilities:{'1':0.9}}}},buildRequest())")
+    assert page.locator("#results .image-source svg").count()==0
+    assert page.locator("#results [onload]").count()==0
+
+
+def test_media_attachment_clears_evidence_and_language_draft_omits_media_bytes(page):
+    page.evaluate("() => clearSelectedMedia()")
+    evidence=page.locator(".question [data-f='evidence']").first
+    evidence.check()
+    page.set_input_files("#mediaInput",{"name":"draft.png","mimeType":"image/png","buffer":png()})
+    page.wait_for_function("() => selectedMedia.length===1")
+    assert evidence.is_disabled() and not evidence.is_checked()
+    assert not page.evaluate("() => buildRequest().questions.question.evidence")
+    mark_image(page,label="Draft button")
+    page.evaluate("() => preparePlaygroundLanguageSwitch()")
+    draft=page.evaluate("() => sessionStorage.getItem('basal-ui.language-draft')")
+    assert "data:" not in draft and "_elements" not in draft
+
+    page.check("#editJsonToggle")
+    page.evaluate("""() => {
+      const request=JSON.parse($('#requestJson').value);
+      request._elements={originalData:'private-image-data'};
+      $('#requestJson').value=JSON.stringify(request);
+      preparePlaygroundLanguageSwitch();
+    }""")
+    json_draft=page.evaluate("() => JSON.parse(sessionStorage.getItem('basal-ui.language-draft'))")
+    assert "data:" not in json_draft["text"] and "_elements" not in json_draft["text"]
+    assert "private-image-data" not in json_draft["text"]

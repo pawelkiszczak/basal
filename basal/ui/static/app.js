@@ -246,10 +246,11 @@ function showStatusError(text) { if(text)toast(text,'error'); }
 function mediaTitle(kinds) { return kinds.map(kind => kind === 'image' ? t('images') : kind === 'audio' ? t('audio') : kind).join(` ${t('and')} `); }
 function clearSelectedMedia() {
   mediaSelection++;
+  clearElementQuestions();
   selectedMedia.forEach(item => URL.revokeObjectURL(item.url));
   selectedMedia = [];
   $('#mediaInput').value = '';
-  renderSelectedMedia();
+  renderSelectedMedia(); syncRequest();
 }
 const fileSize = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
 function renderSelectedMedia() {
@@ -304,6 +305,7 @@ async function selectMedia(files) {
   try {
     const filesData = await Promise.all(files.map(readFile));
     if (selection !== mediaSelection) return;
+    clearElementQuestions();
     selectedMedia.forEach(item => URL.revokeObjectURL(item.url));
     selectedMedia = filesData.map(item => ({...item,url:URL.createObjectURL(item.file)}));
     renderSelectedMedia(); syncRequest();
@@ -358,7 +360,7 @@ $('#presetNameSave').onclick=()=>act(async()=>{
 });
 $('#examples').addEventListener('change',e=>{
   const val=e.target.value;
-  if(val.startsWith('preset:')){const name=val.slice(7),stored=presetData.request?.[name];if(stored){const {_elements=[],...request}=stored;setRequest(request,_elements.map(x=>x.markedName));restoreElementMarks(_elements);}return;}
+  if(val.startsWith('preset:')){const name=val.slice(7),stored=presetData.request?.[name];if(stored){const {_elements:metadata={},...request}=stored;let mediaNames=metadata.mediaNames||[],records=metadata.marked||[];if(Array.isArray(metadata)){records=metadata;mediaNames=[];metadata.forEach(record=>{mediaNames[record.index]=record.markedName;});}if(!setRequest(request,mediaNames))restorePresetMediaFallback(request,mediaNames);restoreElementMarks(records);}return;}
   const item=examples[Number(val)];
   if(item?.request){
     const request={...item.request};delete request.id;delete request.gold;setRequest(request,item.media_files||[]);
@@ -697,9 +699,10 @@ function setRequest(req, names=[]) {  // names: file names of req.media (bundled
     $('#editJsonToggle').checked=true;$('#editJsonArea').hidden=false;$('#builder').hidden=true;
     $('#requestJson').value=JSON.stringify(req,null,2);
     showMediaError(t('This request contains fields or values the Playground builder cannot edit. It remains in Edit JSON mode.'));
+    return false;
   };
   if(!req||typeof req!=='object'||Array.isArray(req)||!Object.hasOwn(req,'state')||req.state==null||
-     !Object.hasOwn(req,'questions')||!req.questions||typeof req.questions!=='object'||Array.isArray(req.questions)){preserveJson();return;}
+     !Object.hasOwn(req,'questions')||!req.questions||typeof req.questions!=='object'||Array.isArray(req.questions))return preserveJson();
   const known=new Set(['state','questions','facts','lang','think','think_text','early_exit','media','detail','model']);
   const media=Array.isArray(req.media)?req.media:[];
   let restored=[];
@@ -721,8 +724,7 @@ function setRequest(req, names=[]) {  // names: file names of req.media (bundled
     });
   } catch {
     restored.forEach(item=>URL.revokeObjectURL(item.url));
-    preserveJson();
-    return;
+    return preserveJson();
   }
   selectedMedia=restored;renderSelectedMedia();
   $('#editJsonToggle').checked=false;$('#editJsonArea').hidden=true;$('#builder').hidden=false;showMediaError();
@@ -740,12 +742,15 @@ function setRequest(req, names=[]) {  // names: file names of req.media (bundled
   $('#questions').innerHTML='';
   for(const [name,q] of Object.entries(req.questions||{})) addQuestion(name,q);
   syncRequest(true);
+  return true;
 }
 const PLAYGROUND_DRAFT='basal-ui.language-draft';
 window.preparePlaygroundLanguageSwitch=()=>{
   const hadMedia=selectedMedia.length>0;
   if($('#editJsonToggle').checked){
-    sessionStorage.setItem(PLAYGROUND_DRAFT,JSON.stringify({json:true,text:$('#requestJson').value,hadMedia}));
+    let text=$('#requestJson').value;  // kept as typed (even invalid), without media or element originals
+    try {const request=JSON.parse(text);if(request&&typeof request==='object'&&!Array.isArray(request)&&('media' in request||'_elements' in request)){delete request.media;delete request._elements;text=JSON.stringify(request,null,2);}} catch {}
+    sessionStorage.setItem(PLAYGROUND_DRAFT,JSON.stringify({json:true,text,hadMedia}));
     return;
   }
   const cards=[...document.querySelectorAll('#questions .question')];
@@ -948,7 +953,7 @@ function renderSource(state, spans) {
 // colours are fixed (app.css .image-source): the image is the background in both themes
 function imageSources(answers, request) {
   return selectedMedia.map((item,i)=>({item,i}))
-    .filter(({item,i})=>item.kind==='image'&&item.elements&&request.media?.[i]?.data===item.data&&answers?.[item.elements.question]?.probabilities)
+    .filter(({item,i})=>item.kind==='image'&&validElementGeometry(item.elements)&&request.media?.[i]?.data===item.data&&answers?.[item.elements.question]?.probabilities)
     .map(({item})=>{
       const {question,boxes,size:[w,h]}=item.elements, a=answers[question], probs=a.probabilities, chosen=String(a.choice??a.answer??'');
       const rects=Object.entries(boxes).map(([k,[x,y,bw,bh]])=>{
@@ -1026,7 +1031,12 @@ $('#editJsonToggle').addEventListener('change',()=>{
     try{request=JSON.parse($('#requestJson').value);}
     catch(e){showMediaError(t('Invalid request JSON: {message}',{message:e.message}));$('#editJsonToggle').checked=true;return;}
     if(!request||typeof request!=='object'||Array.isArray(request)){showMediaError(t('request JSON must be an object'));$('#editJsonToggle').checked=true;return;}
-    showMediaError();setRequest(request);
+    showMediaError();
+    const meta=elementPresetData(),media=Array.isArray(request.media)?request.media:[];
+    const names=media.map(item=>selectedMedia.find(current=>current.data===item?.data)?.file.name);
+    const marks=meta.marked.flatMap(record=>{const index=media.findIndex(item=>item?.data===record.markedData);return index<0?[]:[{...record,index}];});
+    if(!setRequest(request,names))restorePresetMediaFallback(request,names);
+    restoreElementMarks(marks);
   }
   $('#editJsonArea').hidden=!$('#editJsonToggle').checked;$('#builder').hidden=$('#editJsonToggle').checked;
 });
