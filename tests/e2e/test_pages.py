@@ -715,6 +715,9 @@ def test_the_inspect_handoff_names_every_difference_and_refuses_what_it_cannot_e
         "dept": {"type": "choice", "criteria": {"a": "A", "b": "B"}},
         "intent": {"type": "classify", "labels": {"x": "X", "y": "Y"}}}}
     handoff = page.evaluate(probe, [text_model["id"], mixed])
+    recurrent = {"port": "bf16", "experimental": True, "family": "basal-omni", "recurrent": True}
+    assert not page.evaluate("model => inspectableModel(model)", recurrent)
+    assert page.evaluate("model => inspectableModel({...model, recurrent: false})", recurrent)
     assert list(handoff["body"]["questions"]) == ["dept"] and handoff["body"]["facts"] == "auto"
     assert not {"model", "think", "early_exit"} & set(handoff["body"])
     notes = " | ".join(handoff["notes"])
@@ -722,7 +725,8 @@ def test_the_inspect_handoff_names_every_difference_and_refuses_what_it_cannot_e
                  "option orders: served 2, explained 1", "calibration: the served temperatures differ",
                  "thinking: explained without the reasoning", "early exit 0.99"):
         assert part in notes, notes
-    assert "media" in page.evaluate(probe, [text_model["id"], {**mixed, "media": [{"type": "image"}]}])["blocked"]
+    assert "remove the media to inspect this request" in page.evaluate(
+        probe, [text_model["id"], {**mixed, "media": [{"type": "image"}]}])["blocked"]
     only_tasks = {"state": "s", "questions": {"intent": mixed["questions"]["intent"]}}
     assert "only task questions" in page.evaluate(probe, [text_model["id"], only_tasks])["blocked"]
     other = page.evaluate("""([model, request]) => {

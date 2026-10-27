@@ -1837,7 +1837,7 @@ $('#cancelBatch').onclick=()=>act(async()=>{await api('/api/batch',{method:'DELE
 $('#downloadBatch').onclick=()=>{const a=document.createElement('a');a.href='/api/batch/download';a.click();};
 $('#copyBatchPath').onclick=()=>copyText(batchResult?.output||'',t('Output path copied'));
 // Inspect: basal-viz embedded at /viz/ for a downloaded bf16 model (basal/ui/inspect.py)
-const inspectableModel=m=>m.port==='bf16'&&!m.experimental;
+const inspectableModel=m=>m.port==='bf16'&&!m.recurrent&&(!m.experimental||m.family.startsWith('basal-omni'));
 let inspectSignature='', inspectReady=false;
 function renderInspectModels() {
   const select=$('#inspectModel'), current=select.value||localStorage.getItem('basal-ui.inspectModel')||'', rows=modelData.filter(m=>m.downloaded);
@@ -1871,7 +1871,7 @@ function renderInspectState(state, job) {
 function inspectHandoff(request) {
   const st=statusCache?.inspect||{}, served=(statusCache?.models||[]).find(m=>m.id===request.model);
   const variant=id=>modelData.find(m=>m.id===id), sv=variant(request.model), iv=variant(st.model);
-  if(request.media)return {blocked:t('basal-viz explains text decisions; this request carries media')};
+  if(request.media)return {blocked:t('basal-viz reads text only; remove the media to inspect this request')};
   if(st.model!==request.model&&!(sv&&iv&&sv.family===iv.family&&sv.tier===iv.tier))
     return {blocked:t('the inspector runs {inspector}, this decision came from {model}: start the inspector with the bf16 weights of {weights}',{inspector:st.model,model:request.model,weights:sv?`${sv.family} ${sv.tier}`:request.model})};
   const body=structuredClone(request), notes=[];

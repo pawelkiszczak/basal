@@ -8,13 +8,13 @@ from basal.viz import Explainer
 
 from .jobs import Cancelled
 
-NOT_INSPECTABLE = ("basal-viz reads the bf16 PyTorch weights of basal-1.0, basal-1.5 and basal-2.0; download the bf16 "
-                   "variant")
+NOT_INSPECTABLE = ("basal-viz reads the bf16 PyTorch weights of basal-1.0, basal-1.5, basal-2.0 and basal-omni; "
+                   "download the bf16 variant")
 
 
 def inspectable(variant) -> str | None:
-    """None when basal-viz can read the variant, else why not (MLX / GGUF / FP8 / NVFP4 ports, basal-omni)."""
-    if variant.port != "bf16" or variant.experimental:
+    """None when basal-viz can read the bf16 PyTorch variant, else why not."""
+    if variant.port != "bf16" or variant.recurrent or (variant.experimental and not variant.family.startswith("basal-omni")):
         return NOT_INSPECTABLE
     return None
 

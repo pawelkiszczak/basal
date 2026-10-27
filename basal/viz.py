@@ -24,6 +24,7 @@ import torch
 
 from .engine import default_device
 from .facts import inject as inject_facts
+from .gemma4 import is_gemma4, text_model
 from .prompt import FORMATS, PREFILL
 from .run import to_request
 from .server import Server, certified, http_status, temperature, to_items
@@ -80,15 +81,20 @@ class Explainer:
         self.srv = Server(serve_parser().parse_args(args))
         be = self.srv.backend
         self.tok, self.model, self.dev, self.fmt = be.tok, be.model, be.dev, self.srv.fmt
-        if getattr(self.model.config, "model_type", None) != "llama":
+        self.gemma4 = is_gemma4(self.model)
+        if not self.gemma4 and getattr(self.model.config, "model_type", None) != "llama":
             raise SystemExit(f"basal-viz reads the layers of the Llama-architecture models (basal-1.0, basal-1.5, "
                              f"basal-2.0); {a.model} is {self.model.config.model_type!r}")
+        self.text_model = text_model(self.model) if self.gemma4 else self.model.model
+        self.head = self.model.get_output_embeddings() if self.gemma4 else self.model.lm_head
+        cfg = self.text_model.config
+        self.softcap = getattr(cfg, "final_logit_softcapping", None) if self.gemma4 else None
         self.name = self.srv.name
         self.lock = threading.Lock()
         cal = self.srv.cal
         self.thresholds = {t: {q: certified(cal, float(t), q) for q in ("choice", "noul", "score")} for t in TARGETS}
         self.info = {"model": self.name, "device": str(self.dev), "dtype": a.dtype, "mode": mode,
-                     "layers": len(self.model.model.layers), "prompt_format": self.fmt, "orders": self.srv.orders,
+                     "layers": len(self.text_model.layers), "prompt_format": self.fmt, "orders": self.srv.orders,
                      "thresholds": self.thresholds, "temperatures": cal.get("temperature_per_prim", {}),
                      "temperature_per_bucket": cal.get("temperature_per_bucket", {})}
 
@@ -96,18 +102,28 @@ class Explainer:
     def lens(self, ids, codes):
         """Forward with a hook on every decoder layer -> code distribution after each layer (fp32 code logits, as the
         engines read them) and the top tokens of the full vocabulary at the last layer."""
-        mm, caught = self.model.model, []
-        hooks = [layer.register_forward_hook(lambda _m, _i, o: caught.append((o[0] if isinstance(o, tuple) else o)[0, -1]))
+        mm, caught = self.text_model, []
+        hooks = [layer.register_forward_hook(
+            lambda _m, _i, o: caught.append((o[0] if isinstance(o, tuple) else o)[0, -1].clone()))
                  for layer in mm.layers]
         try:
-            final = mm(input_ids=torch.tensor([ids], device=self.dev), use_cache=False).last_hidden_state[0, -1]
+            final = mm(input_ids=torch.tensor([ids], device=self.dev), use_cache=False,
+                       output_hidden_states=False).last_hidden_state[0, -1]
         finally:
             for h in hooks:
                 h.remove()
         H = torch.stack([mm.norm(h[None])[0] for h in caught[:-1]] + [final])
-        W = self.model.lm_head.weight
-        per_layer = torch.softmax(H.float() @ W[codes].float().T, -1)
-        top = torch.log_softmax((H[-1] @ W.T).float(), -1).topk(5)  # what the model would write without the codes
+        W = self.head.weight
+        logits = H.float() @ W[codes].float().T
+        top_logits = H[-1] @ W.T
+        if self.head.bias is not None:
+            logits = logits + self.head.bias[codes].float()
+            top_logits = top_logits + self.head.bias.float()
+        if self.softcap:
+            logits = torch.tanh(logits / self.softcap) * self.softcap
+            top_logits = torch.tanh(top_logits.float() / self.softcap) * self.softcap
+        per_layer = torch.softmax(logits, -1)
+        top = torch.log_softmax(top_logits.float(), -1).topk(5)
         return per_layer.tolist(), [(self.tok.decode([int(i)]), float(p.exp())) for p, i in zip(top.values, top.indices)]
 
     def explain_branch(self, q, bi):
@@ -168,6 +184,8 @@ class Explainer:
     def explain(self, body):
         """The page's steps for every question of a request (one entry per label of a multi question); with
         "facts": "auto" the state carries the computed facts, as basal-serve reads it."""
+        if body.get("media"):
+            raise ValueError("basal-viz reads text only: remove the media to inspect this request")
         with self.lock:
             t0 = time.perf_counter()
             state = body["state"]

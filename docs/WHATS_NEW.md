@@ -10,6 +10,10 @@
   into the media field with an audio player for clips and a notice on a model without media; basal-viz skips them.
   [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
 
+- **basal-viz / basal-ui Inspect** now reads text decisions from Gemma 4 basal-omni, including the final logit
+  softcap, and allows its bf16 checkpoints in Inspect (not recurrent basal-omni-pico). Media requests remain unsupported
+  and are refused with a clear message. [SERVING.md](SERVING.md#see-how-a-decision-is-made)
+
 - **LoRA adapters at load:** `--adapter DIR` (mlx-lm or PEFT) on basal-serve, basal-calibrate, basal-bench and the
   basal-ui load options merges the adapter into the weights at load on every in-process engine (bit-identical to
   `mlx_lm fuse` on basal-2.0-mini, also for the `-MLX-8bit` export), passes it natively to vLLM / SGLang and refuses it
