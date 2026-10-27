@@ -71,6 +71,18 @@ def mark_image(page,index=0,label=""):
 PIXEL = """([x, y]) => [...document.querySelector('.elements-dialog canvas').getContext('2d').getImageData(x, y, 1, 1).data]"""
 
 
+@pytest.mark.parametrize("size", [(1440, 900), (390, 844)], ids=["desktop", "phone"])
+def test_element_editor_opens_centred_in_the_viewport(page, size):
+    page.set_viewport_size({"width": size[0], "height": size[1]})
+    page.locator(".mark-elements").first.click()
+    page.wait_for_function("() => document.querySelector('.elements-dialog canvas').width === 1000")
+    box = page.evaluate("""() => { const r = document.querySelector('.elements-dialog').getBoundingClientRect();
+      return {inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5,
+              dx: Math.round((r.left + r.right) / 2 - innerWidth / 2), dy: Math.round((r.top + r.bottom) / 2 - innerHeight / 2)}; }""")
+    assert box == {"inside": True, "dx": 0, "dy": 0}
+    page.locator(".elements-cancel").click()
+
+
 def test_element_editor_shows_the_image_and_badges_where_save_paints_them(page):
     page.locator(".mark-elements").first.click()
     page.wait_for_function("() => document.querySelector('.elements-dialog canvas').width === 1000")
