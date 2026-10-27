@@ -278,11 +278,15 @@ basal-ui --port 7860                  # then open http://127.0.0.1:7860
 
 The left menu has one view per task, each with its own address (`#overview`, `#models`, `#manager`, `#playground`,
 `#api`, `#history`, `#logs`), so the browser's back button and bookmarks work. **Overview** shows the hardware, the
-loaded models (one row each: state, mode, media, estimated → resident memory, requests and average confidence,
+**inference** happening now (updated every second while Overview is open: per model the requests basal-ui is waiting
+on by source — Playground, API server, MCP, benchmark — with the longest one's time and basal-serve's running / queued
+counters, and running batch, benchmark, calibration and backend-test jobs with their progress; otherwise *Idle* and
+when the last decision was), the loaded models (one row each: state, a pulsing dot while it answers, mode, media,
+estimated → resident memory, requests and average confidence,
 Restart / Logs / Unload) above a memory budget bar, the recommended model for this machine and short summaries of the
 disk and the API server; **Models**, **Model manager**, **Playground**, **API server**, **History** and **Logs** hold
 the features below. **Models** opens Suggested (default) and All models; **Model manager** orders Loaded (statistics,
-benchmarks and calibration), On disk, then Models directory. The menu's footer shows how many models are ready, their names, the API server's URL and an
+benchmarks and calibration), On disk, then Models directory. The menu's footer shows how many models are ready (and how many are answering), their names, the API server's URL and an
 **Unload all** button. Deleting a model or revoking a key asks for confirmation in a dialog, and actions report their
 outcome in a short notification. On a narrow window the menu becomes a top bar. **ⓘ** on every model opens its model
 card: repository and author (base repository for a conversion), family, tier, port, size, media, the mode this machine
