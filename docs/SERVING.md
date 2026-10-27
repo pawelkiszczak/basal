@@ -144,6 +144,28 @@ benchmarking a GPU.
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md).
 
+## API access
+
+`basal-serve` is open by default. To require API keys, pass `--api-keys PATH` with a JSON file containing SHA-256
+digests (never plaintext secrets):
+
+```json
+{"keys": [{"name": "laptop", "sha256": "<64-character lowercase SHA-256 hex digest>", "admin": false}]}
+```
+
+Send the secret as `Authorization: Bearer <secret>` or `X-API-Key: <secret>`. `GET /health` remains open.
+`GET /v1/keys` requires an admin key and reports each key's in-memory `last_used` time. File changes take effect
+without restarting the server. MCP at `/mcp` uses the same authentication.
+
+`--cors-origins` accepts a comma-separated list of browser origins, for example
+`--cors-origins https://app.example,https://admin.example`. CORS is disabled by default; use `*` to allow all origins.
+Allowed preflight methods are GET, POST and OPTIONS.
+Preflight requests may include `X-Request-Id`; the response echoes it as `x-request-id`.
+
+```bash
+basal-serve --model Remek/basal-2.0-mini --api-keys ./api-keys.json --cors-origins https://app.example
+```
+
 ## Inference on a JSONL file
 
 `basal-run` sends every line of a JSONL file to a running server (concurrently; the server batches the requests) and

@@ -1,3 +1,8 @@
+# Unreleased
+
+- **API keys, CORS and request IDs for `basal-serve`:** opt-in `--api-keys` protects HTTP and MCP routes (except
+  `GET /health`), `--cors-origins` enables browser access from listed origins, and responses carry request IDs.
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture

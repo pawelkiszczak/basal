@@ -149,6 +149,49 @@ def test_bridge_forwards_over_http_and_reports_errors():
     assert r.is_error and "422" in r.content[0].text and "unknown question type: guess" in r.content[0].text
 
 
+def test_bridge_sends_api_key_with_mock_transport():
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"model": "m", "answers": {}})
+
+    decide = mcp_server.remote("http://basal:8000/", transport=httpx.MockTransport(handler), api_key="secret")
+    assert asyncio.run(decide({"state": "s", "questions": {}})) == {"model": "m", "answers": {}}
+    assert seen == ["Bearer secret"]
+
+
+def test_bridge_cli_api_key_uses_bearer_header(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"model": "m", "answers": {}})
+
+    original_remote = mcp_server.remote
+
+    def remote(url, timeout, api_key=None):
+        return original_remote(url, timeout, transport=httpx.MockTransport(handler), api_key=api_key)
+
+    class Runner:
+        def __init__(self, decide):
+            self.decide = decide
+
+        def run(self, transport):
+            assert transport == "stdio"
+            assert asyncio.run(self.decide({"state": "s", "questions": {}})) == {"model": "m", "answers": {}}
+
+    monkeypatch.setattr(sys, "argv", ["basal-mcp", "--api-key", "secret"])
+    monkeypatch.setattr(mcp_server, "remote", remote)
+    def model_name(url, api_key=None):
+        assert api_key == "secret"
+        return "m"
+    monkeypatch.setattr(mcp_server, "model_name", model_name)
+    monkeypatch.setattr(mcp_server, "build", lambda decide, model: Runner(decide))
+    mcp_server.main()
+    assert seen == ["Bearer secret"]
+
+
 def test_mcp_without_the_package_fails_before_model_loading(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["basal-serve", "--mode", "eager", "--mcp", "on"])
     monkeypatch.setattr(mcp_server, "available", lambda: mcp_server.INSTALL)

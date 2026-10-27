@@ -118,11 +118,12 @@ def http(server, host):
     return app.routes, m.session_manager.run
 
 
-def remote(url, timeout=60.0, transport=None):
+def remote(url, timeout=60.0, transport=None, api_key=None):
     """decide over HTTP for the bridge: POST <url>/v1/systemone; the server's error message on HTTP errors."""
     import httpx
 
-    client = httpx.AsyncClient(base_url=url.rstrip("/"), timeout=timeout, transport=transport)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    client = httpx.AsyncClient(base_url=url.rstrip("/"), timeout=timeout, transport=transport, headers=headers)
 
     async def decide(body):
         r = await client.post("/v1/systemone", json=body)
@@ -137,12 +138,13 @@ def remote(url, timeout=60.0, transport=None):
     return decide
 
 
-def model_name(url, timeout=5.0):
+def model_name(url, timeout=5.0, api_key=None):
     """The served model's name from GET /v1/models; "basal" when the server does not answer yet."""
     import httpx
 
     try:
-        return httpx.get(url.rstrip("/") + "/v1/models", timeout=timeout).json()["models"][0]["name"]
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        return httpx.get(url.rstrip("/") + "/v1/models", timeout=timeout, headers=headers).json()["models"][0]["name"]
     except Exception:  # noqa: BLE001
         return "basal"
 
@@ -151,12 +153,13 @@ def main():
     ap = argparse.ArgumentParser(description="basal over MCP (stdio): a bridge to a running basal server for agent "
                                              "hosts that start MCP servers as local processes")
     ap.add_argument("--url", default="http://127.0.0.1:8000", help="the basal server (basal-serve)")
+    ap.add_argument("--api-key", default=None, help="Bearer API key")
     ap.add_argument("--timeout", type=float, default=60.0, help="seconds per request")
     a = ap.parse_args()
     msg = available()
     if msg:
         raise SystemExit(msg)
-    build(remote(a.url, a.timeout), model_name(a.url)).run("stdio")
+    build(remote(a.url, a.timeout, api_key=a.api_key), model_name(a.url, api_key=a.api_key)).run("stdio")
 
 
 if __name__ == "__main__":
