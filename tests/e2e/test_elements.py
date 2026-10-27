@@ -316,6 +316,7 @@ def test_decision_overlay_uses_media_snapshot_from_send_time(page):
         "answers": {"click_target": {"type": "choice", "choice": "1",
                                      "probabilities": {"1": 0.7, "2": 0.2, "3": 0.05, "4": 0.05}}}
     }))
+    page.wait_for_selector("#results .answer")
     overlay = page.locator("#results .image-source svg")
     assert overlay.locator("rect").count() == 4
     assert "checkout.png" in overlay.get_attribute("aria-label")
