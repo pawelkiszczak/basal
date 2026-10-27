@@ -348,6 +348,14 @@ def test_media_example_loads_with_a_notice_and_draws_element_probabilities(page,
     page.click("#sendButton")
     sync_api.expect(page.locator("#decideError")).to_contain_text("does not take images")  # refused before sending
     assert not decide_calls
+    page.evaluate("() => { loadedMedia = ['image', 'audio']; }")  # as on a media model: evidence is what is refused
+    page.check("#editJsonToggle")
+    page.evaluate("""() => { const r = JSON.parse($('#requestJson').value); r.questions.click_target.evidence = true;
+      $('#requestJson').value = JSON.stringify(r); }""")
+    page.click("#sendButton")
+    sync_api.expect(page.locator("#decideError")).to_contain_text('turn off "Evidence spans" on click_target')
+    assert not decide_calls
+    page.evaluate("() => { loadedMedia = []; }")
     page.evaluate("""() => renderResults({answers: {click_target: {type: 'choice', choice: '1',
       probabilities: {'1': 0.7, '2': 0.2, '3': 0.05, '4': 0.05}}}}, buildRequest())""")
     overlay = page.locator("#results .image-source svg")

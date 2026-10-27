@@ -994,6 +994,8 @@ async function sendDecision() {
   request.model=selectedModel;
   const unsupported=[...new Set((Array.isArray(request.media)?request.media:[]).map(m=>m?.type))].filter(k=>['image','audio'].includes(k)&&!loadedMedia.includes(k));
   if(unsupported.length){showDecideError(`${shortName(selectedModel||'This model')} does not take ${mediaTitle(unsupported)}. Remove the media, or load a basal-omni model with "Load with media" and select it.`);return;}
+  const withEvidence=Array.isArray(request.media)&&request.media.length?Object.entries(request.questions||{}).filter(([,q])=>q?.evidence).map(([name])=>name):[];
+  if(withEvidence.length){showDecideError(`Evidence spans are read from the state's text, so a request with media cannot have them: turn off "Evidence spans" on ${withEvidence.join(', ')}, or remove the media.`);return;}
   if($('#editJsonToggle').checked)$('#requestJson').value=JSON.stringify(request,null,2);
   $('#sendButton').disabled=true;
   try { const response=await api('/api/decide',{method:'POST',body:JSON.stringify(request)}); renderResults(response,request); }
