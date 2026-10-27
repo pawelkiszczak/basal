@@ -139,6 +139,9 @@ def read(path):
 
 
 def delta(ad, key, np_dtype=np.float32):
+    """The update of one module, (scale * b) @ a in float32 on the CPU ([out, in]), cast to np_dtype. Every merge (torch
+    on any device, MLX, the TPU's numpy weights, basal-fuse-adapter) takes it from here, so --adapter and the fused
+    checkpoint get bit-identical weights whatever GEMM the device would have used."""
     a, b = ad.deltas[key]
     return ((np.float32(ad.scale) * b) @ a).astype(np_dtype)
 
@@ -174,7 +177,7 @@ def merge_torch(model, ad):
     root = getattr(root, "language_model", root)
     layers = _layers(ad, lambda: root.layers)
     with torch.no_grad():
-        for key, (a, b) in ad.deltas.items():
+        for key in ad.deltas:
             _, _, mod = _target(ad, layers, key)
             if not isinstance(mod, torch.nn.Linear):
                 raise SystemExit(f"--adapter {ad.name}: {key}: {type(mod).__name__} is not a linear layer the "
@@ -183,8 +186,8 @@ def merge_torch(model, ad):
             if w.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
                 raise SystemExit(f"--adapter {ad.name}: {key}: FP8 weights cannot take a merge")
             _check_shape(ad, key, w.shape)
-            d = (ad.scale * torch.from_numpy(b).to(w.device)) @ torch.from_numpy(a).to(w.device)
-            w.add_(d.to(w.dtype))
+            d = torch.from_numpy(delta(ad, key)).to(w.dtype)  # rounded on the CPU, then moved (bf16)
+            w.add_(d.to(w.device))
     return len(ad.deltas)
 
 
@@ -196,7 +199,7 @@ def merge_mlx(model, ad):
     import mlx.nn as nn
     lm = getattr(model, "language_model", model)
     layers = _layers(ad, lambda: lm.model.layers)
-    for key, (a, b) in ad.deltas.items():
+    for key in ad.deltas:
         parent, attr, mod = _target(ad, layers, key)
         quantized = isinstance(mod, nn.QuantizedLinear)
         if not (quantized or isinstance(mod, nn.Linear)):
@@ -206,9 +209,7 @@ def merge_mlx(model, ad):
         if quantized:
             w = mx.dequantize(w, mod.scales, mod.biases, group_size=mod.group_size, bits=mod.bits, mode=mod.mode)
         _check_shape(ad, key, w.shape)
-        # mlx-lm's layout and expression (lora_a [in, r], lora_b [r, out]), so the result is bit-identical to its fuse
-        la, lb = mx.array(np.ascontiguousarray(a.T)), mx.array(np.ascontiguousarray(b.T))
-        w = w + ((ad.scale * lb.T) @ la.T).astype(w.dtype)
+        w = w + mx.array(delta(ad, key)).astype(w.dtype)
         if quantized:
             out, inp = w.shape
             fused = nn.Linear(inp, out, bias="bias" in mod)
