@@ -328,7 +328,9 @@ when new models appeared in the Hugging Face catalog (the offline catalog of the
 - **Playground**: a model selector (the ready models), the bundled examples (`advanced.jsonl`: one request per
   question type), a question builder for every type (`choice`, `noul`, `score`, `multi`, `act` with simple costs or a
   cost matrix, `tool`, `classify`, `verify`, `compress`, `extract`, with `max_error` and evidence where the type takes
-  them), `facts` and `lang` for the request, or the raw JSON request (which carries `"model"`). Each type has its own
+  them), `facts` and `lang` for the request, or the raw JSON request (which carries `"model"`). Question names must be
+  non-blank and unique; requests containing fields or media the builder cannot restore stay visible in Edit JSON mode.
+  Each type has its own
   result view; every answer shows whether it was deferred, whether its confidence clears the model's certified 1% / 5%
   thresholds and how it is calibrated; an answer whose calibration does not hold for it (media answers on a
   text-fitted calibration, `unvalidated` files) gets no automation claim. A truncated state is flagged, and the state
@@ -487,7 +489,9 @@ file is written) and `--save-rows`, which keeps the uncalibrated probabilities n
 **History** lists every decision basal-ui answered — from the playground, the API server and MCP — newest first:
 time, model, source, a preview of the state, the answer of each question with its confidence, latency and HTTP
 status. Filter by model and source, search the state, open a row for the full request and response, copy the request
-or **Replay in Playground** (the request in the JSON editor with its model selected). The last 2000 decisions are kept
+or **Replay in Playground** (a converted request in the Playground with its model selected; replay only fills the form).
+Media bytes are removed from history, so a request whose replay needs an original attachment is blocked with an
+explanation. The last 2000 decisions are kept
 in `<settings stem>.history.jsonl` (owner-only) next to the settings file, with media bytes replaced by their size;
 **Clear history** empties it.
 
