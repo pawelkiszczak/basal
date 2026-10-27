@@ -359,7 +359,7 @@ $('#examples').addEventListener('change',e=>{
     const request={...item.request};delete request.id;delete request.gold;setRequest(request,item.media_files||[]);
     if(item.elements&&selectedMedia[item.elements.image])selectedMedia[item.elements.image].elements=item.elements;
     const needs=[...new Set((request.media||[]).map(m=>m.type))].filter(k=>!loadedMedia.includes(k));
-    if(needs.length)showMediaError(`This example carries ${mediaTitle(needs)}: load a basal-omni model with "Load with media", then pick this example again to send it.`);
+    if(needs.length)showMediaError(t('This example carries {media}: load a basal-omni model with "Load with media", then pick this example again to send it.',{media:mediaTitle(needs)}));
   }else if(item)setRequest({state:item.state,questions:item.questions});
 });
 async function deletePreset(kind,name) {
@@ -950,7 +950,7 @@ function imageSources(answers, request) {
         const p=Number(probs[k])||0, win=k===chosen;
         return `<rect class="${win?'chosen':''}" x="${x}" y="${y}" width="${bw}" height="${bh}" fill-opacity="${(0.08+0.5*p).toFixed(3)}"><title>${esc(k)} · ${pct(p)}</title></rect><text x="${x+18}" y="${Math.max(16,y-4)}">${esc(k)} · ${pct(p)}</text>`;
       }).join('');
-      return `<div class="source-view image-source"><div class="section-head"><strong>Image · ${esc(question)}</strong><span class="chips"><span class="chip">element probabilities</span></span></div><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Element probabilities over ${esc(item.file.name)}"><image href="data:${esc(item.file.type)};base64,${esc(item.data)}" width="${w}" height="${h}"/>${rects}</svg></div>`;  // not the blob URL: it is revoked when the media change
+      return `<div class="source-view image-source"><div class="section-head"><strong>${t('Image · {question}',{question:esc(question)})}</strong><span class="chips"><span class="chip">${t('element probabilities')}</span></span></div><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${t('Element probabilities over {name}',{name:esc(item.file.name)})}"><image href="data:${esc(item.file.type)};base64,${esc(item.data)}" width="${w}" height="${h}"/>${rects}</svg></div>`;  // not the blob URL: it is revoked when the media change
     }).join('');
 }
 // thinking (basal/think.py): readout 2 after the reasoning, with the answer it replaced
@@ -993,9 +993,9 @@ async function sendDecision() {
   }
   request.model=selectedModel;
   const unsupported=[...new Set((Array.isArray(request.media)?request.media:[]).map(m=>m?.type))].filter(k=>['image','audio'].includes(k)&&!loadedMedia.includes(k));
-  if(unsupported.length){showDecideError(`${shortName(selectedModel||'This model')} does not take ${mediaTitle(unsupported)}. Remove the media, or load a basal-omni model with "Load with media" and select it.`);return;}
+  if(unsupported.length){showDecideError(t('{model} does not take {media}. Remove the media, or load a basal-omni model with "Load with media" and select it.',{model:shortName(selectedModel||t('This model')),media:mediaTitle(unsupported)}));return;}
   const withEvidence=Array.isArray(request.media)&&request.media.length?Object.entries(request.questions||{}).filter(([,q])=>q?.evidence).map(([name])=>name):[];
-  if(withEvidence.length){showDecideError(`Evidence spans are read from the state's text, so a request with media cannot have them: turn off "Evidence spans" on ${withEvidence.join(', ')}, or remove the media.`);return;}
+  if(withEvidence.length){showDecideError(t('Evidence spans are read from the state\'s text, so a request with media cannot have them: turn off "Evidence spans" on {questions}, or remove the media.',{questions:withEvidence.join(', ')}));return;}
   if($('#editJsonToggle').checked)$('#requestJson').value=JSON.stringify(request,null,2);
   $('#sendButton').disabled=true;
   try { const response=await api('/api/decide',{method:'POST',body:JSON.stringify(request)}); renderResults(response,request); }
