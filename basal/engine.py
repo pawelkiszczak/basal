@@ -997,10 +997,13 @@ class GraphBackend(EagerBackend):
             if quant not in (None, "fp8"):
                 raise ValueError(f"{model_dir} is an FP8 checkpoint; serve it without --quant {quant}")
             self.model, quant = load_modelopt_fp8(model_dir, "cuda", getattr(torch, dtype)), None
+            self.adapter_modules = 0  # an adapter was refused above
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).cuda().eval()
-        # --adapter: merged before the projection merge and the torchao quantisation
-        self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0
+            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype))
+            # --adapter: merged on the CPU (as basal-fuse-adapter, so the weights are the same), before the projection
+            # merge and the torchao quantisation
+            self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0
+            self.model = self.model.cuda().eval()
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL
         if gemma4_graph.is_gemma4(self.model):
