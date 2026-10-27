@@ -2,11 +2,13 @@
 
 - **Basal UI message codes:** model availability, recommendation, backend setup and job-phase explanations retain their English API fields and include additive translation codes for Polish rendering. Server errors remain English.
 
-- **Media examples in the Playground:** `basal/examples/media.jsonl` with three generated images (a checkout
-  screenshot with numbered elements, a Polish invoice, a revenue chart) and two voice clips (Polish complaint, English
-  appointment) for basal-omni; the Playground loads them into the media field (audio player for clips, a notice on a
-  model without media) and draws the probability of each element over the screenshot after a decision. basal-viz
-  skips them: its readout is text only. [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
+- **Playground visual elements and media samples:** mark, label, move and resize numbered boxes on an uploaded image;
+  save them as a `choice` question and see per-element probabilities over the marked image. Saved requests retain the
+  original screenshot and marks. Evidence spans are disabled while media is attached because they refer to the state's
+  text. `basal/examples/media.jsonl` adds three generated images (a checkout screenshot with numbered elements, a
+  Polish invoice, a revenue chart) and two voice clips (Polish complaint, English appointment) for basal-omni, loaded
+  into the media field with an audio player for clips and a notice on a model without media; basal-viz skips them.
+  [SERVING.md](SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it)
 
 - **LoRA adapters at load:** `--adapter DIR` (mlx-lm or PEFT) on basal-serve, basal-calibrate, basal-bench and the
   basal-ui load options merges the adapter into the weights at load on every in-process engine (bit-identical to

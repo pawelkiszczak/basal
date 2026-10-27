@@ -357,8 +357,10 @@ when new models appeared in the Hugging Face catalog (the offline catalog of the
   multi and tool also fallback and exclusive keys). Requests go to the selected model's `POST /v1/systemone`. With a
   media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail`. The media
   examples (`media.jsonl`) load their files into the media field, with an audio player for clips; on a model without
-  media they load with a notice and cannot be sent. When an image's elements are the options of a `choice` (the
-  checkout example), the answer draws each option's probability over its box in the image.
+  media they load with a notice and cannot be sent. Mark elements on one image to add a `choice` question; boxes are
+  saved as numbered overlays in a marked copy, and their probabilities appear over that image after a decision. Saved
+  requests retain the original and marked image and boxes. Evidence spans are disabled while media is attached because
+  they refer to spans in the state's text; the raw JSON request still rejects evidence with media.
 
 ### Load options
 

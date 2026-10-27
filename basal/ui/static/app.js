@@ -255,10 +255,14 @@ const fileSize = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB
 function renderSelectedMedia() {
   $('#mediaItems').innerHTML = selectedMedia.map((item,index) => `<div class="media-item">${item.kind === 'image'
     ? `<button type="button" class="media-preview" data-preview="${index}" title="${t('Open preview')}"><img src="${esc(item.url)}" alt="${esc(item.file.name)}"></button>`
-    : `<audio class="media-audio" controls preload="metadata" src="${esc(item.url)}"></audio>`}<div class="media-meta"><span><span class="media-name" title="${esc(item.file.name)}">${esc(item.file.name)}</span><small data-dims="${index}">${fileSize(item.file.size)}</small></span><button type="button" data-remove="${index}" aria-label="${t('Remove {name}',{name:esc(item.file.name)})}">${t('Remove')}</button></div></div>`).join('');
+    : `<audio class="media-audio" controls preload="metadata" src="${esc(item.url)}"></audio>`}${item.kind==='image'?`<button type="button" class="mark-elements" data-mark="${index}"${selectedMedia.some((m,i)=>i!==index&&m.elements)?' hidden':''} title="${selectedMedia.some((m,i)=>i!==index&&m.elements)?t('Only one image can have marked elements at a time'):t('Mark elements')}">${t('Mark elements')}</button>`:''}<div class="media-meta"><span><span class="media-name" title="${esc(item.file.name)}">${esc(item.file.name)}</span><small data-dims="${index}">${fileSize(item.file.size)}</small></span><button type="button" data-remove="${index}" aria-label="${t('Remove {name}',{name:esc(item.file.name)})}">${t('Remove')}</button></div></div>`).join('');
+  $('#mediaItems').querySelectorAll('[data-mark]').forEach(button=>button.addEventListener('click',()=>openElementsEditor(Number(button.dataset.mark))));
   $('#mediaItems').querySelectorAll('[data-remove]').forEach(button => button.addEventListener('click', () => {
-    URL.revokeObjectURL(selectedMedia[Number(button.dataset.remove)].url);
+    const item=selectedMedia[Number(button.dataset.remove)];
+    if(item.elements)removeElementQuestion(item);
+    URL.revokeObjectURL(item.url);
     selectedMedia.splice(Number(button.dataset.remove),1);
+    syncElementIndices();
     renderSelectedMedia(); syncRequest();
   }));
   $('#mediaItems').querySelectorAll('[data-preview]').forEach(button => {
@@ -274,6 +278,7 @@ function renderSelectedMedia() {
   $('#mediaOptions').hidden = !selectedMedia.some(item => item.kind === 'image');
   $('#mediaField').hidden = !loadedMedia.length && !selectedMedia.length;  // media of a loaded example stays visible
   $('#mediaInput').disabled = !loadedMedia.length;
+  updateMediaEvidence();
 }
 function showMediaError(message='') {
   $('#mediaError').textContent = message;
@@ -346,14 +351,14 @@ function promptPresetName(target) {
 $('#presetNameSave').onclick=()=>act(async()=>{
   const name=$('#presetName').value.trim(); if(!name)return;
   let value;
-  try { value=presetTarget==='load'?collectOptions():$('#editJsonToggle').checked?JSON.parse($('#requestJson').value):buildRequest(); }
+  try { value=presetTarget==='load'?collectOptions():$('#editJsonToggle').checked?JSON.parse($('#requestJson').value):buildRequest(); if(presetTarget==='request')value._elements=elementPresetData(); }
   catch(e) { toast(e.message,'error');$('.q-name:invalid')?.reportValidity();return; }
   presetData=await api('/api/presets',{method:'PUT',body:JSON.stringify({kind:presetTarget,name,value})});
   $('#presetNameDialog').close(); renderLoadPresets();renderRequestPresets();toast(t('Preset saved'));
 });
 $('#examples').addEventListener('change',e=>{
   const val=e.target.value;
-  if(val.startsWith('preset:')){const name=val.slice(7),request=presetData.request?.[name];if(request)setRequest(request);return;}
+  if(val.startsWith('preset:')){const name=val.slice(7),stored=presetData.request?.[name];if(stored){const {_elements=[],...request}=stored;setRequest(request,_elements.map(x=>x.markedName));restoreElementMarks(_elements);}return;}
   const item=examples[Number(val)];
   if(item?.request){
     const request={...item.request};delete request.id;delete request.gold;setRequest(request,item.media_files||[]);
@@ -678,12 +683,12 @@ function addQuestion(name, q={type:'choice',instructions:'',criteria:{}}) {
   });
   card.addEventListener('click',e=>{
     const b=e.target.closest('button'); if(!b)return;
-    if(b.matches('.remove-question')){card.remove();syncRequest();}
+    if(b.matches('.remove-question')){if(card._elementItem)removeElementQuestion(card._elementItem);card.remove();syncRequest();}
     else if(b.dataset.costMode){setCostMode(card,b.dataset.costMode);syncRequest();}
     else if(b.matches('.add-action')){card._costRows=readCostRows(card);card._costRows.push({action:'',costs:{}});renderCostMatrix(card,true);syncRequest();}
     else if(b.matches('.remove-action')){card._costRows=readCostRows(card);card._costRows.splice(Number(b.dataset.row),1);renderCostMatrix(card,true);syncRequest();}
   });
-  $('#questions').append(card); syncRequest();
+  $('#questions').append(card); updateMediaEvidence(); syncRequest();
 }
 function setRequest(req, names=[]) {  // names: file names of req.media (bundled examples); otherwise replay.<ext>
   mediaSelection++;

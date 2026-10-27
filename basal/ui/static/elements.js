@@ -1,0 +1,76 @@
+function updateMediaEvidence() {
+  const disabled=selectedMedia.length>0;
+  document.querySelectorAll('.question').forEach(card=>{
+    const evidence=$('[data-f="evidence"]',card);
+    if(!evidence)return;
+    evidence.disabled=disabled;
+    evidence.title=disabled?t('Evidence spans are read from the state text; remove media to enable them'):'';
+    let note=$('.media-evidence-note',card);
+    if(disabled&&!note){note=document.createElement('small');note.className='muted media-evidence-note';note.textContent=t('Evidence spans are read from the state text.');evidence.closest('.qf-switch').after(note);}
+    if(!disabled)note?.remove();
+  });
+}
+function removeElementQuestion(item) {
+  const q=item.elements?.question;
+  if(q){const card=[...document.querySelectorAll('.question')].find(c=>$('.q-name',c).value===q);card?.remove();}
+  if(item.originalData!==undefined){
+    URL.revokeObjectURL(item.url);
+    item.data=item.originalData;item.file=item.originalFile;item.url=URL.createObjectURL(item.file);
+    delete item.originalData;delete item.originalFile;delete item.elements;
+  }
+  renderSelectedMedia();syncRequest();
+}
+function openElementsEditor(index) {
+  const item=selectedMedia[index];if(!item||item.kind!=='image')return;
+  if(selectedMedia.some((m,i)=>i!==index&&m.elements)){showMediaError(t('Only one image can have marked elements at a time'));return;}
+  const dialog=document.createElement('dialog');dialog.className='elements-dialog';
+  dialog.innerHTML=`<h2>${t('Mark elements')}</h2><p class="muted">${t('Drag to draw a box. Select, move, resize or remove boxes; labels are optional.')}</p><div class="elements-layout"><div class="elements-canvas-wrap"><canvas aria-label="${t('Element box editor')}"></canvas></div><div class="elements-side"><div class="elements-list"></div><p class="muted elements-error" role="alert"></p></div></div><div class="dialog-actions"><button type="button" class="elements-clear" data-variant="outline">${t('Clear all')}</button><span class="grow"></span><button type="button" class="elements-cancel" data-variant="outline">${t('Cancel')}</button><button type="button" class="elements-save" data-variant="primary">${t('Save')}</button></div>`;
+  document.body.append(dialog);
+  const canvas=$('canvas',dialog),ctx=canvas.getContext('2d'),list=$('.elements-list',dialog),error=$('.elements-error',dialog),save=$('.elements-save',dialog);canvas.hidden=true;save.disabled=true;
+  const originalData=item.originalData??item.data,source=new Image(),boxes=Object.entries(item.elements?.boxes||{}).map(([key,rect])=>({rect:[...rect],label:item.elements?.labels?.[key]||''}));
+  let width=0,height=0,selected=-1,gesture=null;
+  const imageData=()=>`data:${item.originalFile?.type||item.file.type||'image/png'};base64,${originalData}`;
+  const draw=()=>{ctx.clearRect(0,0,width,height);boxes.forEach(({rect:[x,y,w,h]},i)=>{ctx.lineWidth=Math.max(1,width/canvas.clientWidth*2);ctx.strokeStyle=i===selected?'#e07b1f':'#e07b1f';ctx.strokeRect(x,y,w,h);const s=Math.max(18,Math.min(30,width/30));ctx.fillStyle='#e07b1f';ctx.fillRect(x,y,s,s);ctx.fillStyle='white';ctx.font=`bold ${s*.68}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(String(i+1),x+s/2,y+s/2);if(i===selected){ctx.fillStyle='#fff';ctx.strokeStyle='#e07b1f';for(const [hx,hy] of [[x,y],[x+w,y],[x,y+h],[x+w,y+h]]){ctx.beginPath();ctx.arc(hx,hy,Math.max(4,width/canvas.clientWidth*6),0,Math.PI*2);ctx.fill();ctx.stroke();}}});};
+  const renderList=()=>{list.innerHTML=boxes.map((b,i)=>`<div class="element-label-row"><button type="button" data-select="${i}" aria-label="${t('Select element {number}',{number:i+1})}">[${i+1}]</button><input class="input" type="text" maxlength="80" data-label="${i}" aria-label="${t('Label for element {number}',{number:i+1})}" placeholder="${t('Optional label')}" value="${esc(b.label)}"><button type="button" data-delete="${i}" aria-label="${t('Remove element {number}',{number:i+1})}">×</button></div>`).join('');list.querySelectorAll('[data-select]').forEach(b=>b.onclick=()=>{selected=Number(b.dataset.select);draw();});list.querySelectorAll('[data-label]').forEach(input=>input.oninput=()=>{boxes[Number(input.dataset.label)].label=input.value;});list.querySelectorAll('[data-delete]').forEach(b=>b.onclick=()=>{boxes.splice(Number(b.dataset.delete),1);selected=-1;renderList();draw();});};
+  const point=e=>{const r=canvas.getBoundingClientRect();return [Math.max(0,Math.min(width,(e.clientX-r.left)*width/r.width)),Math.max(0,Math.min(height,(e.clientY-r.top)*height/r.height))];};
+  const hit=(p)=>{const tol=Math.max(6,width/canvas.clientWidth*8);for(let i=boxes.length-1;i>=0;i--){const [x,y,w,h]=boxes[i].rect;for(const [corner,cx,cy] of [['nw',x,y],['ne',x+w,y],['sw',x,y+h],['se',x+w,y+h]])if(Math.hypot(p[0]-cx,p[1]-cy)<tol)return {i,corner};if(p[0]>=x&&p[0]<=x+w&&p[1]>=y&&p[1]<=y+h)return {i,move:true};}return null;};
+  canvas.onpointerdown=e=>{const p=point(e),h=hit(p);if(h){selected=h.i;gesture={...h,start:p,rect:[...boxes[h.i].rect]};}else if(boxes.length>=26){error.textContent=t('You can mark up to 26 elements.');return;}else{selected=boxes.length;boxes.push({rect:[p[0],p[1],0,0],label:''});gesture={draw:true,start:p,rect:[p[0],p[1],0,0]};renderList();}canvas.setPointerCapture(e.pointerId);draw();};
+  canvas.onpointermove=e=>{if(!gesture)return;const p=point(e),[sx,sy]=gesture.start;let [x,y,w,h]=gesture.rect;if(gesture.draw){x=Math.min(sx,p[0]);y=Math.min(sy,p[1]);w=Math.abs(p[0]-sx);h=Math.abs(p[1]-sy);}else if(gesture.move){x=Math.max(0,Math.min(width-w,x+p[0]-sx));y=Math.max(0,Math.min(height-h,y+p[1]-sy));}else{if(gesture.corner.includes('w')){w=Math.max(0,x+w-p[0]);x=Math.max(0,p[0]);}else w=Math.max(0,Math.min(width-x,p[0]-x));if(gesture.corner.includes('n')){h=Math.max(0,y+h-p[1]);y=Math.max(0,p[1]);}else h=Math.max(0,Math.min(height-y,p[1]-y));}boxes[selected].rect=[x,y,w,h];draw();};
+  canvas.onpointerup=()=>{if(gesture?.draw&&Math.min(boxes[selected].rect[2],boxes[selected].rect[3])<6){boxes.splice(selected,1);selected=-1;renderList();}gesture=null;draw();};
+  dialog.onkeydown=e=>{if((e.key==='Delete'||e.key==='Backspace')&&selected>=0&&e.target.tagName!=='INPUT'){boxes.splice(selected,1);selected=-1;renderList();draw();e.preventDefault();}};
+  $('.elements-clear',dialog).onclick=()=>{boxes.splice(0);selected=-1;error.textContent='';renderList();draw();};
+  $('.elements-cancel',dialog).onclick=()=>dialog.close();dialog.addEventListener('close',()=>dialog.remove());
+  $('.elements-save',dialog).onclick=async()=>{
+    if(!boxes.length){removeElementQuestion(item);dialog.close();return;}
+    const img=new Image();img.src=imageData();await img.decode();const out=document.createElement('canvas');out.width=width;out.height=height;const c=out.getContext('2d');c.drawImage(img,0,0);
+    boxes.forEach(({rect:[x,y,w,h]},i)=>{c.strokeStyle='#e07b1f';c.lineWidth=Math.max(2,width/500);c.strokeRect(x,y,w,h);const s=Math.max(20,Math.min(32,width/28));const bx=x,by=Math.max(0,y-s);c.fillStyle='#e07b1f';c.beginPath();c.roundRect(bx,by,s,s,4);c.fill();c.fillStyle='#fff';c.font=`bold ${s*.68}px sans-serif`;c.textAlign='center';c.textBaseline='middle';c.fillText(String(i+1),bx+s/2,by+s/2);});
+    const data=out.toDataURL('image/png').split(',')[1],oldQuestion=item.elements?.question||'element';
+    const oldCard=[...document.querySelectorAll('.question')].find(q=>$('.q-name',q).value===oldQuestion);
+    oldCard?.remove();item.originalData=originalData;item.originalFile=item.originalFile||item.file;const baseName=item.originalFile.name;const file=new File([Uint8Array.from(atob(data),x=>x.charCodeAt(0))],`${baseName.replace(/\.[^.]+$/,'')}-marked.png`,{type:'image/png'});item.data=data;item.file=file;URL.revokeObjectURL(item.url);item.url=URL.createObjectURL(file);
+    const question=oldQuestion;item.elements={question,image:index,size:[width,height],boxes:Object.fromEntries(boxes.map((b,i)=>[String(i+1),b.rect.map(Math.round)])),labels:Object.fromEntries(boxes.map((b,i)=>[String(i+1),b.label.trim()]))};
+    addQuestion(question,{type:'choice',instructions:t('Which element should be acted on next?'),criteria:Object.fromEntries(boxes.map((b,i)=>[String(i+1),`[${i+1}]${b.label.trim()?` ${b.label.trim()}`:''}`]))});
+    const card=[...document.querySelectorAll('.question')].find(q=>$('.q-name',q).value===question);card._elementOwner=index;card._elementItem=item;card.dataset.elementOwner=index;$('.q-type',card).disabled=true;const options=$('[data-f="criteria"]',card);options.disabled=true;const note=document.createElement('small');note.className='muted';note.textContent=t('Edit options in Mark elements.');options.after(note);
+    card.querySelector('.q-name').addEventListener('input',e=>{item.elements.question=e.target.value;});renderSelectedMedia();syncRequest();dialog.close();
+  };
+  source.onload=()=>{width=canvas.width=source.naturalWidth;height=canvas.height=source.naturalHeight;canvas.style.aspectRatio=`${width}/${height}`;canvas.hidden=false;save.disabled=false;renderList();draw();};source.src=imageData();dialog.showModal();
+}
+
+function elementPresetData() {
+  return selectedMedia.flatMap((item,i)=>item.elements?[{index:i,...item.elements,originalData:item.originalData,originalName:item.originalFile?.name,originalMime:item.originalFile?.type,markedName:item.file.name}]:[]);
+}
+function restoreElementMarks(records) {
+  for(const record of records||[]){
+    const item=selectedMedia[record.index];if(!item||item.kind!=='image')continue;
+    const bytes=Uint8Array.from(atob(record.originalData),x=>x.charCodeAt(0));
+    item.originalData=record.originalData;item.originalFile=new File([bytes],record.originalName||'original.png',{type:record.originalMime||'image/png'});
+    item.elements={question:record.question,image:record.index,size:record.size,boxes:record.boxes,labels:record.labels};
+    const card=[...document.querySelectorAll('.question')].find(q=>$('.q-name',q).value===record.question);if(!card)continue;
+    card._elementOwner=record.index;card._elementItem=item;card.dataset.elementOwner=record.index;$('.q-type',card).disabled=true;
+    const options=$('[data-f=\"criteria\"]',card);if(options){options.disabled=true;const note=document.createElement('small');note.className='muted';note.textContent=t('Edit options in Mark elements.');options.after(note);}
+    $('.q-name',card).addEventListener('input',e=>{item.elements.question=e.target.value;});
+  }
+  renderSelectedMedia();updateMediaEvidence();syncRequest();
+}
+function syncElementIndices() {
+  selectedMedia.forEach((item,index)=>{if(!item.elements)return;item.elements.image=index;const card=[...document.querySelectorAll('.question')].find(q=>$('.q-name',q).value===item.elements.question);if(card){card._elementOwner=index;card._elementItem=item;card.dataset.elementOwner=index;}});
+}
