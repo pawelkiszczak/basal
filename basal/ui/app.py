@@ -1141,7 +1141,7 @@ def create_app(catalog_fn=catalog.list_variants, hardware_fn=hardware.detect, fl
         assessed.sort(key=lambda a: (FAMILY_ORDER.get(a.variant.family, 99),
                                      catalog.TIER_ORDER.get(a.variant.tier, 99), a.variant.port, a.variant.label))
         fields = ("id", "repo", "author", "community", "base_repo", "family", "tier", "port", "label", "gguf_file",
-                  "weights_bytes", "experimental")
+                  "weights_bytes", "experimental", "recurrent")
         on_disk = {a.variant.id: catalog.downloaded_bytes(a.variant, cache_dir) for a in assessed}
         saved = settings_mod.load().get("load_options")  # once, not load_options() per row
         revisions = {k: v.get("revision") for k, v in saved.items() if isinstance(v, dict)} if isinstance(

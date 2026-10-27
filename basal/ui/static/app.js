@@ -1794,7 +1794,7 @@ $('#cancelBatch').onclick=()=>act(async()=>{await api('/api/batch',{method:'DELE
 $('#downloadBatch').onclick=()=>{const a=document.createElement('a');a.href='/api/batch/download';a.click();};
 $('#copyBatchPath').onclick=()=>copyText(batchResult?.output||'',t('Output path copied'));
 // Inspect: basal-viz embedded at /viz/ for a downloaded bf16 model (basal/ui/inspect.py)
-const inspectableModel=m=>m.port==='bf16'&&(!m.experimental||m.family.startsWith('basal-omni'));
+const inspectableModel=m=>m.port==='bf16'&&!m.recurrent&&(!m.experimental||m.family.startsWith('basal-omni'));
 let inspectSignature='', inspectReady=false;
 function renderInspectModels() {
   const select=$('#inspectModel'), current=select.value||localStorage.getItem('basal-ui.inspectModel')||'', rows=modelData.filter(m=>m.downloaded);

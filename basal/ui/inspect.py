@@ -14,7 +14,7 @@ NOT_INSPECTABLE = ("basal-viz reads the bf16 PyTorch weights of basal-1.0, basal
 
 def inspectable(variant) -> str | None:
     """None when basal-viz can read the bf16 PyTorch variant, else why not."""
-    if variant.port != "bf16" or (variant.experimental and not variant.family.startswith("basal-omni")):
+    if variant.port != "bf16" or variant.recurrent or (variant.experimental and not variant.family.startswith("basal-omni")):
         return NOT_INSPECTABLE
     return None
 

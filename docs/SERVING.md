@@ -436,7 +436,8 @@ counted in the statistics or the history. One batch runs at a time; its log is *
 ### Inspect
 
 **Inspect** embeds `basal-viz` ([above](#see-how-a-decision-is-made)) for a downloaded bf16 PyTorch checkpoint of
-basal-1.0, basal-1.5, basal-2.0 or basal-omni (MLX, GGUF, FP8 and NVFP4 ports cannot be read layer by layer): **Start**
+basal-1.0, basal-1.5, basal-2.0 or Gemma 4 basal-omni (not recurrent basal-omni-pico; MLX, GGUF, FP8 and NVFP4 ports
+cannot be read layer by layer): **Start**
 loads its own model copy into basal-ui's process (MPS on Apple Silicon, CUDA on NVIDIA, else the CPU; its memory is
 counted in the budget until **Stop**), with the shipped calibration or one fitted in basal-ui and the model's own
 option orders or 1 or 2, and the page appears below. basal-viz reads text only; requests carrying media are refused.

@@ -99,22 +99,17 @@ class Explainer:
     def lens(self, ids, codes):
         """Forward with a hook on every decoder layer -> code distribution after each layer (fp32 code logits, as the
         engines read them) and the top tokens of the full vocabulary at the last layer."""
-        if self.gemma4:
-            mm = self.text_model
-            output = mm(input_ids=torch.tensor([ids], device=self.dev), output_hidden_states=True, use_cache=False)
-            states = output.hidden_states[1:]
-            H = torch.stack([mm.norm(h[0, -1][None])[0] for h in states[:-1]] + [output.last_hidden_state[0, -1]])
-        else:
-            mm, caught = self.text_model, []
-            hooks = [layer.register_forward_hook(
-                lambda _m, _i, o: caught.append((o[0] if isinstance(o, tuple) else o)[0, -1]))
-                     for layer in mm.layers]
-            try:
-                final = mm(input_ids=torch.tensor([ids], device=self.dev), use_cache=False).last_hidden_state[0, -1]
-            finally:
-                for h in hooks:
-                    h.remove()
-            H = torch.stack([mm.norm(h[None])[0] for h in caught[:-1]] + [final])
+        mm, caught = self.text_model, []
+        hooks = [layer.register_forward_hook(
+            lambda _m, _i, o: caught.append((o[0] if isinstance(o, tuple) else o)[0, -1].clone()))
+                 for layer in mm.layers]
+        try:
+            final = mm(input_ids=torch.tensor([ids], device=self.dev), use_cache=False,
+                       output_hidden_states=False).last_hidden_state[0, -1]
+        finally:
+            for h in hooks:
+                h.remove()
+        H = torch.stack([mm.norm(h[None])[0] for h in caught[:-1]] + [final])
         W = self.head.weight
         logits = H.float() @ W[codes].float().T
         top_logits = H[-1] @ W.T

@@ -2,9 +2,9 @@
 
 - **Basal UI message codes:** model availability, recommendation, backend setup and job-phase explanations retain their English API fields and include additive translation codes for Polish rendering. Server errors remain English.
 
-- **basal-viz / basal-ui Inspect** now reads text decisions from basal-omni's Gemma 4 decoder, including the final
-  logit softcap, and allows bf16 basal-omni checkpoints in Inspect. Media requests remain unsupported and are refused
-  with a clear message. [SERVING.md](SERVING.md#see-how-a-decision-is-made)
+- **basal-viz / basal-ui Inspect** now reads text decisions from Gemma 4 basal-omni, including the final logit
+  softcap, and allows its bf16 checkpoints in Inspect (not recurrent basal-omni-pico). Media requests remain unsupported
+  and are refused with a clear message. [SERVING.md](SERVING.md#see-how-a-decision-is-made)
 
 - **LoRA adapters at load:** `--adapter DIR` (mlx-lm or PEFT) on basal-serve, basal-calibrate, basal-bench and the
   basal-ui load options merges the adapter into the weights at load on every in-process engine (bit-identical to

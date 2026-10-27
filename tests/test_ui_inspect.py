@@ -26,12 +26,21 @@ OMNI_GGUF = Variant("omni-mini-gguf", "Remek/basal-omni-1.0-GGUF", "basal-omni-1
 OMNI_MLX = Variant("omni-mini-mlx", "Remek/basal-omni-1.0-mini-MLX-8bit", "basal-omni-1.0", "mini", "MLX-8bit",
                    "MLX 8-bit", None, 100, True)
 
+PICO = Variant("pico", "Remek/basal-omni-pico", "basal-omni", "pico", "bf16", "bf16", None, 100, True,
+               recurrent=True)
+
 
 def test_inspect_eligibility_includes_omni_bf16_only():
     assert inspect.inspectable(BF16) is None
     assert inspect.inspectable(OMNI_BF16) is None
+    assert inspect.inspectable(PICO) == inspect.NOT_INSPECTABLE
     for variant in (OMNI_FP8, OMNI_GGUF, OMNI_MLX, MLX):
         assert inspect.inspectable(variant) == inspect.NOT_INSPECTABLE
+
+
+def test_models_api_reports_recurrent_variants(client):
+    models = client.get("/api/models").json()["models"]
+    assert next(model for model in models if model["id"] == "pico")["recurrent"] is True
 
 
 class StubExplainer:
@@ -62,7 +71,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(catalog, "is_downloaded", lambda variant, cache_dir, revision=None: tmp_path)
     fleet = Fleet(models_dir_fn=lambda: tmp_path, platform_fn=lambda: "cpu", settings_mod=settings,
                   hardware_fn=lambda: HW, stats=Stats(tmp_path / "s.json"), history=History(tmp_path / "h.jsonl"))
-    app = create_app(catalog_fn=lambda **_: ([BF16, MLX], "test"), hardware_fn=lambda: HW, fleet=fleet,
+    app = create_app(catalog_fn=lambda **_: ([BF16, MLX, PICO], "test"), hardware_fn=lambda: HW, fleet=fleet,
                      stats=fleet.stats, history=fleet.history)
     with TestClient(app, base_url="http://127.0.0.1") as c:
         c.fleet = fleet

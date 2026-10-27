@@ -57,6 +57,23 @@ def test_gemma4_lens_applies_final_logit_softcap():
     assert max(abs(a - b) for a, b in zip(layers[-1], raw)) > 1e-3
 
 
+def test_gemma4_lens_does_not_retain_full_sequence_hidden_states(monkeypatch):
+    model = tiny("e4b")
+    ex = explainer_for(model)
+    forward = ex.text_model.forward
+    seen = {}
+
+    def check_forward(*args, **kwargs):
+        seen["output_hidden_states"] = kwargs.get("output_hidden_states")
+        return forward(*args, **kwargs)
+
+    monkeypatch.setattr(ex.text_model, "forward", check_forward)
+    layers, _ = ex.lens([i % 55 + 1 for i in range(512)], [1, 2, 3, 4])
+
+    assert seen["output_hidden_states"] is False
+    assert len(layers) == model.config.num_hidden_layers
+
+
 def test_gemma4_explainer_accepts_text_model_and_refuses_other_architectures(monkeypatch):
     model = tiny("e4b")
 
