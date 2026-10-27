@@ -956,9 +956,10 @@ function imageSources(answers, request) {
     .filter(({item,i})=>item.kind==='image'&&validElementGeometry(item.elements)&&request.media?.[i]?.data===item.data&&answers?.[item.elements.question]?.probabilities)
     .map(({item})=>{
       const {question,boxes,size:[w,h]}=item.elements, a=answers[question], probs=a.probabilities, chosen=String(a.choice??a.answer??'');
+      const badge=Math.max(20,Math.min(32,w/28));  // the painted badge's size (elements.js): labels start after it
       const rects=Object.entries(boxes).map(([k,[x,y,bw,bh]])=>{
         const p=Number(probs[k])||0, win=k===chosen;
-        return `<rect class="${win?'chosen':''}" x="${x}" y="${y}" width="${bw}" height="${bh}" fill-opacity="${(0.08+0.5*p).toFixed(3)}"><title>${esc(k)} · ${pct(p)}</title></rect><text x="${x+18}" y="${Math.max(16,y-4)}">${esc(k)} · ${pct(p)}</text>`;
+        return `<rect class="${win?'chosen':''}" x="${x}" y="${y}" width="${bw}" height="${bh}" fill-opacity="${(0.08+0.5*p).toFixed(3)}"><title>${esc(k)} · ${pct(p)}</title></rect><text x="${x+badge+6}" y="${Math.max(16,y-4)}">${esc(k)} · ${pct(p)}</text>`;
       }).join('');
       return `<div class="source-view image-source"><div class="section-head"><strong>${t('Image · {question}',{question:esc(question)})}</strong><span class="chips"><span class="chip">${t('element probabilities')}</span></span></div><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${t('Element probabilities over {name}',{name:esc(item.file.name)})}"><image href="data:${esc(item.file.type)};base64,${esc(item.data)}" width="${w}" height="${h}"/>${rects}</svg></div>`;  // not the blob URL: it is revoked when the media change
     }).join('');

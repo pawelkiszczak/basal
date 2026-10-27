@@ -236,6 +236,9 @@ def test_marked_request_payload_overlay_presets_and_evidence(page):
     sync_api.expect(svg).to_be_visible()
     assert svg.locator("rect").count()==1
     assert "screen-marked.png" in svg.get_attribute("aria-label")
+    rect_x = float(svg.locator("rect").get_attribute("x"))
+    label_x = float(svg.locator("text").get_attribute("x"))
+    assert label_x >= rect_x + 1000 / 28  # after the painted badge (1000 px wide image), not over its number
     original=page.evaluate("() => selectedMedia[0].originalData")
     image_data=page.evaluate("() => selectedMedia[0].data")
     pixel=page.evaluate("async data=>{const i=new Image();i.src='data:image/png;base64,'+data;await i.decode();const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return [...x.getImageData(85,40,1,1).data]}",image_data)
