@@ -98,5 +98,7 @@ def test_cors_preflight_only_allowed_origin(tmp_path):
     headers = {"Origin": "https://allowed.example", "Access-Control-Request-Method": "POST"}
     response = client.options("/data", headers=headers)
     assert response.headers["access-control-allow-origin"] == "https://allowed.example"
+    request_id = client.options("/data", headers={**headers, "Access-Control-Request-Headers": "X-Request-Id"})
+    assert "x-request-id" in request_id.headers["access-control-allow-headers"].lower()
     response = client.options("/data", headers={**headers, "Origin": "https://other.example"})
     assert "access-control-allow-origin" not in response.headers

@@ -105,7 +105,7 @@ def protect(app, keys, cors_origins=()):
     if cors_origins:
         from starlette.middleware.cors import CORSMiddleware
         return CORSMiddleware(auth_app, allow_origins=list(cors_origins), allow_methods=["GET", "POST", "OPTIONS"],
-                              allow_headers=["Authorization", "Content-Type", "X-API-Key", "Mcp-Session-Id",
+                              allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Request-Id", "Mcp-Session-Id",
                                              "Mcp-Protocol-Version"], expose_headers=["Mcp-Session-Id", "x-request-id",
                                                                                     "x-typesafe-request-id"])
     return auth_app
