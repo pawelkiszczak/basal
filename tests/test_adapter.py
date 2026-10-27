@@ -77,6 +77,12 @@ def test_peft_dir_round_trips_an_mlx_adapter(tmp_path):
     assert all(np.array_equal(x, y) for k in ds for x, y in zip(back.deltas[k], mlx.deltas[k]))
     peft = adapter_module.read(write_adapter(tmp_path / "p", "peft", ds))
     assert adapter_module.peft_dir(peft) == peft.path  # its own directory, keys as trained
+    # rsLoRA: SGLang reads lora_alpha / r only, so the copy states the same scale that way (tensors unchanged)
+    rs = adapter_module.read(write_adapter(tmp_path / "rs", "peft", ds, use_rslora=True))
+    copy = adapter_module.peft_dir(rs)
+    cfg = json.loads((copy / "adapter_config.json").read_text(encoding="utf-8"))
+    assert cfg["use_rslora"] is False and cfg["lora_alpha"] / cfg["r"] == pytest.approx(rs.scale)
+    assert (copy / "adapter_model.safetensors").read_bytes() == (rs.path / "adapter_model.safetensors").read_bytes()
     mm = tmp_path / "omni"
     mm.mkdir()
     (mm / "config.json").write_text(json.dumps({"text_config": {}}), encoding="utf-8")
@@ -97,7 +103,7 @@ def test_tensors_outside_the_decoder_layers_are_refused(tmp_path):
     t = load_file(str(ad / "adapter_model.safetensors"))
     t = {k.replace("model.layers.0.self_attn.q_proj", "lm_head"): v for k, v in t.items()}
     save_file(t, str(ad / "adapter_model.safetensors"))
-    with pytest.raises(SystemExit, match=r"--adapter head: .*lm_head: not a module of a decoder layer"):
+    with pytest.raises(SystemExit, match=r"--adapter head: .*lm_head: not a module of the text decoder's layers"):
         adapter_module.read(ad)
 
 
@@ -295,11 +301,33 @@ def test_a_file_fitted_with_another_adapter_warns_or_is_refused(served, tmp_path
     assert "edu@0123456789ab" in serve(md, "--adapter", str(ad))[0].cal_mismatch
 
 
-@pytest.mark.parametrize("mode", ["gguf", "ollama", "llamacpp"])
-def test_gguf_engines_refuse_an_adapter_before_loading(served, mode):
+@pytest.mark.parametrize("mode, why", [("gguf", "basal-fuse-adapter"), ("ollama", "basal-fuse-adapter"),
+                                       ("llamacpp", "basal-fuse-adapter"), ("fast-exit", "exit heads trained on the base")])
+def test_engines_that_cannot_take_an_adapter_refuse_it_before_loading(served, mode, why):
     md, ad = served
-    with pytest.raises(SystemExit, match="basal-fuse-adapter"):
+    with pytest.raises(SystemExit, match=why):
         serve(md, "--adapter", str(ad), "--mode", mode, "--gguf", "x.gguf")
+
+
+def test_evidence_is_refused_under_an_adapter_and_the_warning_says_how_to_fit(served, capsys):
+    import asyncio
+
+    from basal.prompt import RequestError
+    md, ad = served
+    srv, _ = serve(md, "--adapter", str(ad))  # the base model's CALIBRATION.json: unvalidated
+    assert "basal-calibrate --adapter" in capsys.readouterr().out
+
+    async def decide(body):
+        w = asyncio.get_running_loop().create_task(srv.worker())
+        try:
+            return await srv.decide(body)
+        finally:
+            w.cancel()
+    q = {"type": "noul", "criteria": {"true": "Yes ~0.9", "false": "No ~0.1"}, "evidence": True}
+    with pytest.raises(RequestError, match="evidence is not available with --adapter"):
+        asyncio.run(decide({"state": "x", "questions": {"r": q}}))
+    q.pop("evidence")
+    assert asyncio.run(decide({"state": "x", "questions": {"r": q}}))["answers"]["r"]["calibration"] == "unvalidated"
 
 
 def test_fuse_adapter_writes_a_merged_checkpoint(tmp_path, monkeypatch, capsys):
@@ -381,3 +409,66 @@ def test_sglang_refuses_to_start_when_the_lora_changes_nothing(applied):
     else:
         with pytest.raises(SystemExit, match="SGLang answered the probe prompt"):
             be._check_lora()
+
+
+TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+
+def peft_merged(model, path, targets, rank=4, alpha=8):
+    """A PEFT rsLoRA of `model` with random factors (PEFT starts lora_B at zero), saved to `path` -> the model with it
+    merged by PEFT's merge_and_unload (the reference). `model` itself is left as it was."""
+    import copy
+    peft = pytest.importorskip("peft")
+    pm = peft.get_peft_model(copy.deepcopy(model), peft.LoraConfig(r=rank, lora_alpha=alpha, use_rslora=True,
+                                                                     target_modules=targets))
+    g = torch.Generator().manual_seed(3)
+    with torch.no_grad():
+        for n, p in pm.named_parameters():
+            if "lora_" in n:
+                p.copy_(torch.randn(p.shape, generator=g) * 0.05)
+    pm.save_pretrained(path)
+    return pm.merge_and_unload()
+
+
+def assert_same_weights(mine, ref, atol=1e-6):
+    ref = ref.state_dict()
+    changed = 0
+    for k, v in mine.state_dict().items():
+        torch.testing.assert_close(v, ref[k], atol=atol, rtol=1e-5, msg=k)
+        changed += k.endswith("proj.weight")
+    return changed
+
+
+def test_merge_equals_peft_merge_and_unload_on_llama(tmp_path):
+    m = tiny_llama(tmp_path / "model")
+    ref = peft_merged(m, tmp_path / "ad", TARGETS)
+    ad = adapter_module.read(tmp_path / "ad")
+    assert ad.scale == pytest.approx(8 / math.sqrt(4))  # rsLoRA
+    assert adapter_module.merge_torch(m, ad) == 2 * len(TARGETS)
+    assert_same_weights(m, ref)
+
+
+@pytest.mark.parametrize("name", ["e4b", "31b"])
+def test_merge_equals_peft_merge_and_unload_on_gemma4(tmp_path, name):
+    from tests.test_gemma4 import tiny
+    m = tiny(name)  # E4B-like (KV-shared layers, per-layer inputs) and 31B-like (keys = values: no v_proj there)
+    ref = peft_merged(m, tmp_path / "ad", TARGETS)
+    assert adapter_module.merge_torch(m, adapter_module.read(tmp_path / "ad")) > 0
+    assert_same_weights(m, ref)
+
+
+def test_multimodal_gemma4_merges_the_text_decoder_only(tmp_path):
+    from tests.test_gemma4 import tiny_mm
+    m = tiny_mm(True, 2, 8)  # vision and audio towers with their own layers.N.self_attn.q_proj
+    text = r".*language_model\.layers\.\d+\.(self_attn|mlp)\.(" + "|".join(TARGETS) + ")"
+    ref = peft_merged(m, tmp_path / "ad", text)
+    vision = {k: v.clone() for k, v in m.state_dict().items() if "vision_tower" in k or "audio_tower" in k}
+    assert adapter_module.merge_torch(m, adapter_module.read(tmp_path / "ad")) > 0
+    assert_same_weights(m, ref)
+    assert all(torch.equal(m.state_dict()[k], v) for k, v in vision.items())
+    # an adapter that also covers the vision tower's layer 0 (its q_proj wraps a Linear): refused, never merged into the
+    # decoder's layer 0
+    peft_merged(m, tmp_path / "both", r".*(language_model\.layers\.0\.self_attn\.q_proj|vision_tower\.encoder\.layers\.0"
+                                      r"\.self_attn\.q_proj\.linear)")
+    with pytest.raises(SystemExit, match="vision_tower.*not a module of the text decoder"):
+        adapter_module.read(tmp_path / "both")

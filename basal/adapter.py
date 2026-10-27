@@ -26,7 +26,10 @@ from pathlib import Path
 import numpy as np
 
 MLX_WEIGHTS, PEFT_WEIGHTS, CONFIG = "adapters.safetensors", "adapter_model.safetensors", "adapter_config.json"
-_LAYER = re.compile(r"(?:^|\.)layers\.(\d+)\.(.+)$")
+# a text decoder's layer under the prefixes of mlx-lm, PEFT and transformers (model., base_model.model.model.,
+# language_model.model., base_model.model.model.language_model. ...); anything else (vision_tower.encoder.layers.N,
+# audio_tower...) is another tower whose layer N is not the decoder's
+_LAYER = re.compile(r"^(?:(?:base_model|model|language_model)\.)*layers\.(\d+)\.(.+)$")
 _MLX_KEY = re.compile(r"^(.+)\.lora_([ab])$")
 _PEFT_KEY = re.compile(r"^(.+)\.lora_([AB])(?:\.[^.]+)?\.weight$")
 
@@ -94,11 +97,11 @@ def identity(path):
 
 
 def canonical(key):
-    """'layers.N.<rest>' from a module path under any framework prefix (model., base_model.model.model.,
-    language_model.model. ...); ValueError for a module outside the decoder layers."""
-    m = _LAYER.search(key)
+    """'layers.N.<rest>' from a module path of the text decoder under any framework prefix; ValueError for a module
+    outside the decoder layers (an embedding, the head, a vision or audio tower)."""
+    m = _LAYER.match(key)
     if not m:
-        raise ValueError(f"{key}: not a module of a decoder layer (layers.N.<module>)")
+        raise ValueError(f"{key}: not a module of the text decoder's layers (layers.N.<module>)")
     return f"layers.{m[1]}.{m[2]}"
 
 
@@ -235,13 +238,30 @@ def merge_numpy(weights, ad):
     return len(ad.deltas)
 
 
+def _temp_dir():
+    out = Path(tempfile.mkdtemp(prefix="basal-adapter-"))
+    atexit.register(shutil.rmtree, out, True)  # read by the engine's own process until basal-serve exits
+    return out
+
+
 def peft_dir(ad, model_dir=None):
     """A PEFT directory of the adapter (vLLM, SGLang): its own for a PEFT adapter, else a converted copy in a temporary
-    directory ($TMPDIR, removed at exit). The copy names the modules base_model.model.model.layers.N.<module>, the
-    Hugging Face path of a text decoder; a multimodal model (config.json text_config) nests its decoder elsewhere, so
-    an mlx-lm adapter for one is refused (fuse it with basal-fuse-adapter, or give a PEFT adapter of that model)."""
+    directory ($TMPDIR, removed at exit). An rsLoRA PEFT adapter gets a copy whose adapter_config.json states the same
+    scale as lora_alpha / r (SGLang ignores use_rslora; vLLM reads both the same way), its tensors linked unchanged. The
+    converted copy names the modules base_model.model.model.layers.N.<module>, the Hugging Face path of a text decoder;
+    a multimodal model (config.json text_config) nests its decoder elsewhere, so an mlx-lm adapter for one is refused
+    (fuse it with basal-fuse-adapter, or give a PEFT adapter of that model)."""
     if ad.fmt == "peft":
-        return ad.path
+        cfg = json.loads((ad.path / CONFIG).read_text(encoding="utf-8"))
+        if not cfg.get("use_rslora"):
+            return ad.path
+        out = _temp_dir()
+        for f in ad.path.iterdir():
+            if f.is_file() and f.name != CONFIG:
+                (out / f.name).symlink_to(f.resolve())
+        cfg.update(use_rslora=False, lora_alpha=ad.scale * cfg["r"])
+        (out / CONFIG).write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        return out
     cfg = Path(model_dir) / "config.json" if model_dir else None
     if cfg and cfg.is_file() and "text_config" in json.loads(cfg.read_text(encoding="utf-8")):
         raise SystemExit(f"--adapter {ad.name}: an mlx-lm adapter of a multimodal model cannot be given to vLLM / SGLang "
@@ -255,8 +275,7 @@ def peft_dir(ad, model_dir=None):
                              "a PEFT directory has one rank")
         tensors[f"base_model.model.model.{key}.lora_A.weight"] = a
         tensors[f"base_model.model.model.{key}.lora_B.weight"] = b
-    out = Path(tempfile.mkdtemp(prefix="basal-adapter-"))
-    atexit.register(shutil.rmtree, out, True)  # read by the engine's own process until basal-serve exits
+    out = _temp_dir()
     cfg = {"peft_type": "LORA", "r": ad.rank, "lora_alpha": ad.scale * ad.rank,
            "target_modules": sorted({k.rsplit(".", 1)[-1] for k in ad.deltas}), "bias": "none",
            "task_type": "CAUSAL_LM", "fan_in_fan_out": False, "use_rslora": False}

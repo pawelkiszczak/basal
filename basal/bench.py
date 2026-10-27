@@ -27,19 +27,20 @@ from . import adapter as adapter_module
 from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend, MLXBackend,
                      MPSBackend, OllamaBackend, SGLangBackend, VLLMBackend, resolve)
 from .prompt import letter_ids, max_options, model_format, render
-from .server import MODES, adapter_refused, default_mode
+from .server import ADAPTER_REFUSED, MODES, adapter_refused, default_mode
 
 GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: --model gives tokenizer and calibration
 
 
 def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="http://127.0.0.1:11434",
           llamacpp_url="http://127.0.0.1:8080", fmt=1, mlx_packed=False, adapter=None):
-    """adapter: a LoRA adapter (basal.adapter.read) merged at load / served natively (main refuses the GGUF kinds)."""
+    """adapter: a LoRA adapter (basal.adapter.read) merged at load / served natively (main refuses it for the
+    ADAPTER_REFUSED kinds)."""
     ad = dict(adapter=adapter)
     if mode == "eager-fp32":
         return EagerBackend(md, "float32", **ad)
     if mode.startswith("fast-exit@"):
-        return ExitGraphBackend(md, "bfloat16", compile=True, default_policy=mode.split("@")[1], **ad)
+        return ExitGraphBackend(md, "bfloat16", compile=True, default_policy=mode.split("@")[1])
     if mode == "gguf" or mode.startswith("gguf@"):
         path = mode.split("@", 1)[1] if "@" in mode else gguf
         if not path:
@@ -69,7 +70,7 @@ def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="h
         from .strix import StrixHaloFastBackend
         return StrixHaloFastBackend(md, "bfloat16", **ad)
     if kind == "exit":
-        return ExitGraphBackend(md, "bfloat16", quant, compile=comp, **ad)
+        return ExitGraphBackend(md, "bfloat16", quant, compile=comp)
     return GraphBackend(md, "bfloat16", quant, compile=comp, shared=True, **ad)
 
 
@@ -246,8 +247,8 @@ def main():
     a.modes = a.modes or default_modes(a.model)
     adapter = adapter_module.read(a.adapter) if a.adapter else None
     for m in a.modes if adapter else ():  # before anything is loaded
-        if MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS:
-            raise SystemExit(adapter_refused(adapter.name, f"--modes {m}"))
+        if (kind := MODES.get(m.split("@")[0], ("",))[0]) in ADAPTER_REFUSED:
+            raise SystemExit(adapter_refused(adapter.name, f"--modes {m}", kind))
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)
