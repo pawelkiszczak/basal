@@ -313,6 +313,17 @@ def certified(cal, max_error, q_type):
     return ((entry.get("per_type") or {}).get(q_type) or {}).get("confidence")
 
 
+def certified_table(cal):
+    """{max_error target: {question type: certified confidence threshold}} of a calibration ({} without thresholds):
+    what a client needs to tell automatable decisions from those to review."""
+    table = {}
+    for target in (cal.get("thresholds") or {}):
+        row = {t: c for t in ("choice", "noul", "score") if (c := certified(cal, float(target), t)) is not None}
+        if row:
+            table[target] = row
+    return table
+
+
 def act_answer(q, probs, conf, cal):
     """Minimum expected cost action; with max_error, automatic actions below the certified threshold of the question's
     type are refused, and all of them when the type has no certified threshold for that target (`deferred`)."""
@@ -570,7 +581,7 @@ def orders_for(orders, k):
 
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
-                   calibration_warning=None, vllm_preset=None, layout=None):
+                   calibration_warning=None, vllm_preset=None, layout=None, certified=None, context=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
     model's prompt format, the option orders served, why the --calibration file may not belong to the model and the
@@ -591,6 +602,10 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
         entry["vllm_preset"] = vllm_preset
     if layout not in (None, "canonical"):  # the prompt layout served (2.4.1; basal-calibrate fits its file)
         entry["layout"] = layout
+    if certified is not None:
+        entry["certified"] = certified
+    if context is not None:
+        entry["context"] = context
     return {"models": [entry]}
 
 
@@ -1637,7 +1652,11 @@ def http_app(srv, mode, mcp=None):
         return JSONResponse(models_payload(srv.name, mode, getattr(srv.backend, "policies", {}), srv.temps,
                                            srv.fmt, srv.orders, getattr(srv.backend, "media_kinds", ()),
                                            getattr(srv, "cal_mismatch", None), getattr(srv.backend, "preset", None),
-                                           getattr(srv, "layout", None)))
+                                           getattr(srv, "layout", None),
+                                           certified=None if getattr(srv, "cal_mismatch", None) else
+                                           certified_table(srv.cal),
+                                           context={"limit": srv.context[0] if srv.context else None,
+                                                    "overflow": srv.overflow, "truncate_head": srv.trunc_head}))
 
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})

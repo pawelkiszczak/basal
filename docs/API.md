@@ -82,7 +82,9 @@ one shared state (SOAM); asking them in one request is faster than separate requ
     later or on another server, may succeed;
   - **500**: any other server error.
 - `GET /v1/models` returns `{"models": [{"name", "description", "release_date", "mode", "early_exit",
-  "temperature_per_prim"}]}` (`release_date` is the engine's release date, not the model's).
+  "temperature_per_prim", "certified", "context"}]}`. `certified` maps each `max_error` target to certified confidence
+  thresholds by question type (omitted when the calibration does not match); `context` reports the limit, overflow policy
+  and truncation head share. `release_date` is the engine's release date, not the model's.
 - `GET /health` returns `{"status": "ok", "running": R, "queued": Q}` (2.3.1). The counts cover the decision requests
   in flight (`/v1/systemone`, `/v1/basal` and MCP tool calls), from the moment the server has read a request until its
   answer or error. `queued` counts those waiting for the engine: all their queue entries are still in the server's

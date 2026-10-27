@@ -1,3 +1,8 @@
+# Unreleased
+
+- **`GET /v1/models` reports certified thresholds and context.** Calibration thresholds are listed per question type when
+  the calibration matches the served model; context metadata includes its limit, overflow policy and truncation head share.
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture
