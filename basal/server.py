@@ -620,10 +620,17 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
     return {"models": [entry]}
 
 
-def adapter_refused(name, mode):
-    """Why an engine that serves weights basal cannot touch refuses --adapter (basal-serve, basal-bench)."""
-    return (f"--adapter {name}: {mode} serves weights the engine cannot merge into (a GGUF file / another process); "
-            "fuse them with basal-fuse-adapter and convert with basal-export-gguf")
+# --adapter: the engines that refuse it, and why
+ADAPTER_REFUSED = dict.fromkeys(("gguf", "ollama", "llamacpp"),
+                                "serves weights the engine cannot merge into (a GGUF file / another process); fuse "
+                                "them with basal-fuse-adapter and convert with basal-export-gguf")
+ADAPTER_REFUSED["exit"] = ("reads exit heads trained on the base model's hidden states, whose thresholds do not hold "
+                           "for the adapter's; serve it with --mode fast")
+
+
+def adapter_refused(name, mode, kind):
+    """Why an engine refuses --adapter (basal-serve, basal-bench); kind: a key of ADAPTER_REFUSED."""
+    return f"--adapter {name}: {mode} {ADAPTER_REFUSED[kind]}"
 
 
 def refuse_layout_caches(layout, a):
@@ -766,8 +773,8 @@ class Server:
         kind, quant, comp = MODES[a.mode]
         # --adapter: read (and refused when it is not a plain LoRA) before any weights are downloaded
         self.adapter = adapter_module.read(a.adapter) if getattr(a, "adapter", None) else None
-        if self.adapter and kind in ("gguf", "ollama", "llamacpp"):
-            raise SystemExit(adapter_refused(self.adapter.name, f"--mode {a.mode}"))
+        if self.adapter and kind in ADAPTER_REFUSED:
+            raise SystemExit(adapter_refused(self.adapter.name, f"--mode {a.mode}", kind))
         if kind == "gguf" and not a.gguf:
             raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
         if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
@@ -843,8 +850,7 @@ class Server:
                                         attn=getattr(a, "eager_attn", "math"), adapter=self.adapter)
         elif kind == "exit":
             self.backend = ExitGraphBackend(md, a.dtype, quant, compile=comp, heads_dir=a.exit_heads,
-                                            default_policy=a.early_exit, attn=attn, merge=merge_arg(a.merge),
-                                            adapter=self.adapter)
+                                            default_policy=a.early_exit, attn=attn, merge=merge_arg(a.merge))
         elif kind == "vllm":
             self.backend = VLLMBackend(md, a.dtype, mem=a.gpu_memory, max_len=a.max_len, max_options=self.max_options,
                                        preset=getattr(a, "vllm_preset", "default"),
@@ -883,7 +889,9 @@ class Server:
         self.tok = self.backend.tok
         self.states_cached = bool(getattr(a, "state_cache_gb", 0))  # --state-cache-gb: requests are cut at their state
         model = getattr(self.backend, "model", None)  # evidence head: needs the in-process HF model
-        self.evidence = Evidence(md, model, self.tok, self.fmt) if isinstance(model, torch.nn.Module) else None
+        # the head was trained on the base model's final-layer states: not read under --adapter
+        self.evidence = Evidence(md, model, self.tok, self.fmt) if isinstance(model, torch.nn.Module) \
+            and not self.adapter else None
         self.md, self.kind = md, kind
         self.context = context_limit(md, self.backend)
         self.cal, cal, self.cal_unvalidated = load_calibration(md, kind, a.calibration, quant, self.orders,
@@ -902,9 +910,12 @@ class Server:
             print(f"basal: warning: {cal.name}: {self.cal_mismatch}; its thresholds were certified on that model "
                   "(refit with basal-calibrate, or --strict-calibration to refuse such a file)", flush=True)
         if self.cal_unvalidated:
+            base_file = self.adapter and not a.calibration and cal.parent != self.adapter.path
             print(f"basal: warning: {self.cal_unvalidated}; its answers are marked \"calibration\": \"unvalidated\" "
-                  "and max_error defers (fit a file for this serving with basal-calibrate, or serve with the file's "
-                  "orders and layout)", flush=True)
+                  "and max_error defers (" + ("fit a file for the adapter with basal-calibrate --adapter and put it in "
+                                              "the adapter directory)" if base_file else
+                                              "fit a file for this serving with basal-calibrate, or serve with the "
+                                              "file's orders and layout)"), flush=True)
         self.temps = self.cal.get("temperature_per_prim", {})
         self.soam = a.soam == "on"
         self.log = open(a.log_decisions, "a", buffering=1, encoding="utf-8") if a.log_decisions else None
@@ -1444,7 +1455,9 @@ class Server:
             raise RequestError("evidence is not available for a state truncated to the context (shorten the state)")
         if ev_q:  # evidence spans: character offsets into the request's state (facts block excluded)
             if not (self.evidence and self.evidence.available):
-                raise RequestError("evidence is not available for this model (no evidence_head.pt)")
+                raise RequestError("evidence is not available with --adapter (the evidence head was trained on the base "
+                                   "model's states)" if getattr(self, "adapter", None) else
+                                   "evidence is not available for this model (no evidence_head.pt)")
             limit = len(_text(body["state"])) if body.get("facts") == "auto" else None
             for q in ev_q:
                 if q["type"] == "multi" or q.get("multi"):

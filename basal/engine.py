@@ -2452,9 +2452,9 @@ class ExitGraphBackend(GraphBackend):
     BATCHES = [1, 2, 4, 8, 16, 32]
 
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, heads_dir=None, default_policy="off",
-                 attn="auto", merge="auto", adapter=None):
-        super().__init__(model_dir, dtype, quant, compile=False, shared=True, warm=False, attn=attn, merge=merge,
-                         adapter=adapter)
+                 attn="auto", merge="auto"):
+        # no --adapter: the exit heads and their thresholds were trained on the base model's hidden states
+        super().__init__(model_dir, dtype, quant, compile=False, shared=True, warm=False, attn=attn, merge=merge)
         hd = Path(heads_dir) if heads_dir else Path(model_dir) / "exit_heads"
         ck = torch.load(hd / "heads.pt", map_location="cpu")
         th = json.loads((hd / "thresholds.json").read_text(encoding="utf-8"))
@@ -2718,7 +2718,7 @@ class VLLMBackend:
         self.preset, self.engine_args, self.lock = preset, kw, threading.Lock()
         from vllm import LLM
         self.lora, lora_kw = None, {}
-        if adapter:  # --adapter: served natively as one LoRA (keyword names from vLLM's API docs; _check_lora proves it)
+        if adapter:  # --adapter: one native LoRA (names checked in vLLM 0.11.2's source, run on vLLM 0.32 / vllm-metal)
             from vllm.lora.request import LoRARequest
             if adapter.rank > VLLM_MAX_LORA_RANK:
                 raise SystemExit(f"--adapter {adapter.name}: rank {adapter.rank}; vLLM serves LoRA ranks up to "
@@ -2811,8 +2811,8 @@ class SGLangBackend:
         import sglang
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
-        # --adapter: served natively as one LoRA (argument names from SGLang's LoRA docs; _check_lora proves it). Two
-        # slots per batch: the adapter and the base model, which the probe of _check_lora runs on
+        # --adapter: one native LoRA (names checked in the SGLang 0.5.10 source; _check_lora proves it). Two slots per
+        # batch: the adapter and the base model, which the probe of _check_lora runs on (SGLang counts the base as one)
         lora_kw = dict(enable_lora=True, lora_paths={"adapter": str(adapter_module.peft_dir(adapter, model_dir))},
                        max_loras_per_batch=2) if adapter else {}
         self.lora = adapter is not None
