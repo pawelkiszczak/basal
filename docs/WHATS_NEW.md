@@ -1,5 +1,7 @@
 # Unreleased (fork)
 
+- **Basal UI message codes:** model availability, recommendation, backend setup and job-phase explanations retain their English API fields and include additive translation codes for Polish rendering. Server errors remain English.
+
 - **LoRA adapters at load:** `--adapter DIR` (mlx-lm or PEFT) on basal-serve, basal-calibrate, basal-bench and the
   basal-ui load options merges the adapter into the weights at load on every in-process engine (bit-identical to
   `mlx_lm fuse` on basal-2.0-mini, also for the `-MLX-8bit` export), passes it natively to vLLM / SGLang and refuses it

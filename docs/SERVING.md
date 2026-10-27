@@ -290,8 +290,8 @@ would use and why, fit, the revisions in the cache, `basal.json`, the shipped ca
 with its certified thresholds, resolved for the active model's revision, mode, quantisation, vLLM preset, prompt
 layout and adapter (or the saved load options when unloaded), the `GET /v1/models` entry of a loaded model (mode, option orders, prompt format, vLLM
 preset, context) and the README (of the `revision` load option when one is set). The menu's footer switches the theme
-(light, dark, or the system's) and the language (**EN** / **PL**, kept in the browser; messages that come from the
-server, such as errors and why a model cannot run, stay English). Keyboard: Ctrl/⌘+Enter sends the Playground decision, Alt+1…9 (Option+1…9 on macOS,
+(light, dark, or the system's) and the language (**EN** / **PL**, kept in the browser; coded UI-owned model, option,
+backend and job messages are translated in Polish; uncoded server errors stay English). Keyboard: Ctrl/⌘+Enter sends the Playground decision, Alt+1…9 (Option+1…9 on macOS,
 any keyboard layout) opens the views in menu order, `?` lists the shortcuts. Overview says when a newer basal release
 is out (GitHub's latest release of rkinas/basal, checked at most every 6 hours, 10 minutes after a failed check) and
 when new models appeared in the Hugging Face catalog (the offline catalog of the models on disk does not count);
