@@ -187,6 +187,7 @@ without restarting the server. MCP at `/mcp` uses the same authentication.
 `--cors-origins` accepts a comma-separated list of browser origins, for example
 `--cors-origins https://app.example,https://admin.example`. CORS is disabled by default; use `*` to allow all origins.
 Allowed preflight methods are GET, POST and OPTIONS.
+Preflight requests may include `X-Request-Id`; the response echoes it as `x-request-id`.
 
 ```bash
 basal-serve --model Remek/basal-2.0-mini --api-keys ./api-keys.json --cors-origins https://app.example
@@ -285,7 +286,8 @@ the features below. The menu's footer shows how many models are ready, their nam
 outcome in a short notification. On a narrow window the menu becomes a top bar. **ⓘ** on every model opens its model
 card: repository and author (base repository for a conversion), family, tier, port, size, media, the mode this machine
 would use and why, fit, the revisions in the cache, `basal.json`, the shipped calibration of the mode it is served in
-with its certified thresholds, the `GET /v1/models` entry of a loaded model (mode, option orders, prompt format, vLLM
+with its certified thresholds, resolved for the active model's revision, mode, quantisation, vLLM preset, prompt
+layout and adapter (or the saved load options when unloaded), the `GET /v1/models` entry of a loaded model (mode, option orders, prompt format, vLLM
 preset, context) and the README (of the `revision` load option when one is set). The menu's footer switches the theme
 (light, dark, or the system's). Keyboard: Ctrl/⌘+Enter sends the Playground decision, Alt+1…9 (Option+1…9 on macOS,
 any keyboard layout) opens the views in menu order, `?` lists the shortcuts. Overview says when a newer basal release
@@ -489,12 +491,15 @@ time, model, source, a preview of the state, the answer of each question with it
 status. Filter by model and source, search the state, open a row for the full request and response, copy the request
 or **Replay in Playground** (the request in the JSON editor with its model selected). The last 2000 decisions are kept
 in `<settings stem>.history.jsonl` (owner-only) next to the settings file, with media bytes replaced by their size;
-**Clear history** empties it.
+**Clear history** empties it. `GET /api/history?order=asc` returns oldest first for incremental consumers;
+`order=desc` remains the default, and `after` cursors outside the retained window return retained records only.
 
 **Logs** shows the output of each `basal-serve` (the last 1000 lines per model, kept after unload for the last 10
 unloaded models) and basal-ui's own event log (loads, downloads, readiness, errors, unloads, API server starts and
 stops, benchmarks, auto-load decisions). `#logs/<model id>` opens one model's tab (the Overview row's **Logs** link);
 follow mode keeps the view at the newest line; the text can be copied or downloaded. Logs are kept in memory only.
+`GET /api/logs` returns a buffer `generation`; send it back as `generation` with `after` to detect a replaced buffer
+and receive its retained lines from the start.
 
 ### API server
 
