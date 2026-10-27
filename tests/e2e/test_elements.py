@@ -273,6 +273,55 @@ def test_marked_request_payload_overlay_presets_and_evidence(page):
     assert page.locator("#results .image-source svg rect").count()==1
 
 
+def load_checkout_example(page):
+    index = page.evaluate("() => examples.findIndex(e => e.id === 'media-01-checkout-elements')")
+    assert index >= 0
+    page.select_option("#examples", str(index))
+    page.wait_for_function("() => selectedMedia[0]?.file.name === 'checkout.png'")
+
+
+def test_saving_bundled_element_marks_preserves_structured_options(page):
+    load_checkout_example(page)
+    page.locator(".mark-elements").first.click()
+    page.wait_for_function("() => document.querySelector('.elements-dialog canvas').width === 800")
+    assert page.locator("[data-label='0']").input_value() == "Pay now"
+    assert page.locator("[data-label='1']").input_value() == "I accept the terms and conditions"
+    page.locator(".elements-save").click()
+    page.locator(".elements-dialog").wait_for(state="detached")
+    criteria = page.evaluate("() => buildRequest().questions.click_target.criteria")
+    assert criteria["1"] == {"element": "[1] Pay now", "role": "button"}
+    assert criteria["2"] == {"element": "[2] I accept the terms and conditions", "role": "checkbox", "checked": False}
+
+
+def test_bundled_element_marks_own_and_remove_the_question_when_renamed(page):
+    load_checkout_example(page)
+    page.locator(".q-name").nth(1).fill("renamed_target")
+    assert page.evaluate("() => selectedMedia[0].elements.question") == "renamed_target"
+    page.locator("[data-remove='0']").click()
+    assert page.locator(".q-name").count() == 1
+    assert page.locator(".q-name").first.input_value() == "operation"
+
+
+def test_decision_overlay_uses_media_snapshot_from_send_time(page):
+    page.evaluate("() => { loadedMedia=['image']; $('#mediaInput').disabled=false; }")
+    load_checkout_example(page)
+    requests = []
+    page.route("**/api/decide", lambda route: requests.append(route))
+    with page.expect_request("**/api/decide"):
+        page.click("#sendButton")
+    assert requests
+    invoice = page.evaluate("() => examples.findIndex(e => e.id === 'media-02-invoice')")
+    page.select_option("#examples", str(invoice))  # change selected image before the response arrives
+    requests[0].fulfill(status=200, content_type="application/json", body=json.dumps({
+        "answers": {"click_target": {"type": "choice", "choice": "1",
+                                     "probabilities": {"1": 0.7, "2": 0.2, "3": 0.05, "4": 0.05}}}
+    }))
+    overlay = page.locator("#results .image-source svg")
+    assert overlay.locator("rect").count() == 4
+    assert "checkout.png" in overlay.get_attribute("aria-label")
+
+
+
 def save_request_preset(page,name):
     page.click("#saveRequestPreset")
     page.fill("#presetName",name)

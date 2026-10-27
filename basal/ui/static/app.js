@@ -364,7 +364,7 @@ $('#examples').addEventListener('change',e=>{
   const item=examples[Number(val)];
   if(item?.request){
     const request={...item.request};delete request.id;delete request.gold;setRequest(request,item.media_files||[]);
-    if(item.elements&&selectedMedia[item.elements.image])selectedMedia[item.elements.image].elements=item.elements;
+    if(item.elements&&selectedMedia[item.elements.image]){const media=selectedMedia[item.elements.image];media.elements=item.elements;const card=[...document.querySelectorAll('.question')].find(q=>$('.q-name',q).value===item.elements.question);if(card){card._elementOwner=item.elements.image;card._elementItem=media;card.dataset.elementOwner=item.elements.image;card.querySelector('.q-name').addEventListener('input',event=>{media.elements.question=event.target.value;});}}
     const needs=[...new Set((request.media||[]).map(m=>m.type))].filter(k=>!loadedMedia.includes(k));
     if(needs.length)showMediaError(t('This example carries {media}: load a basal-omni model with "Load with media", then pick this example again to send it.',{media:mediaTitle(needs)}));
   }else if(item)setRequest({state:item.state,questions:item.questions});
@@ -951,9 +951,9 @@ function renderSource(state, spans) {
 }
 // the probabilities of a choice over the boxes of its options in an image (bundled examples carry the boxes); the
 // colours are fixed (app.css .image-source): the image is the background in both themes
-function imageSources(answers, request) {
-  return selectedMedia.map((item,i)=>({item,i}))
-    .filter(({item,i})=>item.kind==='image'&&validElementGeometry(item.elements)&&request.media?.[i]?.data===item.data&&answers?.[item.elements.question]?.probabilities)
+function imageSources(answers, request, mediaSnapshot) {
+  return mediaSnapshot.map((item,i)=>({item,i}))
+    .filter(({item,i})=>item?.kind==='image'&&validElementGeometry(item.elements)&&request.media?.[i]?.data===item.data&&answers?.[item.elements.question]?.probabilities)
     .map(({item})=>{
       const {question,boxes,size:[w,h]}=item.elements, a=answers[question], probs=a.probabilities, chosen=String(a.choice??a.answer??'');
       const badge=Math.max(20,Math.min(32,w/28));  // the painted badge's size (elements.js): labels start after it
@@ -971,7 +971,7 @@ function thinkBlock(a) {
   if(!think||think.tokens==null)return used?`<div class="chips"><span class="chip muted">${t('no reasoning')}</span></div>`:'';
   return `<div class="think-block"><span class="chip">${t('reasoned')}</span> ${esc(think.tokens)} ${t('tokens')} · ${num(think.ms,0)} ms · ${t('calibration')} ${esc(t(think.calibration??'—'))}; ${t('without thinking')}: ${pct(think.no_think?.confidence)}${think.text?`<details><summary>${t('Reasoning')}</summary><pre>${esc(think.text)}</pre></details>`:''}</div>`;
 }
-function renderResults(data, request) {
+function renderResults(data, request, mediaSnapshot=selectedMedia) {
   const answers=data?.answers || data || {}, entry=modelEntry(request.model); let html='';
   for(const [name,answer] of Object.entries(answers)) {
     const q=request.questions?.[name]||{};
@@ -1009,7 +1009,8 @@ async function sendDecision() {
   if(withEvidence.length){showDecideError(t('Evidence spans are read from the state\'s text, so a request with media cannot have them: turn off "Evidence spans" on {questions}, or remove the media.',{questions:withEvidence.join(', ')}));return;}
   if($('#editJsonToggle').checked)$('#requestJson').value=JSON.stringify(request,null,2);
   $('#sendButton').disabled=true;
-  try { const response=await api('/api/decide',{method:'POST',body:JSON.stringify(request)}); renderResults(response,request); }
+  const mediaSnapshot=(Array.isArray(request.media)?request.media:[]).map(media=>{const item=selectedMedia.find(current=>current.data===media?.data);return item?{kind:item.kind,data:item.data,file:item.file,elements:item.elements}:null;});
+  try { const response=await api('/api/decide',{method:'POST',body:JSON.stringify(request)}); renderResults(response,request,mediaSnapshot); }
   catch(e) { showDecideError(e.message); toast(e.message,'error'); }
   finally { $('#sendButton').disabled=false; }
 }
