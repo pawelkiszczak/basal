@@ -1,3 +1,8 @@
+# Unreleased
+
+- **MCP model selection:** servers configured with a model list expose `list_models` and optional `model` arguments on
+  `decide` and `decide_many`; `basal-mcp --model NAME` forwards that model on each request.
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture
