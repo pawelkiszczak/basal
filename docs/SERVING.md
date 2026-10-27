@@ -312,11 +312,14 @@ when new models appeared in the Hugging Face catalog (the offline catalog of the
   available memory the budget fit stands in for it.
 - **Download** (a model not on disk yet) fetches only what serving needs (the chosen `.gguf` file of a `-GGUF`
   repository; not the 4.5B's `think/` model) into the models directory and shows the progress in the row; nothing is
-  started. Once on disk the row offers **Load** instead.
-- **Load** (downloading first when needed) runs `basal-serve` for the model as a subprocess on a free loopback port.
-  **Several models can be loaded at once**: each gets its own private `basal-serve`, and a loaded model's row shows a
-  *loaded* chip and **Unload**. A load that would exceed the memory budget is refused (below).
-- **Load with media**, for the basal-omni-1.0 bf16 checkpoints (mini and max: images and audio; ultra: images; the
+  started. **Models** downloads, sets up and deletes models; loading is in **Model manager**. Once on disk the row
+  offers **⚙ Setup** and **Delete** (a loaded model cannot be deleted), and a suggestion card links to Model manager.
+- **⚙ Setup** (Models) opens the load options and saves them for the model without loading it; the next load uses
+  them. **⚙ Options** in Model manager is the same dialog with **Load**.
+- **Load** (Model manager) runs `basal-serve` for the model as a subprocess on a free loopback port.
+  **Several models can be loaded at once**: each gets its own private `basal-serve`; a loaded model's row shows its
+  state and **Unload**, and Models shows a *loaded* chip. A load that would exceed the memory budget is refused (below).
+- **Load with media** (Model manager), for the basal-omni-1.0 bf16 checkpoints (mini and max: images and audio; ultra: images; the
   FP8, GGUF and MLX ports and basal-omni-1.1-max have no encoders): `basal-serve --mode eager --media on`, with
   `--device mps` on Apple Silicon and `--device cpu` on a machine without a GPU, or — chosen in the media load's
   ⚙ Options on an NVIDIA GPU with `basal[vllm]` — `--mode vllm --media on` ([OMNI.md](OMNI.md#vllm---mode-vllm)).
@@ -325,8 +328,9 @@ when new models appeared in the Hugging Face catalog (the offline catalog of the
 - **Model manager**: the models directory (default: the Hugging Face cache, `HF_HUB_CACHE`) can be set to any
   writable directory; downloads, the downloaded marks, serving and deletes all use it. The setting is kept in
   `~/.config/basal-ui/settings.json` (`BASAL_UI_CONFIG` moves it). The variants on disk are listed with their size and
-  can be deleted; for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is
-  left. The directory cannot change while any model is loaded or downloading, and a loaded model cannot be deleted.
+  **Load**, **Load with media**, **⚙ Options** or **Unload**, or why the variant cannot run here. Deleting is in
+  Models: for a `-GGUF` repository only the chosen `.gguf` file goes, and the repository once no `.gguf` is left. The
+  directory cannot change while any model is loaded or downloading.
 - **Playground**: a model selector (the ready models), the bundled examples (`advanced.jsonl`: one request per
   question type), a question builder for every type (`choice`, `noul`, `score`, `multi`, `act` with simple costs or a
   cost matrix, `tool`, `classify`, `verify`, `compress`, `extract`, with `max_error` and evidence where the type takes
