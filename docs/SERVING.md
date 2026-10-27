@@ -235,6 +235,7 @@ Ready-to-run examples (Polish and English) in `basal/examples/` of the repositor
 | `score.jsonl` | ordered scales: urgency, satisfaction, fraud risk, answer correctness; the answer includes the expected level |
 | `complex.jsonl` | full requests: several typed questions about one JSON state (fan-out), a web-agent step with structured options, a deadline decomposed into simple questions, loan triage, a prompt-injection guard |
 | `questions.jsonl` | 20 mixed items; with `choice`, `noul` and `score` the default set of `basal-bench` and `basal-loadtest` |
+| `media.jsonl` | basal-omni requests with the images and voice clips of `media/`: a checkout screenshot whose numbered elements are the options of a `choice` (web agent), a Polish invoice (type, paid, `extract` of enum fields), a revenue chart (trend, the month of the drop), a Polish complaint call and an English appointment call (`--media on`; `media/make_media.py` regenerates the files) |
 | `types_demo.py` | one request per decision type, sent to a running server, request and response printed |
 
 ```bash
@@ -354,7 +355,10 @@ when new models appeared in the Hugging Face catalog (the offline catalog of the
   in its own fields (classify labels with rubrics, keyed criteria, `option_keys`) is sent as it was until that field
   is edited; `multi`, multi-label `classify` and multi `tool` take the set options (objective, threshold, min, max;
   multi and tool also fallback and exclusive keys). Requests go to the selected model's `POST /v1/systemone`. With a
-  media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail`.
+  media server, up to 8 images or audio files (20 MiB each) go along as `media`, with the image `detail`. The media
+  examples (`media.jsonl`) load their files into the media field, with an audio player for clips; on a model without
+  media they load with a notice and cannot be sent. When an image's elements are the options of a `choice` (the
+  checkout example), the answer draws each option's probability over its box in the image.
 
 ### Load options
 

@@ -99,6 +99,18 @@ def test_decode_limits(monkeypatch):
         media.decode([{"type": "image", "data": png()}], ("image",))
 
 
+def test_bundled_media_decodes():
+    pytest.importorskip("PIL.Image")
+    pytest.importorskip("soundfile")
+    from basal.viz import examples
+    bundled = [e["request"]["media"] for e in examples() if e["request"].get("media")]
+    assert bundled
+    for entries in bundled:
+        images, audio, order = media.decode(entries, ("image", "audio"), 30.0)
+        assert order == [m["type"] for m in entries] and all(im.mode == "RGB" for im in images)
+        assert all(0 < len(a) <= 30 * media.SAMPLE_RATE for a in audio)
+
+
 class MediaServer(FakeServer):
     """FakeServer in prompt format 2 with a stub eager backend that takes images and audio."""
     def __init__(self, pos_probs, kinds=("image", "audio")):

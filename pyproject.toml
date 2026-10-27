@@ -61,7 +61,7 @@ basal-fuse-adapter = "basal.adapter:main"
 packages = ["basal", "basal.ui"]
 
 [tool.setuptools.package-data]
-basal = ["examples/*.jsonl", "examples/*.py", "viz.html"]
+basal = ["examples/*.jsonl", "examples/*.py", "examples/media/*", "viz.html"]
 "basal.ui" = ["static/*.html", "static/*.js", "static/*.css", "static/vendor/*", "static/fonts/*"]
 
 [tool.pytest.ini_options]

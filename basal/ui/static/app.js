@@ -255,7 +255,7 @@ const fileSize = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB
 function renderSelectedMedia() {
   $('#mediaItems').innerHTML = selectedMedia.map((item,index) => `<div class="media-item">${item.kind === 'image'
     ? `<button type="button" class="media-preview" data-preview="${index}" title="${t('Open preview')}"><img src="${esc(item.url)}" alt="${esc(item.file.name)}"></button>`
-    : `<div class="media-audio">${t('audio')}</div>`}<div class="media-meta"><span><span class="media-name" title="${esc(item.file.name)}">${esc(item.file.name)}</span><small data-dims="${index}">${fileSize(item.file.size)}</small></span><button type="button" data-remove="${index}" aria-label="${t('Remove {name}',{name:esc(item.file.name)})}">${t('Remove')}</button></div></div>`).join('');
+    : `<audio class="media-audio" controls preload="metadata" src="${esc(item.url)}"></audio>`}<div class="media-meta"><span><span class="media-name" title="${esc(item.file.name)}">${esc(item.file.name)}</span><small data-dims="${index}">${fileSize(item.file.size)}</small></span><button type="button" data-remove="${index}" aria-label="${t('Remove {name}',{name:esc(item.file.name)})}">${t('Remove')}</button></div></div>`).join('');
   $('#mediaItems').querySelectorAll('[data-remove]').forEach(button => button.addEventListener('click', () => {
     URL.revokeObjectURL(selectedMedia[Number(button.dataset.remove)].url);
     selectedMedia.splice(Number(button.dataset.remove),1);
@@ -272,6 +272,8 @@ function renderSelectedMedia() {
     });
   });
   $('#mediaOptions').hidden = !selectedMedia.some(item => item.kind === 'image');
+  $('#mediaField').hidden = !loadedMedia.length && !selectedMedia.length;  // media of a loaded example stays visible
+  $('#mediaInput').disabled = !loadedMedia.length;
 }
 function showMediaError(message='') {
   $('#mediaError').textContent = message;
@@ -314,7 +316,7 @@ async function refreshStatus() {
 async function loadExamples() {
   try {
     examples=await api('/api/examples');
-    $('#examples').innerHTML=`<option value="">${t('Load an example…')}</option>`+examples.map((e,i)=>`<option value="${i}">${esc(e.file || e.id || t('Example {number}',{number:i+1}))}${e.file&&e.id?` / ${esc(e.id)}`:''}</option>`).join('');
+
     renderRequestPresets();
   } catch { examples=[];renderRequestPresets(); }
 }
@@ -329,7 +331,8 @@ async function loadPresets() {try{presetData=await api('/api/presets');renderReq
 function renderRequestPresets() {
   const select=$('#examples'), current=select.value;
   const saved=Object.keys(presetData.request||{});
-  select.innerHTML=`<option value="">${t('Load an example…')}</option>`+examples.map((e,i)=>`<option value="${i}">${esc(e.file||e.id||t('Example {number}',{number:i+1}))}${e.file&&e.id?` / ${esc(e.id)}`:''}</option>`).join('')+`<optgroup label="${t('Saved requests')}">${saved.map(n=>`<option value="preset:${esc(n)}">${esc(n)}</option>`).join('')}</optgroup>`;
+  const mediaSuffix=e=>{const kinds=[...new Set((e.request?.media||[]).map(m=>m.type))];return kinds.length?` · ${esc(mediaTitle(kinds))}`:'';};
+  select.innerHTML=`<option value="">${t('Load an example…')}</option>`+examples.map((e,i)=>`<option value="${i}">${esc(e.file||e.id||t('Example {number}',{number:i+1}))}${e.file&&e.id?` / ${esc(e.id)}`:''}${mediaSuffix(e)}</option>`).join('')+`<optgroup label="${t('Saved requests')}">${saved.map(n=>`<option value="preset:${esc(n)}">${esc(n)}</option>`).join('')}</optgroup>`;
   if(current&&[...select.options].some(o=>o.value===current))select.value=current;
 }
 function renderLoadPresets() {
@@ -351,7 +354,13 @@ $('#presetNameSave').onclick=()=>act(async()=>{
 $('#examples').addEventListener('change',e=>{
   const val=e.target.value;
   if(val.startsWith('preset:')){const name=val.slice(7),request=presetData.request?.[name];if(request)setRequest(request);return;}
-  const item=examples[Number(val)];if(item?.request){const request={...item.request};delete request.id;delete request.gold;setRequest(request);}else if(item)setRequest({state:item.state,questions:item.questions});
+  const item=examples[Number(val)];
+  if(item?.request){
+    const request={...item.request};delete request.id;delete request.gold;setRequest(request,item.media_files||[]);
+    if(item.elements&&selectedMedia[item.elements.image])selectedMedia[item.elements.image].elements=item.elements;
+    const needs=[...new Set((request.media||[]).map(m=>m.type))].filter(k=>!loadedMedia.includes(k));
+    if(needs.length)showMediaError(`This example carries ${mediaTitle(needs)}: load a basal-omni model with "Load with media", then pick this example again to send it.`);
+  }else if(item)setRequest({state:item.state,questions:item.questions});
 });
 async function deletePreset(kind,name) {
   presetData=await api('/api/presets',{method:'PUT',body:JSON.stringify({kind,name,value:null})});
@@ -676,7 +685,7 @@ function addQuestion(name, q={type:'choice',instructions:'',criteria:{}}) {
   });
   $('#questions').append(card); syncRequest();
 }
-function setRequest(req) {
+function setRequest(req, names=[]) {  // names: file names of req.media (bundled examples); otherwise replay.<ext>
   mediaSelection++;
   selectedMedia.forEach(item=>URL.revokeObjectURL(item.url));selectedMedia=[];$('#mediaInput').value='';renderSelectedMedia();
   const preserveJson=()=>{
@@ -700,11 +709,11 @@ function setRequest(req) {
        (Object.hasOwn(req,'think')&&!['','off','force'].includes(req.think))||(Object.hasOwn(req,'think_text')&&typeof req.think_text!=='boolean')||
        (Object.hasOwn(req,'model')&&![...$('#playgroundModel').options].some(o=>o.value===req.model))||
        (Object.hasOwn(req,'early_exit')&&!([...$('#earlyExitSelect').options].some(o=>o.value===req.early_exit))))throw new Error();
-    for(const item of media){
+    media.forEach((item,i)=>{
       const match=item.data.match(/^data:([^;]+);base64,(.*)$/),mime=match?.[1]|| (item.type==='image'?'image/png':'audio/wav'),data=match?.[2]||item.data;
-      const bytes=Uint8Array.from(atob(data),char=>char.charCodeAt(0)),file=new File([bytes],`replay.${item.type==='image'?'png':'wav'}`,{type:mime});
+      const bytes=Uint8Array.from(atob(data),char=>char.charCodeAt(0)),file=new File([bytes],names[i]||`replay.${item.type==='image'?'png':'wav'}`,{type:mime});
       restored.push({kind:item.type,data,file,url:URL.createObjectURL(file)});
-    }
+    });
   } catch {
     restored.forEach(item=>URL.revokeObjectURL(item.url));
     preserveJson();
@@ -930,6 +939,20 @@ function renderSource(state, spans) {
   const kinds=[...new Set(accepted.map(s=>s.kind))];
   return `<div class="source-view"><div class="section-head"><strong>${t('Source')}</strong><span class="chips">${kinds.map(k=>`<mark class="${k}">${esc(t(k))}</mark>`).join(' ')}</span></div><pre class="source">${html}</pre></div>`;
 }
+// the probabilities of a choice over the boxes of its options in an image (bundled examples carry the boxes); the
+// colours are fixed (app.css .image-source): the image is the background in both themes
+function imageSources(answers, request) {
+  return selectedMedia.map((item,i)=>({item,i}))
+    .filter(({item,i})=>item.kind==='image'&&item.elements&&request.media?.[i]?.data===item.data&&answers?.[item.elements.question]?.probabilities)
+    .map(({item})=>{
+      const {question,boxes,size:[w,h]}=item.elements, a=answers[question], probs=a.probabilities, chosen=String(a.choice??a.answer??'');
+      const rects=Object.entries(boxes).map(([k,[x,y,bw,bh]])=>{
+        const p=Number(probs[k])||0, win=k===chosen;
+        return `<rect class="${win?'chosen':''}" x="${x}" y="${y}" width="${bw}" height="${bh}" fill-opacity="${(0.08+0.5*p).toFixed(3)}"><title>${esc(k)} · ${pct(p)}</title></rect><text x="${x+18}" y="${Math.max(16,y-4)}">${esc(k)} · ${pct(p)}</text>`;
+      }).join('');
+      return `<div class="source-view image-source"><div class="section-head"><strong>Image · ${esc(question)}</strong><span class="chips"><span class="chip">element probabilities</span></span></div><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Element probabilities over ${esc(item.file.name)}"><image href="data:${esc(item.file.type)};base64,${esc(item.data)}" width="${w}" height="${h}"/>${rects}</svg></div>`;  // not the blob URL: it is revoked when the media change
+    }).join('');
+}
 // thinking (basal/think.py): readout 2 after the reasoning, with the answer it replaced
 function thinkBlock(a) {
   const think=a.think, used=a.meta?.think;
@@ -953,7 +976,7 @@ function renderResults(data, request) {
   const extraUsage=[['branches',u?.branches],['second_order_branches',u?.second_order_branches],['lane',u?.lane]].filter(([,v])=>v!=null).map(([k,v])=>`${k}: ${esc(v)}`).join(' · ');
   const usage=u?`<div class="answer-meta">${t('Latency')}: ${u.latency_ms??'—'} ms · ${t('Input tokens')}: ${u.input_tokens??'—'} · ${t('Questions')}: ${u.questions??'—'}${extraUsage?` · ${extraUsage}`:''}${mediaSummary}${thinkUsage}</div>`:'';
   const meter=u&&entry?.context?`<div class="answer-meta">${t('Longest prompt')} ${esc(u.longest_prompt_tokens??'—')} / ${esc(entry.context.limit??'—')} ${t('tokens')} · ${t('policy')} ${esc(entry.context.overflow)}</div>`:'';
-  $('#results').innerHTML=`<div class="section-head"><strong>${esc(request.model||'')}</strong>${html&&!request.media?`<button type="button" id="inspectDecision">${t('Inspect this decision')}</button>`:''}</div>`+resultBanners(entry,u)+(html ? usage+meter+html+(spans.length?renderSource(request.state,spans):'') : `<div class="empty">${t('No answers returned.')}</div>`);
+  $('#results').innerHTML=`<div class="section-head"><strong>${esc(request.model||'')}</strong>${html&&!request.media?`<button type="button" id="inspectDecision">${t('Inspect this decision')}</button>`:''}</div>`+resultBanners(entry,u)+(html ? usage+meter+html+(spans.length?renderSource(request.state,spans):'')+imageSources(answers,request) : `<div class="empty">${t('No answers returned.')}</div>`);
   const inspectButton=$('#inspectDecision'); if(inspectButton)inspectButton.onclick=()=>inspectDecision(request);
   $('#rawResponse').textContent=JSON.stringify(data,null,2); $('#rawDetails').hidden=false;
 }
@@ -1253,7 +1276,6 @@ function renderPlaygroundModels(ready) {
 function setPlaygroundMedia(kinds) {
   if(JSON.stringify(kinds)===JSON.stringify(loadedMedia))return;
   loadedMedia=kinds; clearSelectedMedia(); syncRequest();
-  $('#mediaField').hidden=!kinds.length;
   $('#mediaInput').accept=[kinds.includes('image')?'image/*':'',kinds.includes('audio')?'audio/*':''].filter(Boolean).join(',');
 }
 $('#playgroundModel').addEventListener('change',e=>{selectedModel=e.target.value;localStorage.setItem('basal-ui.model',selectedModel);const model=readyModels().find(m=>m.id===selectedModel);setPlaygroundMedia(model?.media||[]);setPlaygroundExperimental(model);syncRequest(false,REQUEST_OPTION_KEYS);if(serveData)renderConnect();});

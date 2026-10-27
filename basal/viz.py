@@ -13,6 +13,7 @@ The request is also answered by the server itself (Server.decide), to show that 
 """
 import argparse
 import asyncio
+import base64
 import json
 import os
 import threading
@@ -30,6 +31,8 @@ from .server import parser as serve_parser
 
 HERE = Path(__file__).resolve().parent
 EXAMPLES = HERE / "examples"
+MEDIA = EXAMPLES / "media"  # the files the bundled examples name in media[i].file
+MIME = {".png": "image/png", ".jpg": "image/jpeg", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".flac": "audio/flac"}
 TARGETS = ("0.01", "0.05")  # max_error targets the page compares the confidence with
 
 
@@ -188,16 +191,36 @@ def compare_served(res, served):
     return res
 
 
+def _inline(m):
+    """A bundled media item {"type", "file"} -> {"type", "data": data URL}; the file lives in basal/examples/media/."""
+    name = m["file"]
+    if Path(name).name != name:
+        raise ValueError(f"media file must be a bare name, got {name!r}")
+    path = MEDIA / name
+    return {"type": m["type"], "data": f"data:{MIME[path.suffix]};base64,{base64.b64encode(path.read_bytes()).decode()}"}
+
+
 def examples():
+    """The bundled examples as {"file", "id", "request"} (+ "gold"). Media examples name their files (media[i].file,
+    inlined as data URLs into the request) and may carry "elements", the boxes of a choice question's options in an
+    image: both stay outside the request, as "media_files" (aligned with request.media) and "elements"."""
     out = []
     for f in sorted(EXAMPLES.glob("*.jsonl")):
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines()):
             if not line.strip():
                 continue
             item = json.loads(line)
+            elements, files = item.pop("elements", None), None
+            if item.get("media"):
+                files = [m.get("file") for m in item["media"]]
+                item["media"] = [_inline(m) if "file" in m else m for m in item["media"]]
             ex = {"file": f.stem, "id": item.get("id") or f"{f.stem}-{n + 1}", "request": to_request(item)}
             if "gold" in item and "questions" not in item:
                 ex["gold"] = {"q": ["true", "false"][item["gold"]] if item.get("type") == "noul" else str(item["gold"])}
+            if files:
+                ex["media_files"] = files
+            if elements:
+                ex["elements"] = elements
             out.append(ex)
     return out
 
