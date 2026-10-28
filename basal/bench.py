@@ -26,6 +26,7 @@ import torch
 from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend, MLXBackend,
                      MPSBackend, OllamaBackend, SGLangBackend, VLLMBackend, resolve)
 from .prompt import letter_ids, max_options, model_format, render
+from .run import check_output
 from .server import MODES, default_mode
 
 GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: --model gives tokenizer and calibration
@@ -238,6 +239,7 @@ def main():
     ap.add_argument("--mlx-packed", dest="mlx_packed", action="store_true",
                     help="mlx modes: the packed forward of short Llama groups (basal-serve --mlx-packed)")
     a = ap.parse_args()
+    check_output(a.questions, a.out)
     a.modes = a.modes or default_modes(a.model)
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None

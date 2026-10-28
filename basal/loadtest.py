@@ -13,11 +13,19 @@ import json
 import statistics
 import time
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from . import synth
 from .bench import DEFAULT_QUESTIONS, load_questions
+from .run import check_output
+
+
+def public_url(url):
+    """Results identify the endpoint without recording credentials, query tokens or fragments."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
 
 
 def body(q, early_exit=None, questions=1):
@@ -66,7 +74,7 @@ async def run(a):
         res = await asyncio.gather(*[one(b) for b in bodies[10 + a.n_seq: n]])
         wall = time.perf_counter() - t0
     ok = sorted(x for x, s in res if s == 200)
-    out = dict(url=a.url, p50_ms=statistics.median(lat) * 1000, p95_ms=lat[int(0.95 * len(lat))] * 1000,
+    out = dict(url=public_url(a.url), p50_ms=statistics.median(lat) * 1000, p95_ms=lat[int(0.95 * len(lat))] * 1000,
                concurrency=a.concurrency, decisions_per_s=len(ok) / wall, errors=len(res) - len(ok))
     if a.questions_per_request > 1:  # a request is several decisions; the rates above count requests
         out.update(questions_per_request=a.questions_per_request,
@@ -97,7 +105,7 @@ async def determinism(a, bodies):
     diffs = [max(abs(x - y) for pa, qa in zip(p, q) for x, y in zip(pa, qa)) for p, q in zip(alone, loaded)]
     top = lambda ps: max(range(len(ps)), key=ps.__getitem__)  # noqa: E731
     flips = sum(top(pa) != top(qa) for p, q in zip(alone, loaded) for pa, qa in zip(p, q))
-    out = dict(url=a.url, determinism=dict(requests=n, identical=sum(d == 0.0 for d in diffs), max_abs_diff=max(diffs),
+    out = dict(url=public_url(a.url), determinism=dict(requests=n, identical=sum(d == 0.0 for d in diffs), max_abs_diff=max(diffs),
                                            decision_flips=flips, concurrency=a.concurrency))
     print(json.dumps(out))
     if a.out:
@@ -125,6 +133,7 @@ def main():
                     help="N: compare N answers given alone and under load (instead of the load test)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
+    check_output(a.questions if not a.synthetic else [], a.out)
     if a.determinism:
         n = 2 * a.determinism
         qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic \

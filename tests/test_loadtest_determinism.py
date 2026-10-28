@@ -6,6 +6,7 @@ import json
 import sys
 
 import httpx
+import pytest
 
 from basal import loadtest
 
@@ -39,3 +40,28 @@ def test_seed_gives_other_synthetic_states(monkeypatch):
     assert seen == [0, 2]
     from basal import synth
     assert synth.items(3, 200, 1)[0]["state"] != synth.items(3, 200, 2)[0]["state"]
+
+
+@pytest.mark.parametrize("determinism", [False, True])
+def test_results_do_not_log_url_credentials(monkeypatch, tmp_path, capsys, determinism):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"answers": {"q": {"probabilities": {"a": 0.6, "b": 0.4}}}})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(loadtest.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    url = "http://user:secret@test/v1/systemone?token=private&signature=signed#fragment-secret"
+    a = argparse.Namespace(url=url, out=str(tmp_path / "results.json"), concurrency=1, determinism=1,
+                           n_seq=1, n_conc=1, synthetic=100, seed=0, long_frac=0,
+                           early_exit=None, questions_per_request=1)
+    if determinism:
+        asyncio.run(loadtest.determinism(a, [{"state": "a"}, {"state": "b"}]))
+    else:
+        asyncio.run(loadtest.run(a))
+    assert seen and all(r.url.params["token"] == "private" for r in seen)
+    assert all(r.headers.get("authorization", "").startswith("Basic ") for r in seen)
+    output = capsys.readouterr().out + (tmp_path / "results.json").read_text()
+    assert json.loads((tmp_path / "results.json").read_text())["url"] == "http://test/v1/systemone"
+    assert all(secret not in output for secret in ("user", "secret", "private", "signed", "fragment-secret"))

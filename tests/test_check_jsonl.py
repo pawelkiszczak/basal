@@ -34,6 +34,14 @@ class CheckJsonlTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, constant)
                 self.assertIn(f"{path}:1: {constant} is not valid JSON", result.stdout)
 
+    def test_only_json_whitespace_counts_as_a_blank_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "whitespace.jsonl"
+            for whitespace, valid in ((" \t\r\n", True), ("\u00a0\n", False), ("\u2003\n", False)):
+                path.write_text(whitespace, encoding="utf-8")
+                result = subprocess.run([sys.executable, str(HOOK), str(path)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if valid else 1, repr(whitespace))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ def main(filenames):
         try:
             with open(filename, encoding="utf-8") as source:
                 for number, line in enumerate(source, 1):
-                    if not line.strip():  # The batch runner also skips blank lines.
+                    if not line.strip(" \t\r\n"):
                         continue
                     try:
                         json.loads(line, parse_constant=reject_constant)

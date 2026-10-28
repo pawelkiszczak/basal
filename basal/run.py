@@ -21,6 +21,16 @@ from pathlib import Path
 import httpx
 
 
+def check_output(inputs, output):
+    """Refuse an output that would overwrite a dataset, including symlinks and hard links."""
+    if not output:
+        return
+    out = Path(output)
+    for source in map(Path, inputs):
+        if out.resolve() == source.resolve() or (out.exists() and source.exists() and out.samefile(source)):
+            raise ValueError("OUTPUT must not be an INPUT file")
+
+
 def to_request(item, early_exit=None):
     if "questions" in item:
         body = {k: item[k] for k in ("state", "questions", "early_exit") if k in item}
@@ -57,6 +67,7 @@ def summarise(item, resp):
 
 
 async def run(a):
+    check_output([a.input], a.output)
     items = [json.loads(line) for line in Path(a.input).read_text(encoding="utf-8").splitlines() if line.strip()]
     for i, it in enumerate(items):
         it.setdefault("id", i)

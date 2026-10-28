@@ -472,8 +472,9 @@ Required GGUF/Ollama values are checked early when selected through `MODE`; flag
 handled by the application. Serving or benchmarking can download and load models.
 
 `INPUT` and `OUTPUT` are required for `run`; they are optional for `bench` and `loadtest` (which otherwise use
-bundled simple questions). Output files are overwritten by the CLI; an `OUTPUT` that is the `INPUT` file is refused
-before anything runs. HTTP clients use
+bundled simple questions). Output files are overwritten by the CLI; final parsed input/output paths, including
+overrides in `ARGS`, are checked for the same file (including symlinks and hard links) before any work. Load-test
+results omit URL credentials, query parameters and fragments; requests still use the full URL. HTTP clients use
 `URL=http://127.0.0.1:8000/v1/systemone` by default, follow `PORT` overrides, and require a running server.
 `make serve` listens on `HOST=127.0.0.1` (this machine only); `HOST=0.0.0.0` exposes the unauthenticated server on
 every interface.
