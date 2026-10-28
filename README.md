@@ -391,6 +391,7 @@ No authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway i
 | [FORMATS](docs/FORMATS.md) · [FORMAT2](docs/FORMAT2.md) · [SOAM](docs/SOAM.md) | prompt formats, option orders and calibration files; the runtime contract; shared-state packing |
 | [HARDWARE](docs/HARDWARE.md) · [PORTS](docs/PORTS.md) · [GGUF](docs/GGUF.md) · [QUANTIZATION](docs/QUANTIZATION.md) | which mode on which GPU; MLX and GGUF ports; FP8 and other low precision |
 | [WHATS_NEW](docs/WHATS_NEW.md) · [basal-1.0 report](docs/basal-1.pdf) | the full list of changes in 2.0; the basal-1.0 technical report |
+| [basal-ui](https://github.com/pawelkiszczak/basal-ui) | *community*: a local browser app that picks a model for your hardware, serves it and lets you try it (playground, calibration, measurements, an API server with keys) |
 
 ## Limitations
 
