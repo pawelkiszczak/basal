@@ -1,3 +1,11 @@
+# Unreleased
+
+- **basal-calibrate on a Hugging Face cache snapshot:** `--model <cache>/models--<org>--<name>/snapshots/<commit>`
+  records `fitted_on.model` as the repo id and `fitted_on.revision` as the commit, as basal-serve names the model, so
+  the file is applied when that snapshot is served (before, the path was recorded and `--strict-calibration` refused
+  the file as fitted on another model). The same holds with `--url` and `--model`; repo ids and plain directories are
+  recorded as before.
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture
