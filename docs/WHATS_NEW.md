@@ -1,3 +1,9 @@
+# Unreleased
+
+- **basal-viz with `"facts": "auto"`:** the explained state carries the computed facts block (dates, gaps, VAT), as
+  basal-serve reads it, so the page explains the prompt the served answer came from and the comparison with
+  basal-serve's probabilities holds for such requests.
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture
