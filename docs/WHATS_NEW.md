@@ -1,3 +1,10 @@
+# Unreleased
+
+- **basal-viz reads Gemma 4 basal-omni text decisions:** the logit lens runs over basal-omni's text decoder with the
+  output head's bias and the final logit softcap, so every layer's code distribution ends at the probabilities the
+  eager engine serves. Requests with media are refused with a message (basal-viz explains text only).
+  [SERVING.md](SERVING.md#see-how-a-decision-is-made)
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture
