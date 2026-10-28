@@ -23,7 +23,7 @@ import torch
 
 from .engine import default_device
 from .facts import inject as inject_facts
-from .prompt import FORMATS, PREFILL
+from .prompt import FORMATS, PREFILL, RequestError
 from .run import to_request
 from .server import Server, certified, http_status, temperature, to_items
 from .server import parser as serve_parser
@@ -165,6 +165,8 @@ class Explainer:
     def explain(self, body):
         """The page's steps for every question of a request (one entry per label of a multi question); with
         "facts": "auto" the state carries the computed facts, as basal-serve reads it."""
+        if body.get("facts", "off") not in ("off", "auto"):
+            raise RequestError('facts must be "off" or "auto"')
         with self.lock:
             t0 = time.perf_counter()
             state = body["state"]
