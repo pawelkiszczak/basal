@@ -2,7 +2,9 @@
 
 - **basal-viz reads Gemma 4 basal-omni text decisions:** the logit lens runs over basal-omni's text decoder with the
   output head's bias and the final logit softcap, so every layer's code distribution ends at the probabilities the
-  eager engine serves. Requests with media are refused with a message (basal-viz explains text only).
+  eager engine serves. Requests with media are refused with a message (basal-viz explains text only). Gemma 4
+  inspection is limited to 2,048 tokens per rendered prompt; concurrent HTTP inspections are serialized together
+  with their served comparisons so layer hooks cannot capture another request's activations.
   [SERVING.md](SERVING.md#see-how-a-decision-is-made)
 
 # What is new in basal 2.4.1

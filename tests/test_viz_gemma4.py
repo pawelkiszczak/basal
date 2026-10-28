@@ -8,6 +8,7 @@ import torch
 from basal import viz
 from basal.engine import EagerBackend
 from basal.gemma4 import Gemma4Forward
+from tests.test_engine import tiny as tiny_llama
 from tests.test_gemma4 import tiny
 
 
@@ -18,11 +19,11 @@ class Tokenizer:
 
 def explainer_for(model):
     ex = viz.Explainer.__new__(viz.Explainer)
-    ex.gemma4 = True
+    ex.gemma4 = viz.is_gemma4(model)
     ex.model = model
     ex.text_model = model.model
     ex.head = model.get_output_embeddings()
-    ex.softcap = model.config.final_logit_softcapping
+    ex.softcap = getattr(model.config, "final_logit_softcapping", None)
     ex.dev = "cpu"
     ex.tok = Tokenizer()
     return ex
@@ -45,6 +46,12 @@ def test_gemma4_lens_matches_eager_served_probabilities_at_every_layer(codes):
     hidden = Gemma4Forward(model).hidden([[ids]])[0][0]
     served = eager._codes(hidden[None].float(), [codes])[0]
     assert layers[-1] == pytest.approx(served, abs=1e-6)
+    with torch.no_grad():
+        states = model.model(input_ids=torch.tensor([ids]), use_cache=False, output_hidden_states=True).hidden_states
+        hidden = torch.stack([model.model.norm(h[0, -1]) for h in states[1:-1]] + [states[-1][0, -1]])
+        reference = eager._codes(hidden.float(), [codes] * len(layers))
+    for actual, expected in zip(layers, reference):
+        assert actual == pytest.approx(expected, abs=1e-6)
 
 
 def test_gemma4_lens_applies_final_logit_softcap():
@@ -59,21 +66,55 @@ def test_gemma4_lens_applies_final_logit_softcap():
     assert max(abs(a - b) for a, b in zip(layers[-1], raw)) > 1e-3
 
 
+def test_llama_lens_keeps_its_original_probabilities():
+    model = tiny_llama()
+    ex = explainer_for(model)
+    ids, codes = [4, 5, 8, 3, 12, 6], [1, 2, 3, 4]
+    layers, _ = ex.lens(ids, codes)
+    with torch.no_grad():
+        expected = torch.softmax(model(input_ids=torch.tensor([ids])).logits[0, -1, codes], -1).tolist()
+    assert len(layers) == model.config.num_hidden_layers
+    assert layers[-1] == pytest.approx(expected, abs=1e-6)
+
+
 def test_gemma4_lens_does_not_retain_full_sequence_hidden_states(monkeypatch):
     model = tiny("e4b")
     ex = explainer_for(model)
     forward = ex.text_model.forward
-    seen = {}
+    norm = ex.text_model.norm.forward
+    seen, storage = {}, []
 
     def check_forward(*args, **kwargs):
         seen["output_hidden_states"] = kwargs.get("output_hidden_states")
         return forward(*args, **kwargs)
 
     monkeypatch.setattr(ex.text_model, "forward", check_forward)
+
+    def check_norm(hidden):
+        if hidden.shape == (1, model.config.hidden_size):
+            storage.append((hidden.untyped_storage().nbytes(), hidden.numel() * hidden.element_size()))
+        return norm(hidden)
+
+    monkeypatch.setattr(ex.text_model.norm, "forward", check_norm)
     layers, _ = ex.lens([i % 55 + 1 for i in range(512)], [1, 2, 3, 4])
 
     assert seen["output_hidden_states"] is False
     assert len(layers) == model.config.num_hidden_layers
+    assert len(storage) == model.config.num_hidden_layers - 1
+    assert all(allocated == needed for allocated, needed in storage)
+
+
+def test_long_gemma4_inspection_is_rejected_before_a_forward(monkeypatch):
+    ex = explainer_for(tiny("e4b"))
+
+    def no_forward(*_, **__):
+        pytest.fail("long inspections must be rejected before allocating full-sequence attention")
+
+    monkeypatch.setattr(ex.text_model, "forward", no_forward)
+    with pytest.raises(ValueError, match="at most 2048 prompt tokens") as error:
+        ex.lens([1] * (EagerBackend.CHUNK + 1), [1, 2])
+    assert viz.http_status(error.value) == 422
+    assert all(not layer._forward_hooks for layer in ex.text_model.layers)
 
 
 def test_gemma4_explainer_accepts_text_model_and_refuses_other_architectures(monkeypatch):

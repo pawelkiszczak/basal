@@ -21,9 +21,9 @@ from pathlib import Path
 
 import torch
 
-from .engine import default_device
+from .engine import EagerBackend, default_device
 from .gemma4 import is_gemma4, text_model
-from .prompt import FORMATS, PREFILL
+from .prompt import FORMATS, PREFILL, RequestError
 from .run import to_request
 from .server import Server, certified, http_status, temperature, to_items
 from .server import parser as serve_parser
@@ -98,6 +98,10 @@ class Explainer:
     def lens(self, ids, codes):
         """Forward with a hook on every decoder layer -> code distribution after each layer (fp32 code logits, as the
         engines read them) and the top tokens of the full vocabulary at the last layer."""
+        # shortcut: full-sequence Gemma lens is limited to one eager chunk; use chunked capture for longer prompts.
+        if self.gemma4 and len(ids) > EagerBackend.CHUNK:
+            raise RequestError(f"Gemma 4 inspection supports at most {EagerBackend.CHUNK} prompt tokens; "
+                               "shorten the state or question")
         mm, caught = self.text_model, []
         hooks = [layer.register_forward_hook(
             lambda _m, _i, o: caught.append((o[0] if isinstance(o, tuple) else o)[0, -1].clone()))
@@ -237,12 +241,15 @@ def main():
     t0 = time.time()
     ex = Explainer(a)
     exs = examples()
+    # The lens hooks and served comparison share one model, including on the MPS backend.
+    inspection_lock = asyncio.Lock()
 
     async def explain(request):
         try:
             body = await request.json()
-            res = await asyncio.get_running_loop().run_in_executor(None, ex.explain, body)
-            return JSONResponse(compare_served(res, await ex.srv.decide(body)))
+            async with inspection_lock:
+                res = await asyncio.get_running_loop().run_in_executor(None, ex.explain, body)
+                return JSONResponse(compare_served(res, await ex.srv.decide(body)))
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"error": str(e)}, status_code=http_status(e))
 

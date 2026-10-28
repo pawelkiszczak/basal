@@ -207,6 +207,9 @@ It runs `--mode mps` on Apple Silicon and `--mode eager` elsewhere (`--device`, 
 text decoder (bf16 checkpoints; the final logit softcap is applied as the engines apply it). Requests with media are
 refused: basal-viz explains text only. It is meant for exploring, not serving: every question runs one extra forward
 per option order to record all layers.
+Inspections and their served comparisons run one request at a time because they share the model. Gemma 4
+inspections accept at most 2,048 tokens per rendered prompt (including the template, question and options);
+longer prompts return a validation error before the lens forward, so shorten the state or question.
 
 ## Benchmark your GPU
 
