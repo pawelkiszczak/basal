@@ -1049,6 +1049,355 @@ def kv_dequant(e, bits, keys):
     return (q.view(H, T, D // G, G).float() * step.float() + lo.float()).view(H, T, D).to(dtype)
 
 
+def cache_signature(model_dir, name, revision, adapter, quant, kv_dtype):
+    """The compatibility signature of a model's cached states on disk (--state-cache-dir), a JSON string: two servers
+    reuse each other's files only when it is equal. weights: config.json and the names and sizes of the weight files
+    (not their bytes: the signature is computed at every start-up). The engine that wrote a file is not part of it
+    (DiskTier keeps it per file, --state-cache-import)."""
+    md = Path(model_dir)
+    files = "\n".join(f"{p.name}:{p.stat().st_size}" for p in sorted(md.glob("*.safetensors")))
+    cfg = md / "config.json"
+    weights = hashlib.sha256((cfg.read_bytes() if cfg.exists() else b"") + b"\n" + files.encode()).hexdigest()[:16]
+    payload = {"cache": 1,  # on-disk format version; bump when tensor names / layout change
+               "model": str(name), "revision": revision or "", "weights": weights,
+               "adapter": getattr(adapter, "name", adapter) or "", "quant": quant or "", "kv_dtype": kv_dtype}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+class DiskTier:
+    """The cold tier of a StateCache (--state-cache-dir): one .safetensors file per cached state under
+    root/<signature digest>/<first hex digit of the key>/<key>.safetensors, per layer i tensors k.{i} and v.{i}
+    [kv heads, tokens, head size] in their dtype, the token ids and block hashes in the metadata. Written by a
+    background thread (save never waits: a full queue drops the write, counted), indexed at start-up from the files'
+    headers (scan), bounded by budget_bytes with least-recently-used eviction of the files this process knows.
+
+    engine: "graph" or "mlx", stored per file; accept_engines None reads only this engine's files, "any" every file of
+    this signature. pack(kv) -> [(name, dtype, shape, bytes)] runs on the caller's thread (device reads); unpack(path)
+    -> (kv, metadata); after_load(kv, tokens) adapts a loaded entry to the engine (Gemma 4's trimmed sliding layers)."""
+
+    VERSION = "1"
+    QUEUE = 16
+    SUBDIRS = "0123456789abcdef"
+    TMP_AGE = 600  # seconds: a leftover temporary file older than this is a crashed writer's
+
+    def __init__(self, root, budget_bytes, signature, engine, pack, unpack, accept_engines=None, after_load=None):
+        import queue
+        from collections import OrderedDict
+        self.signature, self.engine, self.accept = signature, engine, accept_engines
+        self.root = Path(root) / hashlib.sha256(signature.encode()).hexdigest()[:16]
+        for s in self.SUBDIRS:
+            (self.root / s).mkdir(parents=True, exist_ok=True)
+        self.budget, self.used = int(budget_bytes), 0
+        self.pack, self.unpack, self.after_load = pack, unpack, after_load
+        self.entries, self.index, self.lock = OrderedDict(), {}, threading.Lock()  # key -> (path, size, tokens, blocks)
+        self.loads = self.prefix_loads = self.writes = self.write_drops = self.errors = self.evictions = 0
+        self.closed = False
+        self.pending, self.cancelled = set(), set()  # keys queued for writing; of those, deleted before written
+        self.queue = queue.Queue(maxsize=self.QUEUE)
+        self.scan()
+        self.thread = threading.Thread(target=self._writer, name="basal-state-cache-disk", daemon=True)
+        self.thread.start()
+
+    def _path(self, key):
+        h = key.hex()
+        return self.root / h[0] / f"{h}.safetensors"
+
+    @staticmethod
+    def header(path):
+        """A safetensors file's header (its JSON object), without reading the tensors."""
+        import struct
+        with open(path, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            if n > 1 << 30:
+                raise ValueError(f"{path}: header of {n} bytes")
+            raw = f.read(n)
+        if len(raw) != n:
+            raise ValueError(f"{path}: truncated header")
+        return json.loads(raw)
+
+    def _accepts(self, md):
+        return (md.get("basal_state_cache") == self.VERSION and md.get("signature") == self.signature
+                and (self.accept == "any" or md.get("engine") == self.engine))
+
+    def scan(self):
+        """Indexes the files of this signature not indexed yet, oldest first (their mtime); removes temporary files of
+        crashed writers. Idempotent. A file that cannot be read is skipped, not deleted (another server may own it)."""
+        import time
+        found, now = [], time.time()
+        with self.lock:
+            known = set(self.entries)
+        for s in self.SUBDIRS:
+            for p in (self.root / s).iterdir():
+                try:
+                    st = p.stat()
+                    if ".tmp-" in p.name:
+                        if now - st.st_mtime > self.TMP_AGE:
+                            p.unlink(missing_ok=True)
+                        continue
+                    if p.suffix != ".safetensors":
+                        continue
+                    key = bytes.fromhex(p.stem)
+                    if key in known:
+                        continue
+                    md = self.header(p).get("__metadata__") or {}
+                    if not self._accepts(md):
+                        continue
+                    blocks = [bytes.fromhex(h) for h in json.loads(md["blocks"])]
+                    found.append((st.st_mtime, key, p, st.st_size, int(md["tokens_n"]), blocks))
+                except FileNotFoundError:
+                    continue  # removed by another process meanwhile
+                except (OSError, ValueError, KeyError, TypeError):
+                    with self.lock:
+                        self.errors += 1
+        with self.lock:
+            for _, key, p, size, n, blocks in sorted(found, key=lambda f: f[0]):
+                if key not in self.entries:
+                    self._add(key, p, size, n, blocks)
+            self._evict()
+
+    def _add(self, key, path, size, n, blocks):
+        """Indexes a file (lock held)."""
+        if key in self.entries:
+            self.used -= self.entries.pop(key)[1]
+        self.entries[key] = (path, size, n, blocks)
+        self.used += size
+        for h in blocks:
+            self.index.setdefault(h, {})[key] = None
+
+    def _evict(self):
+        """Least recently used files out until the tier fits its budget (lock held)."""
+        while self.used > self.budget and self.entries:
+            self._unlink(next(iter(self.entries)))
+            self.evictions += 1
+
+    def _unlink(self, key):
+        """Removes an entry, its block hashes and its file (lock held)."""
+        e = self.entries.pop(key, None)
+        if e is None:
+            return
+        path, size, _, blocks = e
+        self.used -= size
+        for h in blocks:
+            keys = self.index.get(h)
+            if keys is not None:
+                keys.pop(key, None)
+                if not keys:
+                    del self.index[h]
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+    def _meta(self, layers, tokens, blocks):
+        """A file's metadata (safetensors: strings only)."""
+        import time
+        from . import __version__
+        return {"basal_state_cache": self.VERSION, "signature": self.signature, "engine": self.engine,
+                "basal_version": __version__, "tokens": json.dumps([int(t) for t in tokens]),
+                "tokens_n": str(len(tokens)), "blocks": json.dumps([b.hex() for b in blocks]), "layers": str(layers),
+                "created": str(int(time.time()))}
+
+    def save(self, key, kv, tokens, blocks, replaces=None):
+        """Queues a state for writing; False when the write is dropped (queue full, or the tier closed)."""
+        import queue
+        with self.lock:
+            if self.closed:
+                self.write_drops += 1
+                return False
+            if key in self.entries:  # on disk already (its content is a function of the key)
+                self.entries.move_to_end(key)
+                if replaces is not None and replaces != key:
+                    self._unlink(replaces)
+                return True
+            self.cancelled.discard(key)
+        item = (key, self.pack(kv), self._meta(len(kv), tokens, blocks), list(blocks), len(tokens), replaces)
+        with self.lock:
+            if self.closed:  # (closed meanwhile: nothing is written after the writer's sentinel)
+                self.write_drops += 1
+                return False
+            try:
+                self.queue.put_nowait(item)
+            except queue.Full:
+                self.write_drops += 1
+                return False
+            self.pending.add(key)
+        return True
+
+    @staticmethod
+    def _write(path, items, meta):
+        """A safetensors file: header length (u64, little endian), the JSON header padded with spaces to a multiple of 8,
+        the tensors' bytes in item order. Returns its size in bytes."""
+        import struct
+        header, offset = {"__metadata__": meta}, 0
+        for name, dtype, shape, data in items:
+            header[name] = {"dtype": dtype, "shape": list(shape), "data_offsets": [offset, offset + len(data)]}
+            offset += len(data)
+        raw = json.dumps(header, separators=(",", ":")).encode()
+        raw += b" " * (-len(raw) % 8)
+        with open(path, "wb") as f:
+            f.write(struct.pack("<Q", len(raw)))
+            f.write(raw)
+            for item in items:
+                f.write(item[3])
+        return 8 + len(raw) + offset
+
+    def _writer(self):
+        import uuid
+        while True:
+            item = self.queue.get()
+            try:
+                if item is None:
+                    return
+                key, items, meta, blocks, n, replaces = item
+                path = self._path(key)
+                tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
+                try:
+                    size = self._write(tmp, items, meta)
+                    os.replace(tmp, path)
+                except OSError:
+                    with self.lock:
+                        self.errors += 1
+                        self.pending.discard(key)
+                        self.cancelled.discard(key)
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    continue
+                with self.lock:
+                    self.pending.discard(key)
+                    if key in self.cancelled:  # deleted while queued (the entry replacing it was dropped)
+                        self.cancelled.discard(key)
+                        try:
+                            os.unlink(path)
+                        except FileNotFoundError:
+                            pass
+                        continue
+                    if replaces is not None and replaces != key:
+                        self._unlink(replaces)
+                    self._add(key, path, size, n, blocks)
+                    self.writes += 1
+                    self._evict()
+            finally:
+                self.queue.task_done()
+
+    def load(self, key):
+        """An entry's (keys / values, token ids) read from its file, or None: not on disk, or unreadable (counted as an
+        error, the file removed)."""
+        with self.lock:
+            e = self.entries.get(key)
+            if e is None:
+                return None
+            self.entries.move_to_end(key)
+            path, _, n, _ = e
+        try:
+            kv, md = self.unpack(path)
+            tokens = json.loads(md["tokens"])
+            if len(tokens) != n or len(kv) != int(md["layers"]):
+                raise ValueError(f"{path}: {len(tokens)} tokens, {len(kv)} layers")
+            if self.after_load is not None:
+                kv = self.after_load(kv, n)
+        except Exception:  # (FileNotFoundError: evicted by another process; safetensors' own errors: a corrupt file)
+            with self.lock:
+                self.errors += 1
+                if self.entries.get(key) is e:
+                    self._unlink(key)
+            return None
+        with self.lock:
+            self.loads += 1
+        return kv, tokens
+
+    def deepest(self, blocks):
+        """The most recently written entry holding the deepest of these chained block hashes, or None."""
+        with self.lock:
+            for h in reversed(blocks):
+                keys = self.index.get(h)
+                if keys:
+                    return next(reversed(keys))
+        return None
+
+    def has(self, key):
+        with self.lock:
+            return key in self.entries
+
+    def delete(self, key):
+        """Removes an entry's file; one still queued is removed once written."""
+        with self.lock:
+            if key in self.pending:
+                self.cancelled.add(key)
+            self._unlink(key)
+
+    def flush(self):
+        """Waits until every queued write is on disk."""
+        self.queue.join()
+
+    def close(self):
+        """Writes what is queued, then stops the writer; later saves are dropped."""
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+        self.queue.put(None)
+        self.thread.join()
+
+    def stats(self):
+        with self.lock:
+            return dict(disk_entries=len(self.entries), disk_bytes=self.used, disk_budget_bytes=self.budget,
+                        disk_loads=self.loads, disk_prefix_loads=self.prefix_loads, disk_writes=self.writes,
+                        disk_write_drops=self.write_drops, disk_errors=self.errors, disk_evictions=self.evictions)
+
+
+_TORCH_DTYPES = {torch.bfloat16: "BF16", torch.float16: "F16", torch.float32: "F32"}
+
+
+def torch_codec(device):
+    """(pack, unpack) of DiskTier for torch entries: per layer (K, V) [kv heads, tokens, head size]."""
+
+    def pack(kv):
+        items = []
+        for i, (k, v) in enumerate(kv):
+            for name, x in ((f"k.{i}", k), (f"v.{i}", v)):
+                t = x.detach().contiguous().cpu()
+                raw = t.view(torch.int16) if t.dtype == torch.bfloat16 else t  # (numpy has no bfloat16: same bits)
+                items.append((name, _TORCH_DTYPES[t.dtype], list(t.shape), raw.numpy().tobytes()))
+        return items
+
+    def unpack(path):
+        from safetensors import safe_open
+        with safe_open(str(path), "pt", device=str(device)) as f:
+            md = f.metadata()
+            L = int(md["layers"])
+            if len(f.keys()) != 2 * L:
+                raise ValueError(f"{path}: {len(f.keys())} tensors for {L} layers")
+            return [(f.get_tensor(f"k.{i}"), f.get_tensor(f"v.{i}")) for i in range(L)], md
+    return pack, unpack
+
+
+def mlx_codec(mx):
+    """(pack, unpack) of DiskTier for MLX entries: per layer (K, V) [1, kv heads, tokens, head size], stored without
+    the batch axis (the torch layout)."""
+    names = {mx.bfloat16: "BF16", mx.float16: "F16", mx.float32: "F32"}
+
+    def pack(kv):
+        items = []
+        for i, (k, v) in enumerate(kv):
+            for name, x in ((f"k.{i}", k), (f"v.{i}", v)):
+                a = x[0]
+                raw = mx.view(a, mx.int16) if a.dtype == mx.bfloat16 else a
+                items.append((name, names[a.dtype], list(a.shape), np.array(raw).tobytes()))
+        return items
+
+    def unpack(path):
+        arrays, md = mx.load(str(path), return_metadata=True)
+        L = int(md["layers"])
+        if len(arrays) != 2 * L:
+            raise ValueError(f"{path}: {len(arrays)} tensors for {L} layers")
+        kv = [(arrays[f"k.{i}"][None], arrays[f"v.{i}"][None]) for i in range(L)]
+        mx.eval([t for e in kv for t in e])
+        return kv, md
+    return pack, unpack
+
+
 class StateCache:
     """Keys and values of request states (the root of a unit cut at the state boundary: template and state), keyed by a
     hash of their token ids, kept on the GPU within a byte budget with least-recently-used eviction. A request whose
