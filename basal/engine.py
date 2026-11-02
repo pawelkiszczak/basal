@@ -1406,11 +1406,14 @@ class StateCache:
     one): longest() finds the cached state sharing the longest prefix, through chained hashes of 256-token blocks.
 
     bits (--state-cache-bits): 16 keeps the keys and values as computed; 8 or 4 stores them as integers with a scale per
-    group (kv_quant: keys per channel, values per token), 2x / ~3.5x more states per GB, given back in their dtype."""
+    group (kv_quant: keys per channel, values per token), 2x / ~3.5x more states per GB, given back in their dtype.
+
+    disk (--state-cache-dir): a DiskTier keeping every state stored with its token ids (16-bit, all its tokens) as a
+    file, read back on a memory miss (get, longest), also by later processes; an entry evicted here stays on disk."""
 
     BLOCK = 256  # tokens per block of the prefix index
 
-    def __init__(self, budget_bytes, salt=b"", bits=16):
+    def __init__(self, budget_bytes, salt=b"", bits=16, disk=None):
         from collections import OrderedDict
         if bits not in (16, 8, 4):
             raise ValueError(f"--state-cache-bits {bits}: 16, 8 or 4")
@@ -1419,6 +1422,7 @@ class StateCache:
         self.entries, self.lock = OrderedDict(), threading.Lock()
         self.index = {}  # chained block hash -> one key, or insertion-ordered keys sharing this prefix
         self.hits = self.misses = self.evictions = self.prefix_hits = 0
+        self.disk = disk
 
     def _blocks(self, tokens):
         """Chained hashes of the full BLOCK-token blocks of tokens: the i-th covers tokens[: BLOCK * (i + 1)]."""
@@ -1436,6 +1440,11 @@ class StateCache:
         caller will continue the found entry (a prefix hit is counted only then; default: yes)."""
         t = np.asarray(tokens, dtype=np.int64)
         blocks = self._blocks(t)
+        if self.disk is not None:  # the deepest state on disk sharing a block, into memory for the scan below
+            key = self.disk.deepest(blocks)
+            if key is not None and not self._in_memory(key) and self._promote(key):
+                with self.disk.lock:
+                    self.disk.prefix_loads += 1
         rejected = set() if usable is not None else ()
         with self.lock:
             for i in range(len(blocks) - 1, -1, -1):
@@ -1487,24 +1496,53 @@ class StateCache:
         import hashlib
         return hashlib.blake2b(np.asarray(tokens, dtype=np.int64).tobytes(), digest_size=16, key=self.salt).digest()
 
-    def get(self, key):
-        with self.lock:
-            e = self.entries.get(key)
-            if e is None:
-                self.misses += 1
-                return None
-            self.entries.move_to_end(key)
-            self.hits += 1
-            return self._unpack(e[0])
-
-    def has(self, key):
-        """Whether a state is cached (no recency update, not counted as a hit or a miss)."""
+    def _in_memory(self, key):
         with self.lock:
             return key in self.entries
 
-    def put(self, key, kv, tokens=None, replaces=None):
+    def _promote(self, key):
+        """A state read from disk into memory (not written back); whether it was found."""
+        found = self.disk.load(key)
+        if found is None:
+            return False
+        self.put(key, found[0], tokens=found[1], persist=False)
+        return found
+
+    def get(self, key):
+        with self.lock:
+            e = self.entries.get(key)
+            if e is not None:
+                self.entries.move_to_end(key)
+                self.hits += 1
+                return self._unpack(e[0])
+            if self.disk is None:
+                self.misses += 1
+                return None
+        found = self._promote(key)  # (the file is read outside the lock)
+        with self.lock:
+            if not found:
+                self.misses += 1
+                return None
+            self.hits += 1
+            e = self.entries.get(key)
+        return found[0] if e is None else self._unpack(e[0])  # (None: larger than the memory budget)
+
+    def has(self, key):
+        """Whether a state is cached, in memory or on disk (no recency update, not counted as a hit or a miss)."""
+        return self._in_memory(key) or (self.disk is not None and self.disk.has(key))
+
+    @staticmethod
+    def _full(kv, n):
+        """Whether every layer holds all n tokens (the token axis is -2 in the torch and the MLX layout)."""
+        return all(k.shape[-2] == n and v.shape[-2] == n for k, v in kv)
+
+    def put(self, key, kv, tokens=None, replaces=None, persist=True):
         """Stores a state's keys / values; with its token ids (tokens) it is also found by states that begin with it.
-        replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step)."""
+        replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step).
+        persist: also write it to the disk tier (an entry read from there is not written back)."""
+        if persist and self.disk is not None and tokens is not None and self._full(kv, len(tokens)):
+            if not self.disk.save(key, kv, tokens, self._blocks(tokens), replaces) and replaces is not None:
+                self.disk.delete(replaces)  # (no superseded entry left on disk beside a dropped write)
         if self.bits != 16:
             kv = [(kv_quant(k, self.bits, True), kv_quant(v, self.bits, False)) for k, v in kv]
             size = sum(t.numel() * t.element_size() for e in kv for x in e for t in x[:3])
@@ -1544,10 +1582,18 @@ class StateCache:
         if not self.lock.acquire(blocking=blocking):
             return None
         try:
-            return dict(entries=len(self.entries), used_bytes=self.used, budget_bytes=self.budget, hits=self.hits,
-                        misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits)
+            out = dict(entries=len(self.entries), used_bytes=self.used, budget_bytes=self.budget, hits=self.hits,
+                       misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits)
         finally:
             self.lock.release()
+        if self.disk is not None:
+            out.update(self.disk.stats())
+        return out
+
+    def close(self):
+        """Writes the disk tier's queued states and stops its writer."""
+        if self.disk is not None:
+            self.disk.close()
 
 
 class GraphBackend(EagerBackend):
@@ -1638,7 +1684,8 @@ class GraphBackend(EagerBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 global_attn="flex", adapter=None):
+                 global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
+                 state_cache_import="same-engine", state_cache_signature=None):
         if compile:
             persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
@@ -1761,7 +1808,14 @@ class GraphBackend(EagerBackend):
         used = state_cache_used(state_cache_gb, quant, fp8_scaling)
         self.state_cache_off = bool(state_cache_gb) and not used
         gb = max(used, self.PREFIX_GB if self.prefix else 0)
-        self.state_cache = StateCache(gb * 2 ** 30, bits=state_cache_bits) if gb and shared else None
+        self.state_cache = None
+        if gb and shared:
+            disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature, "graph",
+                            *torch_codec(self.dev), after_load=self._trim,
+                            accept_engines="any" if state_cache_import == "any-engine" else None) \
+                if state_cache_dir else None
+            salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
+            self.state_cache = StateCache(gb * 2 ** 30, salt=salt, bits=state_cache_bits, disk=disk)
         self._alloc_kv()
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix token ids)]
         if self.compact and template in ("on", "auto") and self.gemma is None:  # (Gemma 4's template: 7 tokens)
@@ -2341,6 +2395,13 @@ class GraphBackend(EagerBackend):
         # (sliding layers copied out of their room of window + MARGIN + CHUNK: what the state cache holds is what it counts)
         return [(kb[0, :, :c], vb[0, :, :c]) if f else (kb[0, :, :c].clone(), vb[0, :, :c].clone())
                 for (kb, vb), c, f in zip(bufs, cur, full)], h
+
+    def _trim(self, kv, n):
+        """A state of n tokens read from disk (every layer whole) as this engine caches it: Gemma 4's sliding layers of a
+        long state hold its last kv_lens tokens only."""
+        if self.gemma is None:
+            return kv
+        return [(k[:, -t:].contiguous(), v[:, -t:].contiguous()) for (k, v), t in zip(kv, self.gemma.kv_lens(n))]
 
     def _usable(self, kv, m, n):
         """The common prefix m of a cached state of n tokens that its keys / values can continue (0: none): Gemma 4's
@@ -3928,17 +3989,23 @@ class MLXBackend:
     COMPUTES = ("auto", "bf16")
 
     def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm", state_cache_gb=0,
-                 prefix=False, compute="auto", adapter=None):
+                 prefix=False, compute="auto", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
+                 state_cache_import="same-engine", state_cache_signature=None):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
-        self.state_cache = StateCache(gb * 2 ** 30) if gb else None
+        salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
+        self.state_cache = StateCache(gb * 2 ** 30, salt=salt) if gb else None
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
         self.max_rows = max_rows or self.MAX_ROWS
         self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute, adapter).result()
+        if self.state_cache is not None and state_cache_dir:  # (mlx is imported by _load; files read on the MLX thread)
+            self.state_cache.disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature,
+                                             "mlx", *mlx_codec(self.mx),
+                                             accept_engines="any" if state_cache_import == "any-engine" else None)
 
     def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto", adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
