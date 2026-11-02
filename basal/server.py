@@ -1255,14 +1255,15 @@ class Server:
             print(f"basal: prepared start-up: {self.prepared or 'none for this GPU and version (basal-prepare writes it)'}",
                   flush=True)
         # --state-cache-dir: the compatibility signature of the cached states' files (engine.cache_signature)
-        disk = dict(state_cache_dir=getattr(a, "state_cache_dir", None),
-                    state_cache_disk_gb=getattr(a, "state_cache_disk_gb", 20.0),
-                    state_cache_import=getattr(a, "state_cache_import", "same-engine"), state_cache_signature=None)
-        if disk["state_cache_dir"] is not None:
+        disk_kwargs = dict(state_cache_dir=getattr(a, "state_cache_dir", None),
+                           state_cache_disk_gb=getattr(a, "state_cache_disk_gb", 20.0),
+                           state_cache_import=getattr(a, "state_cache_import", "same-engine"),
+                           state_cache_signature=None)
+        if disk_kwargs["state_cache_dir"] is not None:
             kv_dtype = "bf16" if kind == "mlx" else {"bfloat16": "bf16", "float16": "f16", "float32": "f32"}.get(
                 a.dtype, a.dtype)
-            disk["state_cache_signature"] = cache_signature(md, *model_identity(a.model, md), self.adapter, quant,
-                                                            kv_dtype)
+            disk_kwargs["state_cache_signature"] = cache_signature(md, *model_identity(a.model, md), self.adapter,
+                                                                   quant, kv_dtype)
         if kind == "eager":
             self.backend = EagerBackend(md, a.dtype, device=a.device, media=getattr(a, "media", "off") == "on",
                                         forward=getattr(a, "eager_forward", None),
@@ -1284,7 +1285,8 @@ class Server:
                                       forward=getattr(a, "mlx_forward", "mlx-lm"),
                                       compute=getattr(a, "mlx_compute", "auto"),
                                       state_cache_gb=getattr(a, "state_cache_gb", 0),
-                                      prefix=getattr(a, "prefix_cache", "off") == "on", adapter=self.adapter, **disk)
+                                      prefix=getattr(a, "prefix_cache", "off") == "on", adapter=self.adapter,
+                                      **disk_kwargs)
         elif kind == "mps":
             self.backend = MPSBackend(md, a.dtype, shared=shared, device=a.device, adapter=self.adapter)
         elif kind == "gguf":
@@ -1317,7 +1319,7 @@ class Server:
                                         quant_load=getattr(a, "quant_load", "gpu"),
                                         state_cache_bits=getattr(a, "state_cache_bits", 16),
                                         graph_memory_gb=getattr(a, "graph_memory_gb", None), **nvfp4_args(a, md, quant),
-                                        adapter=self.adapter, **disk)
+                                        adapter=self.adapter, **disk_kwargs)
             if getattr(a, "state_cache_lock", "off") == "on":  # before lane() copies the backend
                 self.backend.state_cache_lock = True
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
