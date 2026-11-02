@@ -684,8 +684,9 @@ metadata, one subdirectory per model signature (model, revision, `config.json` a
 quantisation, KV dtype). A background thread writes them (a full queue drops the write, counted in
 `basal_state_cache_disk_write_drops_total`). At start-up the server indexes the files of its signature from their
 headers, and on a memory miss it reads a state back, exactly or as the longest prefix. `--state-cache-disk-gb` bounds
-the directory, least recently used files out first. Files of the other engine are read only with
-`--state-cache-import any-engine`.
+the directory, least recently used files out first. Each engine writes its own files (the engine is in the file name),
+so the CUDA graph engine and MLX can share a directory without overwriting each other's states. Files of the other
+engine are read only with `--state-cache-import any-engine`, and a server prefers its own engine's file of a state.
 
 Measured on an Apple M4 Max (40-core GPU, 128 GB), macOS 27.0.1, MLX 0.32.4, mlx-lm 0.32.2: `basal-serve --model
 Remek/basal-2.0-mini --mode mlx --no-calibration --state-cache-gb 16`, plus the run's flags. The input is 300 English

@@ -1066,14 +1066,16 @@ def cache_signature(model_dir, name, revision, adapter, quant, kv_dtype):
 
 class DiskTier:
     """The cold tier of a StateCache (--state-cache-dir): one .safetensors file per cached state under
-    root/<signature digest>/<first hex digit of the key>/<key>.safetensors, per layer i tensors k.{i} and v.{i}
+    root/<signature digest>/<first hex digit of the key>/<key>.<engine>.safetensors, per layer i tensors k.{i} and v.{i}
     [kv heads, tokens, head size] in their dtype, the token ids and block hashes in the metadata. Written by a
     background thread (save never waits: a full queue drops the write, counted), indexed at start-up from the files'
     headers (scan), bounded by budget_bytes with least-recently-used eviction of the files this process knows.
 
-    engine: "graph" or "mlx", stored per file; accept_engines None reads only this engine's files, "any" every file of
-    this signature. pack(kv) -> [(name, dtype, shape, bytes)] runs on the caller's thread (device reads); unpack(path)
-    -> (kv, metadata); after_load(kv, tokens) adapts a loaded entry to the engine (Gemma 4's trimmed sliding layers)."""
+    engine: "graph" or "mlx", in each file's name and metadata (the two engines' states of one key differ in their last
+    bits, so they never share a file); accept_engines None reads only this engine's files, "any" every file of this
+    signature, this engine's first. pack(kv) -> [(name, dtype, shape, bytes)] runs on the caller's thread (device
+    reads); unpack(path) -> (kv, metadata); after_load(kv, tokens) adapts a loaded entry to the engine (Gemma 4's
+    trimmed sliding layers)."""
 
     VERSION = "1"
     QUEUE = 16
@@ -1100,7 +1102,7 @@ class DiskTier:
 
     def _path(self, key):
         h = key.hex()
-        return self.root / h[0] / f"{h}.safetensors"
+        return self.root / h[0] / f"{h}.{self.engine}.safetensors"
 
     @staticmethod
     def header(path):
@@ -1115,9 +1117,10 @@ class DiskTier:
             raise ValueError(f"{path}: truncated header")
         return json.loads(raw)
 
-    def _accepts(self, md):
+    def _accepts(self, md, engine):
+        """Whether a file's metadata is of this signature and of an accepted engine, the one its name says."""
         return (md.get("basal_state_cache") == self.VERSION and md.get("signature") == self.signature
-                and (self.accept == "any" or md.get("engine") == self.engine))
+                and md.get("engine") == engine and (self.accept == "any" or engine == self.engine))
 
     def scan(self):
         """Indexes the files of this signature not indexed yet, oldest first (their mtime); removes temporary files of
@@ -1125,7 +1128,7 @@ class DiskTier:
         import time
         found, now = [], time.time()
         with self.lock:
-            known = set(self.entries)
+            known = {e[0] for e in self.entries.values()}
         for s in self.SUBDIRS:
             for p in (self.root / s).iterdir():
                 try:
@@ -1134,32 +1137,36 @@ class DiskTier:
                         if now - st.st_mtime > self.TMP_AGE:
                             p.unlink(missing_ok=True)
                         continue
-                    if p.suffix != ".safetensors":
+                    if p.suffix != ".safetensors" or p in known:
                         continue
-                    key = bytes.fromhex(p.stem)
-                    if key in known:
-                        continue
+                    name, _, engine = p.stem.partition(".")
+                    key = bytes.fromhex(name)
                     md = self.header(p).get("__metadata__") or {}
-                    if not self._accepts(md):
+                    if not self._accepts(md, engine):
                         continue
+                    tokens = np.asarray(json.loads(md["tokens"]), dtype=np.int64)
+                    if len(tokens) != int(md["tokens_n"]):
+                        raise ValueError(f"{p}: {len(tokens)} token ids, {md['tokens_n']} in its metadata")
                     blocks = [bytes.fromhex(h) for h in json.loads(md["blocks"])]
-                    found.append((st.st_mtime, key, p, st.st_size, int(md["tokens_n"]), blocks))
+                    found.append((st.st_mtime, key, p, st.st_size, tokens, blocks, engine == self.engine))
                 except FileNotFoundError:
                     continue  # removed by another process meanwhile
                 except (OSError, ValueError, KeyError, TypeError):
                     with self.lock:
                         self.errors += 1
         with self.lock:
-            for _, key, p, size, n, blocks in sorted(found, key=lambda f: f[0]):
-                if key not in self.entries:
-                    self._add(key, p, size, n, blocks)
+            for _, key, p, size, tokens, blocks, own in sorted(found, key=lambda f: f[0]):
+                e = self.entries.get(key)
+                # (--state-cache-import any-engine: a key with files of both engines keeps this engine's)
+                if e is None or (own and not e[0].name.endswith(f".{self.engine}.safetensors")):
+                    self._add(key, p, size, tokens, blocks)
             self._evict()
 
-    def _add(self, key, path, size, n, blocks):
+    def _add(self, key, path, size, tokens, blocks):
         """Indexes a file (lock held)."""
         if key in self.entries:
             self.used -= self.entries.pop(key)[1]
-        self.entries[key] = (path, size, n, blocks)
+        self.entries[key] = (path, size, tokens, blocks)
         self.used += size
         for h in blocks:
             self.index.setdefault(h, {})[key] = None
@@ -1210,7 +1217,12 @@ class DiskTier:
                     self._unlink(replaces)
                 return True
             self.cancelled.discard(key)
-        item = (key, self.pack(kv), self._meta(len(kv), tokens, blocks), list(blocks), len(tokens), replaces)
+            if key in self.pending:  # queued already: one write per key, so a delete() cancels it for good
+                if replaces is not None and replaces != key:
+                    self._delete(replaces)
+                return True
+        tokens = np.asarray(tokens, dtype=np.int64)
+        item = (key, self.pack(kv), self._meta(len(kv), tokens, blocks), list(blocks), tokens, replaces)
         with self.lock:
             if self.closed:  # (closed meanwhile: nothing is written after the writer's sentinel)
                 self.write_drops += 1
@@ -1248,7 +1260,7 @@ class DiskTier:
             try:
                 if item is None:
                     return
-                key, items, meta, blocks, n, replaces = item
+                key, items, meta, blocks, tokens, replaces = item
                 path = self._path(key)
                 tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
                 try:
@@ -1275,7 +1287,7 @@ class DiskTier:
                         continue
                     if replaces is not None and replaces != key:
                         self._unlink(replaces)
-                    self._add(key, path, size, n, blocks)
+                    self._add(key, path, size, tokens, blocks)
                     self.writes += 1
                     self._evict()
             finally:
@@ -1289,12 +1301,15 @@ class DiskTier:
             if e is None:
                 return None
             self.entries.move_to_end(key)
-            path, _, n, _ = e
+            path, _, own, _ = e
         try:
             kv, md = self.unpack(path)
             tokens = json.loads(md["tokens"])
-            if len(tokens) != n or len(kv) != int(md["layers"]):
-                raise ValueError(f"{path}: {len(tokens)} tokens, {len(kv)} layers")
+            if not self._accepts(md, path.stem.partition(".")[2]) or not np.array_equal(tokens, own):
+                raise ValueError(f"{path}: not the indexed state")
+            if len(kv) != int(md["layers"]):
+                raise ValueError(f"{path}: {len(kv)} layers")
+            n = len(own)
             if self.after_load is not None:
                 kv = self.after_load(kv, n)
         except Exception:  # (FileNotFoundError: evicted by another process; safetensors' own errors: a corrupt file)
@@ -1307,13 +1322,24 @@ class DiskTier:
             self.loads += 1
         return kv, tokens
 
-    def deepest(self, blocks):
-        """The most recently written entry holding the deepest of these chained block hashes, or None."""
+    def best(self, tokens, blocks):
+        """The entry sharing the longest prefix with tokens (the most recently written of equals), or None. It holds the
+        deepest of these chained block hashes that any entry holds, so only that block's entries are compared."""
+        t = np.asarray(tokens, dtype=np.int64)
         with self.lock:
             for h in reversed(blocks):
                 keys = self.index.get(h)
-                if keys:
-                    return next(reversed(keys))
+                if not keys:
+                    continue
+                best, matched = None, -1
+                for key in reversed(keys):
+                    own = self.entries[key][2]
+                    n = min(len(own), len(t))
+                    diff = np.nonzero(own[:n] != t[:n])[0]
+                    m = int(diff[0]) if len(diff) else n
+                    if m > matched:
+                        best, matched = key, m
+                return best
         return None
 
     def has(self, key):
@@ -1323,9 +1349,13 @@ class DiskTier:
     def delete(self, key):
         """Removes an entry's file; one still queued is removed once written."""
         with self.lock:
-            if key in self.pending:
-                self.cancelled.add(key)
-            self._unlink(key)
+            self._delete(key)
+
+    def _delete(self, key):
+        """delete() with the lock held."""
+        if key in self.pending:
+            self.cancelled.add(key)
+        self._unlink(key)
 
     def flush(self):
         """Waits until every queued write is on disk."""
@@ -1440,13 +1470,19 @@ class StateCache:
         caller will continue the found entry (a prefix hit is counted only then; default: yes)."""
         t = np.asarray(tokens, dtype=np.int64)
         blocks = self._blocks(t)
-        if self.disk is not None:  # the deepest state on disk sharing a block, into memory for the scan below
-            key = self.disk.deepest(blocks)
-            if key is not None and not self._in_memory(key) and self._promote(key):
-                with self.disk.lock:
-                    self.disk.prefix_loads += 1
+        loaded = None  # a state read from disk that the memory budget cannot hold: matched here directly
+        if self.disk is not None:  # the best-matching state on disk, into memory for the scan below
+            key = self.disk.best(t, blocks)
+            if key is not None and not self._in_memory(key):
+                found = self._promote(key)
+                if found:
+                    with self.disk.lock:
+                        self.disk.prefix_loads += 1
+                    if not self._in_memory(key):
+                        loaded = (key, *found)
         rejected = set() if usable is not None else ()
         with self.lock:
+            best = None
             for i in range(len(blocks) - 1, -1, -1):
                 keys = self.index.get(blocks[i])
                 if keys is None:
@@ -1454,7 +1490,7 @@ class StateCache:
                 start = (i + 1) * self.BLOCK
                 # Deeper matching candidates have already been rejected, so only the next block can match.
                 stop, limit = min(len(t), start + self.BLOCK), min(len(t), start + self.BLOCK - 1)
-                best, matched = None, start - 1
+                matched = start - 1
                 # shortcut: scan this bucket only; consider a trie if large buckets dominate measured lookup time.
                 for key in keys if isinstance(keys, dict) else (keys,):
                     if key in rejected:
@@ -1474,10 +1510,20 @@ class StateCache:
                         if m == limit:
                             break
                 if best is not None:
-                    self.entries.move_to_end(best[0])
-                    self.prefix_hits += use is None or bool(use(best[0]))
-                    return best
-            return None
+                    break
+            if loaded is not None:
+                key, kv, own = loaded[0], loaded[1], np.asarray(loaded[2], dtype=np.int64)
+                n = min(len(own), len(t))
+                diff = np.nonzero(own[:n] != t[:n])[0]
+                m = int(diff[0]) if len(diff) else n
+                if (best is None or m > best[2]) and (usable is None or usable(kv, m, len(own))):
+                    best = (key, kv, m, len(own))
+            if best is None:
+                return None
+            if best[0] in self.entries:
+                self.entries.move_to_end(best[0])
+            self.prefix_hits += use is None or bool(use(best[0]))
+            return best
 
     def _drop(self, key):
         """Removes an entry and its blocks from the index (lock held)."""

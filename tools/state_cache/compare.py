@@ -11,7 +11,7 @@ option keys. Printed: one JSON object, then (with --out) the Markdown row of doc
   agreement_at_margin_0_2 the same over readouts whose reference top two are >= 0.2 apart (null: none)
   max_dp / p99_dp / median_dp   of each readout's largest |difference of a probability|
   near_ties               disagreements whose reference top two are < 0.02 apart (as basal/identity.py)
-  missing                 readouts on one side only (not compared; exit status 2)
+  missing                 readouts on one side only (not compared; exit status 2, as with no readout compared at all)
 --metrics: the basal_state_cache_* values of GET /metrics dumps. --speed-off / --speed-on: p50 / p95 of the per-line
 latency_ms of two runs, speedup = p50 off / p50 on. --require NAME OP VALUE (OP >=, <= or =; a name of the object, or
 of the last --metrics dump): exit status 1 when one fails, each printed as FAIL <expr> (<actual>).
@@ -58,7 +58,7 @@ def percentile(xs, q):
 def compare(ref, cand):
     keys = sorted(ref.keys() & cand.keys())
     missing = len(ref.keys() ^ cand.keys())
-    dps, agree, margin, margin_agree, near, identical = [], 0, 0, 0, 0, missing == 0
+    dps, agree, margin, margin_agree, near, identical = [], 0, 0, 0, 0, missing == 0 and bool(keys)
     for k in keys:
         a, b = ref[k], cand[k]
         if len(a) != len(b):
@@ -154,8 +154,8 @@ def main(argv=None):
         with open(a.out, "w", encoding="utf-8") as f:
             json.dump(res, f, indent=1)
         print(row(a.label, res))
-    if res["missing"]:
-        print(f"FAIL missing=0 ({res['missing']})")
+    if res["missing"] or not res["readouts"]:  # (no readout compared: a failed run never passes a gate)
+        print(f"FAIL missing=0 ({res['missing']})" if res["missing"] else "FAIL readouts>0 (0)")
         return 2
     failed = 0
     for expr in a.require:

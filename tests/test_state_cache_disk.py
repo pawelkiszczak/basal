@@ -67,6 +67,11 @@ def files(tier):
     return sorted(p for p in tier.root.glob("*/*") if p.suffix == ".safetensors")
 
 
+def stems(tier):
+    """The keys (hex) of a tier's files."""
+    return [p.name.split(".")[0] for p in files(tier)]
+
+
 def stored(mk, n=300, seed=0, start=0, **kw):
     """A cache that has written one state of n tokens to disk -> (cache, key, kv, tokens)."""
     c = mk.cache(**kw)
@@ -83,7 +88,7 @@ def stored(mk, n=300, seed=0, start=0, **kw):
 def test_entry_survives_a_new_cache(mk):
     c, k, kv, _ = stored(mk)
     f = files(c.disk)
-    assert len(f) == 1 and f[0].parent.name == k.hex()[0] and f[0].stem == k.hex()
+    assert len(f) == 1 and f[0].parent.name == k.hex()[0] and f[0].name == f"{k.hex()}.graph.safetensors"
     assert c.disk.root.parent == mk.dir and len(c.disk.root.name) == 16
     c2 = mk.cache()
     assert equal(c2.get(k), kv)
@@ -181,7 +186,8 @@ def test_truncated_data_is_a_miss_and_removed(mk):
 
 @pytest.mark.parametrize("wrong", ["layers", "tokens"])
 def test_wrong_tensor_count_is_a_miss(mk, wrong):
-    """A file whose tensors (or token ids) are not what its metadata says is a miss, and removed."""
+    """A file whose tensors are not what its metadata says is a miss, and removed; one whose token ids are not is
+    skipped at start-up (counted, left in place)."""
     t = mk.tier()
     toks = list(range(300))
     k = StateCache(1, salt=b"s").key(toks)
@@ -191,7 +197,7 @@ def test_wrong_tensor_count_is_a_miss(mk, wrong):
         meta["tokens"] = json.dumps(toks[:-1])
     DiskTier._write(t._path(k), pack(kv3(300)[:2] if wrong == "layers" else kv3(300)), meta)
     c = mk.cache()
-    assert c.get(k) is None and not t._path(k).exists() and c.stats()["disk_errors"] == 1
+    assert c.get(k) is None and t._path(k).exists() == (wrong == "tokens") and c.stats()["disk_errors"] == 1
 
 
 def test_resaving_a_known_state_writes_nothing(mk):
@@ -204,7 +210,7 @@ def test_resaving_a_known_state_writes_nothing(mk):
     c.disk.flush()
     c.put(k, kv, tokens=toks, replaces=c.key(old))
     c.disk.flush()
-    assert c.stats()["disk_writes"] == 1 and [p.stem for p in files(c.disk)] == [k.hex()]
+    assert c.stats()["disk_writes"] == 1 and stems(c.disk) == [k.hex()]
 
 
 def test_file_evicted_by_another_process(mk):
@@ -223,7 +229,8 @@ def test_disk_budget_evicts_oldest(mk):
     c.disk.flush()
     f = files(c.disk)
     st = c.stats()
-    assert [p.stem for p in f] == [k2.hex()] and st["disk_evictions"] == 1 and st["disk_bytes"] == f[0].stat().st_size
+    assert [p.name.split(".")[0] for p in f] == [k2.hex()] and st["disk_evictions"] == 1
+    assert st["disk_bytes"] == f[0].stat().st_size
 
 
 def test_replaced_entry_leaves_the_disk(mk):
@@ -232,7 +239,7 @@ def test_replaced_entry_leaves_the_disk(mk):
     k2 = c.key(toks)
     c.put(k2, kv3(400), tokens=toks, replaces=k1)
     c.disk.flush()
-    assert [p.stem for p in files(c.disk)] == [k2.hex()] and c.stats()["disk_entries"] == 1
+    assert stems(c.disk) == [k2.hex()] and c.stats()["disk_entries"] == 1
 
 
 def test_dropped_write_still_deletes_the_replaced(mk, monkeypatch):
@@ -255,8 +262,78 @@ def test_dropped_write_still_deletes_the_replaced(mk, monkeypatch):
     assert c.stats()["disk_write_drops"] == 1
     release.set()
     t.flush()
-    assert [p.stem for p in files(t)] == [c.key(x).hex()] and not t._path(c.key(a)).exists()
+    assert stems(t) == [c.key(x).hex()] and not t._path(c.key(a)).exists()
     assert c.stats()["disk_entries"] == 1
+
+
+def test_delete_cancels_a_state_queued_twice(mk):
+    """A state stored twice before its file is written is queued once, so deleting it (the entry replacing it was
+    dropped) leaves no file behind."""
+    c = mk.cache()
+    t = c.disk
+    entered, release, write = threading.Event(), threading.Event(), DiskTier._write
+
+    def slow(path, items, meta):
+        if not entered.is_set():
+            entered.set()
+            release.wait(10)
+        return write(path, items, meta)
+    t._write = slow
+    x, a = list(range(5000, 5300)), list(range(300))
+    c.put(c.key(x), kv3(300, 2), tokens=x)  # the writer holds it
+    entered.wait(10)
+    t.save(c.key(a), kv3(300), a, c._blocks(a))
+    t.save(c.key(a), kv3(300), a, c._blocks(a))
+    assert t.queue.qsize() == 1
+    t.delete(c.key(a))
+    release.set()
+    t.flush()
+    assert stems(t) == [c.key(x).hex()] and not t.has(c.key(a))
+
+
+def test_two_engines_share_a_directory(mk):
+    """The graph engine's and MLX's states of one key are two files: neither overwrites the other, a same-engine tier
+    reads only its own, any-engine prefers its own, and a file whose metadata names another engine than its name is
+    never served."""
+    toks = list(range(300))
+    ref = StateCache(1, salt=b"s")
+    k, blocks = ref.key(toks), ref._blocks(toks)
+    zeros, ones = [(torch.zeros(2, 300, 8).bfloat16(),) * 2], [(torch.ones(2, 300, 8).bfloat16(),) * 2]
+    g, m = mk.tier("graph"), mk.tier("mlx")
+    g.save(k, zeros, toks, blocks)
+    m.save(k, ones, toks, blocks)
+    g.flush()
+    m.flush()
+    assert sorted(p.name.split(".")[1] for p in files(g)) == ["graph", "mlx"]
+    assert (g.load(k)[0][0][0] == 0).all() and (m.load(k)[0][0][0] == 1).all()
+    assert (mk.tier("graph", accept="any").load(k)[0][0][0] == 0).all()
+    assert (mk.tier("mlx", accept="any").load(k)[0][0][0] == 1).all()
+    g._path(k).write_bytes(m._path(k).read_bytes())  # an MLX file under the graph engine's name: indexed, then read
+    assert g.load(k) is None and g.stats()["disk_errors"] == 1 and not g._path(k).exists()
+    g._path(k).write_bytes(m._path(k).read_bytes())  # (again, before a new tier indexes the directory)
+    assert mk.tier("graph").stats()["disk_entries"] == 0
+
+
+def test_prefix_on_disk_takes_the_longest_match(mk):
+    """Of the states on disk sharing a request's deepest block, the one sharing the most tokens is read, not the most
+    recently written."""
+    c = mk.cache()
+    a, b = list(range(300)), list(range(256)) + [999] * 4
+    c.put(c.key(a), kv3(300), tokens=a)
+    c.put(c.key(b), kv3(260, 1), tokens=b)
+    c.disk.flush()
+    key, _, m, n = mk.cache().longest(list(range(400)))
+    assert (key, m, n) == (c.key(a), 300, 300)
+
+
+def test_prefix_larger_than_memory_is_still_found(mk):
+    """A state read from disk that the memory budget cannot hold is still a prefix hit (and an exact one)."""
+    _, k, kv, toks = stored(mk)
+    c = StateCache(10, salt=b"s", disk=mk.tier())
+    key, got, m, n = c.longest(toks + [7] * 100)
+    assert (key, m, n) == (k, 300, 300) and equal(got, kv)
+    st = c.stats()
+    assert (st["entries"], st["prefix_hits"], st["disk_prefix_loads"]) == (0, 1, 1) and equal(c.get(k), kv)
 
 
 def test_memory_eviction_keeps_the_file(mk):
@@ -588,7 +665,7 @@ def test_writer_survives_enospc(mk):
     c.put(c.key(a), kv3(300), tokens=a)
     c.put(c.key(b), kv3(300, 1), tokens=b)
     t.flush()
-    assert c.stats()["disk_errors"] == 1 and [p.stem for p in files(t)] == [c.key(b).hex()]
+    assert c.stats()["disk_errors"] == 1 and stems(t) == [c.key(b).hex()]
     assert not list(t.root.glob("*/*.tmp-*"))
 
 
@@ -674,3 +751,9 @@ def test_compare_tool(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out.splitlines()[0])["metrics"][0]["hits"] == 3
     write("short.jsonl", [(0.7, 1)])
     assert compare.main(["--reference", ref, "--candidate", str(tmp_path / "short.jsonl")]) == 2
+    capsys.readouterr()
+    failed = tmp_path / "failed.jsonl"  # (every request of the run failed: nothing to compare)
+    failed.write_text(json.dumps({"id": 0, "answers": None, "error": "HTTP 500"}) + "\n")
+    assert compare.main(["--reference", str(failed), "--candidate", str(failed), "--require", "identical=true"]) == 2
+    out = capsys.readouterr().out.splitlines()
+    assert json.loads(out[0])["identical"] is False and out[1] == "FAIL readouts>0 (0)"
