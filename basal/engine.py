@@ -1082,23 +1082,104 @@ class DiskTier:
     SUBDIRS = "0123456789abcdef"
     TMP_AGE = 600  # seconds: a leftover temporary file older than this is a crashed writer's
 
-    def __init__(self, root, budget_bytes, signature, engine, pack, unpack, accept_engines=None, after_load=None):
+    def __init__(self, root, budget_bytes, signature, engine, pack, unpack, accept_engines=None, after_load=None,
+                 prune_days=None):
         import queue
         from collections import OrderedDict
         self.signature, self.engine, self.accept = signature, engine, accept_engines
         self.root = Path(root) / hashlib.sha256(signature.encode()).hexdigest()[:16]
         for s in self.SUBDIRS:
             (self.root / s).mkdir(parents=True, exist_ok=True)
-        self.budget, self.used = int(budget_bytes), 0
+        self.used = 0
+        self.budget = budget_bytes
         self.pack, self.unpack, self.after_load = pack, unpack, after_load
         self.entries, self.index, self.lock = OrderedDict(), {}, threading.Lock()  # key -> (path, size, tokens, blocks)
         self.loads = self.prefix_loads = self.writes = self.write_drops = self.errors = self.evictions = 0
         self.closed = False
         self.pending, self.cancelled = set(), set()  # keys queued for writing; of those, deleted before written
         self.queue = queue.Queue(maxsize=self.QUEUE)
+        if prune_days is not None:
+            n = self.prune(prune_days)
+            if n:
+                print(f"basal: state cache: removed {n} model directories under {self.root.parent} not used for "
+                      f"{prune_days:g} days", flush=True)
         self.scan()
         self.thread = threading.Thread(target=self._writer, name="basal-state-cache-disk", daemon=True)
         self.thread.start()
+
+    @property
+    def budget(self):
+        """The byte budget: fixed, or "auto" (budget_bytes="auto"): half of the free disk space plus the files already
+        here (so it does not shrink as the cache grows), read at every use."""
+        if self._fixed is not None:
+            return self._fixed
+        st = os.statvfs(self.root)
+        return int(0.5 * (st.f_bavail * st.f_frsize + self.used))
+
+    @budget.setter
+    def budget(self, value):
+        self._fixed = None if value == "auto" else int(value)
+
+    def set_budget(self, spec):
+        """A new budget (bytes, or "auto"); least recently used files out beyond it."""
+        self.budget = spec
+        with self.lock:
+            self._evict()
+
+    def _siblings(self):
+        """The other models' cache directories beside this one (named by a signature digest: 16 hex digits)."""
+        import re
+        return [d for d in self.root.parent.iterdir()
+                if d != self.root and d.is_dir() and re.fullmatch(r"[0-9a-f]{16}", d.name)]
+
+    def prune(self, days):
+        """Removes the other models' cache directories whose newest state file is older than days; the number removed.
+        """
+        import shutil
+        import time
+        n, now = 0, time.time()
+        for d in self._siblings():
+            try:
+                newest = max((p.stat().st_mtime for p in d.glob("*/*.safetensors")), default=d.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+            if now - newest > days * 86400:
+                shutil.rmtree(d, ignore_errors=True)
+                n += 1
+        return n
+
+    def clear(self, scope="model"):
+        """Removes this model's state files (every engine's), after the queued writes land; scope "all-models" also
+        the other models' directories beside it. Returns {"files": n, "directories": m}."""
+        import shutil
+        if scope not in ("model", "all-models"):
+            raise ValueError(f"scope {scope!r}: model or all-models")
+        self.flush()
+        files = directories = 0
+        with self.lock:
+            self.cancelled |= self.pending  # (queued since the flush: removed once written)
+            for key in list(self.entries):
+                self._unlink(key)
+                files += 1
+            for s in self.SUBDIRS:
+                for p in (self.root / s).iterdir():
+                    if p.suffix == ".safetensors" or ".tmp-" in p.name:
+                        try:
+                            p.unlink()
+                            files += 1
+                        except FileNotFoundError:
+                            pass
+            if scope == "all-models":
+                for d in self._siblings():
+                    shutil.rmtree(d, ignore_errors=True)
+                    directories += 1
+            self.index.clear()
+            self.used = 0
+        return {"files": files, "directories": directories}
+
+    def reset_counters(self):
+        with self.lock:
+            self.loads = self.prefix_loads = self.writes = self.write_drops = self.errors = self.evictions = 0
 
     def _path(self, key):
         h = key.hex()
@@ -1173,7 +1254,8 @@ class DiskTier:
 
     def _evict(self):
         """Least recently used files out until the tier fits its budget (lock held)."""
-        while self.used > self.budget and self.entries:
+        budget = self.budget  # (auto: one statvfs; removing a file leaves free space + used unchanged)
+        while self.used > budget and self.entries:
             self._unlink(next(iter(self.entries)))
             self.evictions += 1
 
@@ -1373,7 +1455,8 @@ class DiskTier:
     def stats(self):
         with self.lock:
             return dict(disk_entries=len(self.entries), disk_bytes=self.used, disk_budget_bytes=self.budget,
-                        disk_loads=self.loads, disk_prefix_loads=self.prefix_loads, disk_writes=self.writes,
+                        disk_budget_auto=self._fixed is None, disk_loads=self.loads,
+                        disk_prefix_loads=self.prefix_loads, disk_writes=self.writes,
                         disk_write_drops=self.write_drops, disk_errors=self.errors, disk_evictions=self.evictions)
 
 
@@ -1613,9 +1696,36 @@ class StateCache:
                     keys[key] = None
                 else:
                     self.index[h] = {keys: None, key: None}
-            while self.used > self.budget:
-                self._drop(next(iter(self.entries)))
-                self.evictions += 1
+            self._evict()
+
+    def _evict(self):
+        """Least recently used entries out until the cache fits its budget (lock held)."""
+        while self.used > self.budget and self.entries:
+            self._drop(next(iter(self.entries)))
+            self.evictions += 1
+
+    def clear(self):
+        """Removes every entry from memory (the disk tier keeps its files); the number removed. Calls running on an
+        entry keep its tensors (their own references)."""
+        with self.lock:
+            n = len(self.entries)
+            self.entries.clear()
+            self.index.clear()
+            self.used = 0
+        return n
+
+    def set_budget(self, budget_bytes):
+        """A new memory budget; least recently used entries out beyond it."""
+        with self.lock:
+            self.budget = int(budget_bytes)
+            self._evict()
+
+    def reset_counters(self):
+        """Zeroes the hit / miss / eviction counters (and the disk tier's); the entries stay."""
+        with self.lock:
+            self.hits = self.misses = self.evictions = self.prefix_hits = 0
+        if self.disk is not None:
+            self.disk.reset_counters()
 
     def _unpack(self, kv):
         """A stored entry's keys / values in their dtype (dequantised for 8 / 4 bits)."""
@@ -1629,7 +1739,7 @@ class StateCache:
             return None
         try:
             out = dict(entries=len(self.entries), used_bytes=self.used, budget_bytes=self.budget, hits=self.hits,
-                       misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits)
+                       misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits, bits=self.bits)
         finally:
             self.lock.release()
         if self.disk is not None:
@@ -1730,8 +1840,8 @@ class GraphBackend(EagerBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
-                 state_cache_import="same-engine", state_cache_signature=None):
+                 global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb="auto",
+                 state_cache_import="same-engine", state_cache_signature=None, state_cache_prune_days=None):
         if compile:
             persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
@@ -1856,9 +1966,10 @@ class GraphBackend(EagerBackend):
         gb = max(used, self.PREFIX_GB if self.prefix else 0)
         self.state_cache = None
         if gb and shared:
-            disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature, "graph",
-                            *torch_codec(self.dev), after_load=self._trim,
-                            accept_engines="any" if state_cache_import == "any-engine" else None) \
+            disk = DiskTier(state_cache_dir, "auto" if state_cache_disk_gb == "auto" else state_cache_disk_gb * 2 ** 30,
+                            state_cache_signature, "graph", *torch_codec(self.dev), after_load=self._trim,
+                            accept_engines="any" if state_cache_import == "any-engine" else None,
+                            prune_days=state_cache_prune_days) \
                 if state_cache_dir else None
             salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
             self.state_cache = StateCache(gb * 2 ** 30, salt=salt, bits=state_cache_bits, disk=disk)
@@ -2175,6 +2286,11 @@ class GraphBackend(EagerBackend):
             q = torch.zeros((B, H, S, d), dtype=self._dtype, device=self.dev)
             k = torch.zeros((B, Hkv, S, d), dtype=self._dtype, device=self.dev)
             _cascade_varlen(q, k, k, k, k, _varlen_tree(seg, [[-1, -1]] * B, [S] * B, S, self._to_dev, True), 1.0)
+
+    def set_state_cache_budget(self, budget_bytes):
+        """A new memory budget of the state cache (one object shared by every lane); the graphs' memory stays as sized
+        at start-up."""
+        self.state_cache.set_budget(budget_bytes)
 
     def lane(self):
         """A copy of this backend for basal-serve --deterministic --lanes N: it shares the weights, the tokenizer, the
@@ -4035,8 +4151,8 @@ class MLXBackend:
     COMPUTES = ("auto", "bf16")
 
     def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm", state_cache_gb=0,
-                 prefix=False, compute="auto", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
-                 state_cache_import="same-engine", state_cache_signature=None):
+                 prefix=False, compute="auto", adapter=None, state_cache_dir=None, state_cache_disk_gb="auto",
+                 state_cache_import="same-engine", state_cache_signature=None, state_cache_prune_days=None):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
@@ -4049,9 +4165,21 @@ class MLXBackend:
         self.max_rows = max_rows or self.MAX_ROWS
         self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute, adapter).result()
         if self.state_cache is not None and state_cache_dir:  # (mlx is imported by _load; files read on the MLX thread)
-            self.state_cache.disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature,
-                                             "mlx", *mlx_codec(self.mx),
-                                             accept_engines="any" if state_cache_import == "any-engine" else None)
+            self.state_cache.disk = DiskTier(state_cache_dir,
+                                             "auto" if state_cache_disk_gb == "auto" else state_cache_disk_gb * 2 ** 30,
+                                             state_cache_signature, "mlx", *mlx_codec(self.mx),
+                                             accept_engines="any" if state_cache_import == "any-engine" else None,
+                                             prune_days=state_cache_prune_days)
+
+    def set_state_cache_budget(self, budget_bytes):
+        """A new memory budget of the state cache (on the MLX thread), the wired limit recomputed for it."""
+        self.pool.submit(lambda: (self.state_cache.set_budget(budget_bytes), self._wire(budget_bytes))).result()
+
+    def _wire(self, cached):
+        """Keeps the weights, the buffer cache and cached bytes of states resident, within the recommended working set
+        (no-op without Metal)."""
+        if self._wired_rec is not None:
+            self.mx.set_wired_limit(min(self._wired_rec, self._weights_bytes + self.CACHE_BYTES + cached))
 
     def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto", adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
@@ -4118,10 +4246,10 @@ class MLXBackend:
         # new shape, and on a 16-24 GB Mac pushes everything else into swap)
         from mlx.utils import tree_flatten
         weights = sum(v.nbytes for _, v in tree_flatten(self.model.parameters()))
-        if mx.metal.is_available():
-            rec = mx.device_info().get("max_recommended_working_set_size", weights)
-            cached = self.state_cache.budget if self.state_cache is not None else 0
-            mx.set_wired_limit(min(rec, weights + self.CACHE_BYTES + cached))
+        self._weights_bytes = weights
+        self._wired_rec = mx.device_info().get("max_recommended_working_set_size", weights) \
+            if mx.metal.is_available() else None
+        self._wire(self.state_cache.budget if self.state_cache is not None else 0)
         mx.set_cache_limit(self.CACHE_BYTES)
         self.fwd = None  # basal/mlx_forward.py, before the packed rows wrap the RoPE layers
         if forward == "basal":
