@@ -76,9 +76,9 @@ def test_hrrn_prefers_shorter_long_requests_until_one_has_waited():
     srv = LaneServer(probs)
     now = time.perf_counter()
     srv.long_rate = 1e-3                                   # 1 ms per token
-    fresh_big, fresh_small = (None,) * 5 + (now, 10_000), (None,) * 5 + (now, 2_000)
-    old_big = (None,) * 5 + (now - 30, 10_000)             # waited 30 s: ratio 4 against the small one's ~1
-    ratio = lambda e: ((now - e[5]) / (e[6] * srv.long_rate) + 1, -e[6])  # noqa: E731  (as long_worker)
+    fresh_big, fresh_small = (None,) * 6 + (now, 10_000), (None,) * 6 + (now, 2_000)
+    old_big = (None,) * 6 + (now - 30, 10_000)             # waited 30 s: ratio 4 against the small one's ~1
+    ratio = lambda e: ((now - e[6]) / (e[7] * srv.long_rate) + 1, -e[7])  # noqa: E731  (as long_worker)
     assert max([fresh_big, fresh_small], key=ratio) is fresh_small
     assert max([fresh_big, fresh_small, old_big], key=ratio) is old_big
 
