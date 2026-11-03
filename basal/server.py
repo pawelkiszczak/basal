@@ -667,6 +667,13 @@ def lanes_refused(a, kind):
     return None
 
 
+def _group(entry):
+    """A queue entry's group for the engine: (prompts, code ids[, state prefix length[, False: store no state]])."""
+    cut = entry[4] if len(entry) > 4 else None
+    store = entry[5] if len(entry) > 5 else True
+    return (entry[0], entry[1]) + ((cut,) if cut else ()) + ((False,) if cut and not store else ())
+
+
 def _answer(fut, res):
     if not fut.done():
         fut.set_result(res)
@@ -1539,10 +1546,11 @@ class Server:
                 wait[0] = False
                 self.queued -= 1
 
-    async def ask(self, branches, pol, cut=None, lane="main"):
+    async def ask(self, branches, pol, cut=None, lane="main", store=True):
         """Position probabilities of every prompt of every branch: [[probs per prompt] per branch]. cut: the number of
         tokens of the request's state prefix (the state cache's unit), passed to the engine with every entry. lane
-        "long": the whole request is one entry of the long lane (--long-lane)."""
+        "long": the whole request is one entry of the long lane (--long-lane). store False ("state_cache": "no-store"):
+        cached states are read, none is stored."""
         loop = asyncio.get_running_loop()
         # SOAM: the whole request is one queue entry (one packed row: state once, every branch after it);
         # otherwise one entry per branch (all option orders of one question share the prefix). A two-way model: one
@@ -1558,7 +1566,7 @@ class Server:
         for e in entries:
             fut = loop.create_future()
             self.waiting[fut] = wait
-            entry = ([p for b in e for p in b[3]], [x for b in e for x in b[4]], fut, pol, cut)
+            entry = ([p for b in e for p in b[3]], [x for b in e for x in b[4]], fut, pol, cut, store)
             if lane == "long":
                 lens = [len(p) for p in entry[0]]
                 shared = cut or 0  # the state once, then every prompt's own tokens
@@ -1730,20 +1738,20 @@ class Server:
                 self.long_ready.clear()
                 continue
             now, rate = time.perf_counter(), self.long_rate
-            order = sorted(self.long_entries, key=lambda e: ((now - e[5]) / (e[6] * rate) + 1, -e[6]), reverse=True)
+            order = sorted(self.long_entries, key=lambda e: ((now - e[6]) / (e[7] * rate) + 1, -e[7]), reverse=True)
             batch, total = [], 0  # the highest response ratios first, up to LONG_BATCH requests / LONG_BATCH_TOKENS
             for e in order:
-                if batch and (len(batch) >= self.LONG_BATCH or total + e[6] > self.LONG_BATCH_TOKENS
+                if batch and (len(batch) >= self.LONG_BATCH or total + e[7] > self.LONG_BATCH_TOKENS
                               or e[3] != batch[0][3]):
                     continue
                 batch.append(e)
-                total += e[6]
+                total += e[7]
             for e in batch:
                 self.long_entries.remove(e)
             self.started(batch)
             if not self.long_entries:
                 self.long_ready.clear()
-            groups = [(e[0], e[1]) + ((e[4],) if e[4] else ()) for e in batch]
+            groups = [_group(e) for e in batch]
             t0 = time.perf_counter()
             self.gate.start()
             try:
@@ -1783,10 +1791,7 @@ class Server:
                 kw = {}
                 if getattr(backend, "streams", False):
                     kw["done"] = lambda j, res, ix=ix: loop.call_soon_threadsafe(_answer, live[ix[j]][2], res)
-                groups = []
-                for i in ix:  # (prompts, code ids[, state prefix length for the state cache])
-                    cut = live[i][4] if len(live[i]) > 4 else None
-                    groups.append((live[i][0], live[i][1]) + ((cut,) if cut else ()))
+                groups = [_group(live[i]) for i in ix]  # (prompts, code ids[, state prefix length[, False]])
                 out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
                 for i, o in zip(ix, out):
                     _answer(live[i][2], o)
@@ -1894,6 +1899,10 @@ class Server:
                 raise RequestError(f'facts "auto" reads a state of at most {FACTS_MAX_CHARS} characters, this one has '
                                    f'{len(text)}: send "facts": "off" or a shorter state')
             state = await asyncio.to_thread(inject_facts, text)
+        store = body.get("state_cache", "store")
+        if store not in ("store", "no-store"):
+            raise RequestError('state_cache must be "store" or "no-store"')
+        store = store == "store"
         if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
             if body.get("media") is not None:
                 raise RequestError("give media or images, not both")
@@ -1920,7 +1929,8 @@ class Server:
         if m is not None:  # media: one forward per prompt (eager) or one vLLM call per request; no queue or truncation
             outs, n_tok, longest, n_media = await self.ask_media(qs, branches, m)
         else:
-            qs, branches, outs, n_tok, longest, truncation, cut, lane = await self.ask_text(body, qs, branches, pol)
+            qs, branches, outs, n_tok, longest, truncation, cut, lane = await self.ask_text(body, qs, branches, pol,
+                                                                                            store)
         second = []
         if self.orders == "auto":  # the reversed option order, only for the branches that are uncertain in order 1
             redo = [j for j, (b, o) in enumerate(zip(branches, outs)) if self.uncertain(qs[b[0]], b[2], o)]
@@ -1932,7 +1942,7 @@ class Server:
                     n_tok, n_media = n_tok + n2, n_media + nm2
                 else:
                     n_tok += self.encode(second)[0]
-                    o2 = await self.ask(second, pol, cut, lane)
+                    o2 = await self.ask(second, pol, cut, lane, store)
                 for j, b2, o in zip(redo, second, o2):
                     branches[j][2].extend(b2[2]); outs[j] = outs[j] + o
         reread = None
@@ -2008,7 +2018,7 @@ class Server:
             longest[j] = max(longest[j], n)
         return outs, sum(n for _, n, _ in res), longest, sum(nm for _, _, nm in res)
 
-    async def ask_text(self, body, qs, branches, pol):
+    async def ask_text(self, body, qs, branches, pol, store=True):
         """The text path (as before media): prompts tokenized, the context checked (or the state truncated, which
         rebuilds the questions and branches), the queue -> (questions, branches, outs, prompt tokens, the longest
         prompt of each branch, truncation, state cut, lane)."""
@@ -2032,7 +2042,7 @@ class Server:
         self.check_context(qs, branches, longest)
         cut = self.cut_of(qs[0], branches)
         lane = self.lane_of(branches, longest, cut)
-        outs = await self.ask(branches, pol, cut, lane)
+        outs = await self.ask(branches, pol, cut, lane, store)
         return qs, branches, outs, n_tok, longest, truncation, cut, lane
 
     async def assemble(self, body, qs, branches, outs, m, n_tok, n_media, longest, second, truncation, lane, t0,

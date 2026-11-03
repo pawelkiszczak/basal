@@ -159,3 +159,103 @@ def test_mlx_budget_rewires(tmp_path, monkeypatch):
     be._wired_rec = None
     be.set_state_cache_budget(3 << 20)
     assert be.state_cache.budget == 3 << 20 and len(calls) == 1
+
+
+# -- "state_cache": "no-store" -----------------------------------------------------------------------------------------
+
+def gemma_stub():
+    from tests.test_gemma4_graph import Stub, tiny
+    m = tiny("e4b", torch.float32)
+    be = Stub(m)
+    be.state_cache = StateCache(1 << 30)
+    return m, be
+
+
+STATE = [1, 5, 9, 11, 3, 4, 6, 12, 13, 14, 15, 16]
+G_LIDS = [[7, 8], [7, 8]]
+
+
+def test_no_store_graph():
+    _, be = gemma_stub()
+    toks = [STATE + [20, 21, 30 + o, 31 - o] for o in range(2)]
+    a = be.run_shared([(toks, G_LIDS, len(STATE), False)])[0]
+    b = be.run_shared([(toks, G_LIDS, len(STATE), False)])[0]
+    st = be.state_cache.stats()
+    assert (st["entries"], st["misses"], st["hits"]) == (0, 2, 0)
+    c = be.run_shared([(toks, G_LIDS, len(STATE))])[0]
+    assert be.state_cache.stats()["entries"] == 1
+    d = be.run_shared([(toks, G_LIDS, len(STATE), False)])[0]  # a no-store request reads the cached state
+    st = be.state_cache.stats()
+    assert (st["entries"], st["hits"]) == (1, 1)
+    assert a == b == c and all(torch.allclose(torch.tensor(x), torch.tensor(y), atol=1e-6) for x, y in zip(c, d))
+
+
+def test_no_store_graph_prefix_reused_not_stored():
+    from tests.test_gemma4_graph import separate
+    m, be = gemma_stub()
+    be.CHUNK, be.gemma.MARGIN = 5, 0
+    be.state_cache.BLOCK = 4
+    state = STATE + [17, 18]
+    be.run_shared([([state + [20, 21, 30 + o, 31 - o] for o in range(2)], G_LIDS, len(state))])
+    grown = state + [19, 20, 21, 22, 23, 24, 25]
+    toks = [grown + [20, 21, 30 + o, 31 - o] for o in range(2)]
+    res = be.run_shared([(toks, G_LIDS, len(grown), False)])[0]
+    st = be.state_cache.stats()
+    c = be.state_cache
+    assert st["prefix_hits"] == 1 and st["entries"] == 1
+    assert c.has(c.key(state)) and not c.has(c.key(grown))  # the old entry, not replaced
+    for r, e in zip(res, separate(m, toks, G_LIDS)):
+        assert torch.allclose(torch.tensor(r), e, atol=1e-6)
+
+
+def test_no_store_mlx(tmp_path):
+    pytest.importorskip("mlx.core")
+    from tests.test_mlx import LIDS, STATE as M_STATE, TOKS, tiny_llama
+    from tests.test_mlx_state_cache import cached_stub
+    tiny_llama(tmp_path)
+    be = cached_stub(tmp_path)
+    cold = be.run_shared([(TOKS, LIDS, len(M_STATE), False)])[0]
+    st = be.state_cache.stats()
+    assert (st["entries"], st["misses"]) == (0, 1)
+    stored_run = be.run_shared([(TOKS, LIDS, len(M_STATE))])[0]
+    assert be.state_cache.stats()["entries"] == 1 and cold == stored_run
+
+
+def test_state_cache_body_field():
+    import asyncio
+
+    from basal.server import RequestError, Server
+    from tests.test_server import FakeServer
+    body = {"state": "Paczka dotarła uszkodzona.", "questions": {"q": {"type": "noul", "instructions": "Uszkodzona?"}}}
+    with pytest.raises(RequestError, match='state_cache must be "store" or "no-store"'):
+        asyncio.run(FakeServer([0.6, 0.4])._run(dict(body, state_cache="maybe")))
+    for value, want in (("no-store", False), ("store", True), (None, True)):
+        srv, seen = FakeServer([0.6, 0.4]), []
+
+        async def ask(branches, pol, cut=None, lane="main", store=True, srv=srv, seen=seen):
+            seen.append(store)
+            return await Server.ask(srv, branches, pol, cut, lane, store)
+        srv.ask = ask
+        asyncio.run(srv._run(body if value is None else dict(body, state_cache=value)))
+        assert seen and set(seen) == {want}
+
+
+def test_no_store_gdn(monkeypatch, tmp_path):
+    """Qwen3.5 (GDNGraphBackend): a no-store request neither stores its computed checkpoint nor the continuation of a
+    cached one; it still reads both."""
+    from tests.test_recurrent import ROOT, gdn_backend, max_dp, tiny_qwen35
+    tiny_qwen35(tmp_path / "tiny")
+    plain = gdn_backend(monkeypatch, tmp_path / "tiny")
+    be = gdn_backend(monkeypatch, tmp_path / "tiny", state_cache_gb=0.01)
+    be.state_cache.BLOCK = 16
+    c = be.state_cache
+
+    def qs(root, *store):
+        return ([root + [20 + q, 30, 31] for q in range(3)], [[40, 41, 42]] * 3, len(root), *store)
+    a = be.run_shared([qs(ROOT, False)])
+    assert c.stats()["entries"] == 0
+    assert max_dp(a, be.run_shared([qs(ROOT)])) < 1e-6 and c.stats()["entries"] == 1
+    longer = ROOT + [14, 15, 16]
+    got = be.run_shared([qs(longer, False)])
+    assert max_dp(got, plain.run_shared([qs(longer)[:2]])) < 1e-5
+    assert c.stats()["prefix_hits"] == 1 and c.has(c.key(ROOT)) and not c.has(c.key(longer))

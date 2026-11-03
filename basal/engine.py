@@ -2646,11 +2646,11 @@ class GraphBackend(EagerBackend):
                 return 0
         return m
 
-    def _extend_states(self, units, keys, hits):
+    def _extend_states(self, units, keys, hits, stores=None):
         """Incremental states: a unit whose state (root) is not cached but begins with a cached state's first m tokens
         (a growing agent trace or chat history, or an edited one up to the edit) computes only tokens m.. over that
         state's keys / values (_continue); the result is cached, replacing the old entry when it extends it to its
-        end, and used as a hit."""
+        end (not for a unit whose stores[k] is False: "state_cache": "no-store"), and used as a hit."""
         if not keys or self.state_cache is None:
             return
         for k, key in enumerate(keys):
@@ -2677,7 +2677,8 @@ class GraphBackend(EagerBackend):
             # clients (basal-omni-1.0-max, H100)
             with self._launch if self.state_cache_lock else nullcontext():
                 new, _ = self._continue(root, prefix, m)
-            self.state_cache.put(key, new, tokens=root, replaces=old if m == n else None)
+            if stores is None or stores[k]:
+                self.state_cache.put(key, new, tokens=root, replaces=old if m == n else None)
             hits[k] = new
 
     @torch.no_grad()
@@ -3162,14 +3163,15 @@ class GraphBackend(EagerBackend):
         return out[0, self._to_dev(torch.tensor(cols))]
 
     @torch.no_grad()
-    def _tree_hidden(self, packs, idx, keys=None, hits=None):
+    def _tree_hidden(self, packs, idx, keys=None, hits=None, stores=None):
         """Branched units (one root each) -> hidden states at their readout positions, in two passes: their roots in a
         plain graph that also writes the keys and values (an uncompiled-shape forward beyond the largest graph), then
-        all other blocks, one row per unit, over those keys and values with the trie mask. keys / hits: per unit, the
-        state-cache key of its root and the cached keys / values; when every root is cached, pass 1 is skipped and the
-        cached keys / values go where pass 1 would have written them; the roots computed here are stored. Gemma 4:
-        pass 1 reads out at the root's last token (the only readout a root can hold: a prompt that is the shared
-        prefix itself) and pass 2 without a graph at the readout positions only."""
+        all other blocks, one row per unit, over those keys and values with the trie mask. keys / hits / stores: per
+        unit, the state-cache key of its root, the cached keys / values and whether a root computed here is stored
+        ("state_cache": "no-store": not); when every root is cached, pass 1 is skipped and the cached keys / values go
+        where pass 1 would have written them. Gemma 4: pass 1 reads out at the root's last token (the only readout a
+        root can hold: a prompt that is the shared prefix itself) and pass 2 without a graph at the readout positions
+        only."""
         P = [packs[k][2].index(1) for k in idx]  # block 0 (the root) comes first and is contiguous
         b = len(idx)
         n2 = max(len(packs[k][0]) - p for k, p in zip(idx, P))  # longest part below the root
@@ -3224,7 +3226,7 @@ class GraphBackend(EagerBackend):
                     traceback.clear_frames(e.__traceback__)  # (the failed forward's tensors, held by the error)
                     torch.cuda.empty_cache()
                     self.one_forward = min(self.one_forward, L - 1)
-                    return self._tree_hidden(packs, idx, keys, hits)
+                    return self._tree_hidden(packs, idx, keys, hits, stores)
         else:
             L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(b, self.BATCHES)
             g, ids, kv, *ro, h1 = self._graph(B, L)
@@ -3238,7 +3240,7 @@ class GraphBackend(EagerBackend):
             g.replay()
         if h1 is not None and self.state_cache is not None:  # store the roots computed here
             for r, key in enumerate(keys):
-                if key is not None and hits[r] is None:
+                if key is not None and hits[r] is None and (stores is None or stores[r]):
                     self.state_cache.put(key, [(kb[r, :, : P[r]].clone(), vb[r, :, : P[r]].clone()) for kb, vb in kv],
                                          tokens=packs[idx[r]][0][: P[r]])
         S = next((x for x in sfx if n2 <= x), None)
@@ -3499,20 +3501,22 @@ class GraphBackend(EagerBackend):
 
     def _cache_keys(self, groups, units):
         """Per unit, the state-cache key of its root when the root is the state prefix its group was cut at (None
-        otherwise), and the cached keys / values of the units whose root is in the cache."""
+        otherwise), the cached keys / values of the units whose root is in the cache, and whether the unit stores the
+        states it computes (its group's 4th element False: "state_cache": "no-store")."""
         if self.state_cache is None:
-            return None, {}
-        keys, hits = [], {}
+            return None, {}, None
+        keys, hits, stores = [], {}, []
         for k, (pk, _, g, _) in enumerate(units):
             cut = groups[g][2] if len(groups[g]) > 2 else None
             root = pk[2].index(1) if len(pk[4]) > 1 else None
             key = self.state_cache.key(pk[0][:root]) if cut and root == cut else None
             keys.append(key)
+            stores.append(len(groups[g]) < 4 or groups[g][3] is not False)
             if key is not None:
                 e = self.state_cache.get(key)
                 if e is not None:
                     hits[k] = e
-        return keys, hits
+        return keys, hits, stores
 
     @torch.no_grad()
     def run_shared(self, groups, policy=None, done=None):
@@ -3527,8 +3531,8 @@ class GraphBackend(EagerBackend):
         packs = [u[0] for u in units]
         cuda = self.dev.type == "cuda"
         pending = []
-        keys, hits = self._cache_keys(groups, units)
-        self._extend_states(units, keys, hits)
+        keys, hits, stores = self._cache_keys(groups, units)
+        self._extend_states(units, keys, hits, stores)
         for idx, kind in self._forwards(units, hits):
             with self._launch:  # the static buffers of a graph are shared by concurrent calls
                 if kind == "compact":
@@ -3538,7 +3542,8 @@ class GraphBackend(EagerBackend):
                 elif keys is None:
                     h = self._tree_hidden(packs, idx)
                 else:
-                    h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx])
+                    h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx],
+                                          [stores[k] for k in idx])
                 W, cols, pad = self._rows([x for k in idx for x in units[k][1]])
                 p = torch.softmax(self._code_logits(h, W).gather(1, cols).masked_fill(pad, float("-inf")), -1)
                 if cuda:
@@ -3568,7 +3573,7 @@ class GraphBackend(EagerBackend):
 
 
     @torch.no_grad()
-    def _long_hidden(self, pack, key=None, hit=None, between=None):
+    def _long_hidden(self, pack, key=None, hit=None, between=None, store=True):
         """One unit of the long lane -> hidden states at its readout positions: a single prompt in one layered forward;
         a branched unit in the two passes over fresh key / value buffers (pass 1 layered, or the cached state; pass 2
         uncompiled). The static buffers of the main lane's graphs are never touched."""
@@ -3582,7 +3587,7 @@ class GraphBackend(EagerBackend):
         else:
             kv = self._kv_new(P)
             h1 = self._forward_layered(self._to_dev(torch.tensor([t[:P]])), kv, between)[0]
-            if key is not None and self.state_cache is not None:
+            if key is not None and self.state_cache is not None and store:
                 self.state_cache.put(key, [(k[0].clone(), v[0].clone()) for k, v in kv], tokens=t[:P])
         n = len(t) - P
         seg2, par2 = np.array([[x - 1 for x in sg[P:]]]), [[-1 if q <= 0 else q - 1 for q in par[1:]]]
@@ -3605,9 +3610,10 @@ class GraphBackend(EagerBackend):
         the main lane's graphs replay; the state cache is shared with the main lane. -> the option probabilities of
         every prompt, as run_shared."""
         units = self._units(groups)
-        keys, hits = self._cache_keys(groups, units)
-        self._extend_states(units, keys, hits)
-        probs = [self._readout(self._long_hidden(pk, keys[k] if keys else None, hits.get(k), between), lids)
+        keys, hits, stores = self._cache_keys(groups, units)
+        self._extend_states(units, keys, hits, stores)
+        probs = [self._readout(self._long_hidden(pk, keys[k] if keys else None, hits.get(k), between,
+                                                 stores[k] if stores else True), lids)
                  for k, (pk, lids, _, _) in enumerate(units)]
         return self._assemble(groups, units, probs)
 
@@ -4600,7 +4606,7 @@ class MLXBackend:
         finally:
             mx.quantized_matmul, nn.Linear.__call__, mx.fast.scaled_dot_product_attention = qmm, linear, sdpa
 
-    def _state(self, root, ref=None):
+    def _state(self, root, ref=None, store=True):
         """Per-layer (keys, values) of a group's root (its tokens up to the server's cut: the state, or the template
         prefix) from the state cache, computed and stored on a miss. A root that begins with a cached one (a growing
         agent trace or chat history, or an edited state up to the edit, StateCache.longest) computes only its tokens
@@ -4615,7 +4621,8 @@ class MLXBackend:
         bits is keyed by the root and its kernels. The row count is also kept in the state's file
         (StateCache.put(tag=)), so a later server process tells the same of a state it reads from disk. A state from
         another engine's file (--state-cache-import any-engine) has other bits whatever its row count, and is used as
-        it is: that import is close to, not equal to, the uncached answers by its contract."""
+        it is: that import is close to, not equal to, the uncached answers by its contract. store False
+        ("state_cache": "no-store"): nothing is stored."""
         mx, cache = self.mx, self.state_cache
         refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
         bits = self._kernels(ref)
@@ -4640,8 +4647,9 @@ class MLXBackend:
                     initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
         kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial, ref)]
         mx.eval(kv)
-        cache.put(key, kv, tokens=root, replaces=replaces, tag=ref)
-        refs[key] = ref
+        if store:
+            cache.put(key, kv, tokens=root, replaces=replaces, tag=ref)
+            refs[key] = ref
         if len(refs) > 2 * len(cache.entries) + 64:  # entries evicted or replaced since
             self._refs = {k: r for k, r in refs.items() if k in cache.entries}
         return kv
@@ -4688,7 +4696,7 @@ class MLXBackend:
         h = self.lm.model(ids, cache=[_PackedRow(pos, mask[:, None])] * len(self.lm.model.layers))
         return h[mx.array([b for b, r in enumerate(rows) for _ in r[3]]), mx.array([j for r in rows for j in r[3]])]
 
-    def _group(self, toks, lids, cut=None):
+    def _group(self, toks, lids, cut=None, store=True):
         """One group: shared prefix once, then the suffixes in batches of max_rows (with `alone`, Qwen3.5: sorted by
         length, at most TOKEN_BUDGET padded tokens per batch). cut: the server's state-cache cut
         (tokens of the root, which every prompt of the group begins with): the root's keys / values come from the state
@@ -4698,12 +4706,12 @@ class MLXBackend:
         run their linear layers and attention at the uncached forward's row and key counts (_uncut), so a state
         computed for this request gives the uncached bits; one computed for another request (other questions) can
         differ in the last bits where that request's length picked other kernels
-        (HARDWARE.md#apple-m4-state-cache-on---mode-mlx)."""
+        (HARDWARE.md#apple-m4-state-cache-on---mode-mlx). store: whether a computed root is stored (_state)."""
         if cut and self.state_cache is not None and len(toks) == 1 and cut < len(toks[0]):
-            return [self._cut_single(toks[0], lids[0], cut)]
+            return [self._cut_single(toks[0], lids[0], cut, store)]
         P = self._shared_len(toks)
         if cut and self.state_cache is not None and cut <= P:
-            prefix = self._state(list(toks[0][:cut]), P)
+            prefix = self._state(list(toks[0][:cut]), P, store)
             if P > cut:
                 prefix = self._prefix(toks[0][:P], prefix, P)
         else:
@@ -4720,13 +4728,13 @@ class MLXBackend:
             out += self._letters(h, lids[i: i + self.max_rows])
         return out
 
-    def _cut_single(self, toks, lids, cut):
+    def _cut_single(self, toks, lids, cut, store=True):
         """A single prompt with a cut, as the uncached path reads it (_singles: one forward of the whole prompt): the
         state's keys / values from the cache (_state), then the rest of the prompt in one forward over them (at least
         MIN_CONTINUE tokens: from earlier in the state when the rest is shorter), read out at its last token, at the
         whole prompt's row and key counts (_uncut)."""
         L = len(toks)
-        root = self._state(list(toks[:cut]), L)
+        root = self._state(list(toks[:cut]), L, store)
         m = max(0, min(cut, L - self.MIN_CONTINUE))
         past = [(k[..., :m, :], v[..., :m, :]) for k, v in root] if m else None
         with self._uncut(L - m, L):
@@ -4759,26 +4767,28 @@ class MLXBackend:
         return res
 
     def _run_shared(self, groups):
-        # a group the server cut for the state cache (its third element) runs through _group, single prompts too
+        # a group the server cut for the state cache (its third element) runs through _group, single prompts too; its
+        # fourth element False: cached states are read, none stored ("state_cache": "no-store")
         cut = self.state_cache is not None
-        enc = [(self.encode(g[0]), g[1], g[2] if cut and len(g) > 2 else None) for g in groups]
+        enc = [(self.encode(g[0]), g[1], g[2] if cut and len(g) > 2 else None, len(g) < 4 or g[3] is not False)
+               for g in groups]
         out = [None] * len(groups)
-        single = [k for k, (t, _, c) in enumerate(enc) if len(t) == 1 and not c]
+        single = [k for k, (t, _, c, _) in enumerate(enc) if len(t) == 1 and not c]
         if single:
             for k, p in zip(single, self._singles([enc[k][0][0] for k in single], [enc[k][1][0] for k in single])):
                 out[k] = [p]
         if self.packed:  # packed row length: the prefix once, then every suffix
             n = {k: sum(map(len, t)) - (len(t) - 1) * self._shared_len(t)
-                 for k, (t, _, c) in enumerate(enc) if out[k] is None and not c}
+                 for k, (t, _, c, _) in enumerate(enc) if out[k] is None and not c}
             fit = [k for k in n if n[k] <= self.PACK_TOKENS]
             for c in self._chunks([n[k] for k in fit], self.PACK_BUDGET) if fit else []:
                 ks = [fit[j] for j in c]
                 probs = self._letters(self._packed([enc[k][0] for k in ks]), [x for k in ks for x in enc[k][1]])
                 for k in ks:
                     out[k], probs = probs[: len(enc[k][1])], probs[len(enc[k][1]):]
-        for k, (t, x, c) in enumerate(enc):
+        for k, (t, x, c, s) in enumerate(enc):
             if out[k] is None:
-                out[k] = self._group(t, x, c)
+                out[k] = self._group(t, x, c, s)
         return out
 
     def run_shared(self, groups, policy=None):
