@@ -1526,6 +1526,38 @@ def torch_codec(device):
     return pack, unpack
 
 
+def host_available_bytes():
+    """The host memory available to new allocations (psutil's `available`; Linux without psutil: MemAvailable), or
+    None where it cannot be read (macOS without psutil). The state cache's device memory on Apple Silicon (unified)."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except ImportError:
+        pass
+    try:
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+def cuda_available_bytes(dev):
+    """A CUDA device's memory available to this process's next tensors: free on the device plus what PyTorch's caching
+    allocator holds unused."""
+    free, _ = torch.cuda.mem_get_info(dev)
+    return int(free + torch.cuda.memory_reserved(dev) - torch.cuda.memory_allocated(dev))
+
+
+def cache_budget(gb, floor_gb=0):
+    """--state-cache-gb as a StateCache budget: "auto", bytes (at least floor_gb: --prefix-cache's own), or 0 (off)."""
+    if gb == "auto":
+        return "auto"
+    return int(max(gb or 0, floor_gb) * 2 ** 30)
+
+
 def mlx_codec(mx):
     """(pack, unpack) of DiskTier for MLX entries: per layer (K, V) [1, kv heads, tokens, head size], stored without
     the batch axis (the torch layout)."""
@@ -1562,16 +1594,25 @@ class StateCache:
     group (kv_quant: keys per channel, values per token), 2x / ~3.5x more states per GB, given back in their dtype.
 
     disk (--state-cache-dir): a DiskTier keeping every state stored with its token ids (16-bit, all its tokens) as a
-    file, read back on a memory miss (get, longest), also by later processes; an entry evicted here stays on disk."""
+    file, read back on a memory miss (get, longest), also by later processes; an entry evicted here stays on disk.
+
+    budget_bytes: bytes, or "auto" (--state-cache-gb auto): AUTO_SHARE of the device memory available now plus the
+    cache's own entries (so it does not shrink as the cache grows), available() read at most once per AVAILABLE_S.
+    available() -> bytes the device has free outside the cache (None: not readable here); also the ceiling() of a
+    fixed budget."""
 
     BLOCK = 256  # tokens per block of the prefix index
+    AUTO_SHARE = 0.5
+    AVAILABLE_S = 1.0
 
-    def __init__(self, budget_bytes, salt=b"", bits=16, disk=None):
+    def __init__(self, budget_bytes, salt=b"", bits=16, disk=None, available=None):
         from collections import OrderedDict
         if bits not in (16, 8, 4):
             raise ValueError(f"--state-cache-bits {bits}: 16, 8 or 4")
         self.bits = bits
-        self.budget, self.used, self.salt = int(budget_bytes), 0, salt
+        self.used, self.salt, self.available = 0, salt, available
+        self._read = (None, -float("inf"))  # the last available() reading and its time.monotonic()
+        self.budget = budget_bytes
         self.entries, self.lock = OrderedDict(), threading.Lock()
         self.index = {}  # chained block hash -> one key, or insertion-ordered keys sharing this prefix
         self.hits = self.misses = self.evictions = self.prefix_hits = 0
@@ -1758,9 +1799,49 @@ class StateCache:
 
     def _evict(self):
         """Least recently used entries out until the cache fits its budget (lock held)."""
-        while self.used > self.budget and self.entries:
+        budget = self.budget
+        while self.used > budget and self.entries:
             self._drop(next(iter(self.entries)))
             self.evictions += 1
+
+    @property
+    def budget(self):
+        if self._fixed is not None:
+            return self._fixed
+        free = self.available_now()
+        return int(self.AUTO_SHARE * ((free or 0) + self.used))
+
+    @budget.setter
+    def budget(self, value):
+        if value == "auto":
+            if self.available is None or self.available_now(fresh=True) is None:
+                raise ValueError("--state-cache-gb auto: the available memory is not readable here (install psutil); "
+                                 "give GB")
+            self._fixed = None
+        else:
+            self._fixed = int(value)
+
+    @property
+    def auto(self):
+        """Whether the budget is "auto"."""
+        return self._fixed is None
+
+    def available_now(self, fresh=False):
+        """The device memory available outside the cache (None: not known), read at most once per AVAILABLE_S."""
+        import time
+        if self.available is None:
+            return None
+        value, at = self._read
+        now = time.monotonic()
+        if fresh or now - at > self.AVAILABLE_S:
+            value = self.available()
+            self._read = (value, now)
+        return value
+
+    def ceiling(self):
+        """The most this cache could hold now: the available memory plus its own entries (None: not known)."""
+        free = self.available_now(fresh=True)
+        return None if free is None else free + self.used
 
     def clear(self):
         """Removes every entry from memory (the disk tier keeps its files); the number removed. Calls running on an
@@ -1773,9 +1854,9 @@ class StateCache:
         return n
 
     def set_budget(self, budget_bytes):
-        """A new memory budget; least recently used entries out beyond it."""
+        """A new memory budget (bytes, or "auto"); least recently used entries out beyond it."""
+        self.budget = budget_bytes  # (ValueError for "auto" where the available memory is not readable)
         with self.lock:
-            self.budget = int(budget_bytes)
             self._evict()
 
     def reset_counters(self):
@@ -1792,12 +1873,15 @@ class StateCache:
         return [(kv_dequant(k, self.bits, True), kv_dequant(v, self.bits, False)) for k, v in kv]
 
     def stats(self, blocking=True):
-        """A CPU-only snapshot; nonblocking readers get None while the cache is busy."""
+        """A CPU-only snapshot; nonblocking readers get None while the cache is busy. available_bytes: the device
+        memory available outside the cache (the last reading, at most AVAILABLE_S old; None: not known)."""
+        free = self.available_now()
         if not self.lock.acquire(blocking=blocking):
             return None
         try:
             out = dict(entries=len(self.entries), used_bytes=self.used, budget_bytes=self.budget, hits=self.hits,
-                       misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits, bits=self.bits)
+                       misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits, bits=self.bits,
+                       budget_auto=self._fixed is None, available_bytes=free)
         finally:
             self.lock.release()
         if self.disk is not None:
@@ -2021,16 +2105,17 @@ class GraphBackend(EagerBackend):
         self.prefix = bool(prefix) and shared
         used = state_cache_used(state_cache_gb, quant, fp8_scaling)
         self.state_cache_off = bool(state_cache_gb) and not used
-        gb = max(used, self.PREFIX_GB if self.prefix else 0)
+        budget = cache_budget(used, self.PREFIX_GB if self.prefix else 0)
         self.state_cache = None
-        if gb and shared:
+        if budget and shared:
             disk = DiskTier(state_cache_dir, "auto" if state_cache_disk_gb == "auto" else state_cache_disk_gb * 2 ** 30,
                             state_cache_signature, "graph", *torch_codec(self.dev), after_load=self._trim,
                             accept_engines="any" if state_cache_import == "any-engine" else None,
                             prune_days=state_cache_prune_days) \
                 if state_cache_dir else None
             salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
-            self.state_cache = StateCache(gb * 2 ** 30, salt=salt, bits=state_cache_bits, disk=disk)
+            self.state_cache = StateCache(budget, salt=salt, bits=state_cache_bits, disk=disk,
+                                          available=self._device_available)
         self._alloc_kv()
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix token ids)]
         if self.compact and template in ("on", "auto") and self.gemma is None:  # (Gemma 4's template: 7 tokens)
@@ -2358,10 +2443,18 @@ class GraphBackend(EagerBackend):
             k = torch.zeros((B, Hkv, S, d), dtype=self._dtype, device=self.dev)
             _cascade_varlen(q, k, k, k, k, _varlen_tree(seg, [[-1, -1]] * B, [S] * B, S, self._to_dev, True), 1.0)
 
-    def set_state_cache_budget(self, budget_bytes):
-        """A new memory budget of the state cache (one object shared by every lane); the graphs' memory stays as sized
-        at start-up."""
-        self.state_cache.set_budget(budget_bytes)
+    def set_state_cache_budget(self, budget):
+        """A new memory budget of the state cache (bytes or "auto"; one object shared by every lane); the graphs'
+        memory stays as sized at start-up."""
+        self.state_cache.set_budget(budget)
+
+    def _device_available(self):
+        """The state cache's available(): this GPU's memory free for new tensors (the host's without CUDA: tests)."""
+        return cuda_available_bytes(self.dev) if self.dev.type == "cuda" else host_available_bytes()
+
+    def state_cache_ceiling(self):
+        """The most the state cache could hold now (its available memory plus its entries), or None: not known."""
+        return self.state_cache.ceiling()
 
     def lane(self):
         """A copy of this backend for basal-serve --deterministic --lanes N: it shares the weights, the tokenizer, the
@@ -4229,9 +4322,9 @@ class MLXBackend:
                  state_cache_import="same-engine", state_cache_signature=None, state_cache_prune_days=None):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
-        gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
+        budget = cache_budget(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
         salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
-        self.state_cache = StateCache(gb * 2 ** 30, salt=salt) if gb else None
+        self.state_cache = StateCache(budget, salt=salt, available=host_available_bytes) if budget else None
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
@@ -4245,9 +4338,22 @@ class MLXBackend:
                                              accept_engines="any" if state_cache_import == "any-engine" else None,
                                              prune_days=state_cache_prune_days)
 
-    def set_state_cache_budget(self, budget_bytes):
-        """A new memory budget of the state cache (on the MLX thread), the wired limit recomputed for it."""
-        self.pool.submit(lambda: (self.state_cache.set_budget(budget_bytes), self._wire(budget_bytes))).result()
+    def set_state_cache_budget(self, budget):
+        """A new memory budget of the state cache (bytes or "auto", on the MLX thread), the wired limit recomputed for
+        it ("auto": for its value now)."""
+        def apply():
+            self.state_cache.set_budget(budget)
+            self._wire(self.state_cache.budget)
+        self.pool.submit(apply).result()
+
+    def state_cache_ceiling(self):
+        """The most the state cache could hold now: the host memory available plus its entries, within the recommended
+        working set beside the weights and the buffer cache (None: not known)."""
+        ceiling = self.state_cache.ceiling()
+        if getattr(self, "_wired_rec", None) is not None:
+            room = self._wired_rec - self._weights_bytes - self.CACHE_BYTES
+            ceiling = room if ceiling is None else min(ceiling, room)
+        return ceiling
 
     def _wire(self, cached):
         """Keeps the weights, the buffer cache and cached bytes of states resident, within the recommended working set

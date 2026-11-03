@@ -834,7 +834,10 @@ def orders_arg(value):
 
 
 def cache_gb_arg(value):
-    """--state-cache-gb values: GB (>= 0), or "N%" (0 < N <= 100) of the host's RAM, kept as given (resolve_cache_gb)."""
+    """--state-cache-gb values: GB (>= 0), "N%" (0 < N <= 100) of the host's RAM, kept as given (resolve_cache_gb), or
+    auto (engine.StateCache: a share of the memory available, read as the cache is used)."""
+    if value == "auto":
+        return value
     try:
         if value.endswith("%"):
             if 0 < float(value[:-1]) <= 100:
@@ -843,7 +846,7 @@ def cache_gb_arg(value):
             return float(value)
     except ValueError:
         pass
-    raise argparse.ArgumentTypeError("--state-cache-gb: GB, or N% of host RAM")
+    raise argparse.ArgumentTypeError("--state-cache-gb: GB, N% of host RAM, or auto")
 
 
 def disk_gb_arg(value):
@@ -864,7 +867,9 @@ def host_ram_bytes():
 
 
 def resolve_cache_gb(spec):
-    """A state-cache size in GB: a number as given, "N%" that share of the host's RAM."""
+    """A state-cache size in GB: a number as given, "N%" that share of the host's RAM; "auto" stays "auto"."""
+    if spec == "auto":
+        return spec
     if isinstance(spec, str) and spec.endswith("%"):
         try:
             ram = host_ram_bytes()
@@ -872,6 +877,13 @@ def resolve_cache_gb(spec):
             raise SystemExit("--state-cache-gb N%: the host's RAM is not readable here; give GB")
         return float(spec[:-1]) / 100 * ram / 2 ** 30
     return float(spec)
+
+
+def state_cache_over(backend, budget):
+    """The most the backend's state cache could hold now (bytes) when a budget of `budget` bytes is above it, else None
+    (it fits, or the backend cannot tell: GraphBackend / MLXBackend.state_cache_ceiling)."""
+    ceiling = getattr(backend, "state_cache_ceiling", lambda: None)()
+    return ceiling if ceiling is not None and budget > ceiling else None
 
 
 def orders_for(orders, k):
@@ -1430,6 +1442,14 @@ class Server:
             self.free_lanes = list(self.lanes)
             print(f"basal: --lanes {a.lanes}: {a.lanes - 1} more copies of the graphs in {time.time() - t:.0f} s",
                   flush=True)
+        cache = getattr(self.backend, "state_cache", None)
+        if cache is not None and not cache.auto:  # (after the graphs: what the device has left now)
+            over = state_cache_over(self.backend, cache.budget)
+            if over is not None:
+                print(f"basal: warning: the state cache's budget ({cache.budget / 2 ** 30:.1f} GiB) is above what "
+                      f"this device can give it now ({over / 2 ** 30:.1f} GiB: available memory plus its entries); "
+                      "it grows until memory runs out before it reaches the budget. Give less, or "
+                      "--state-cache-gb auto", flush=True)
         if self.adapter:  # every backend has consumed the factors (merged, or written to its PEFT directory)
             self.adapter.deltas.clear()
         self.tok = self.backend.tok
@@ -2350,7 +2370,9 @@ def add_engine_args(ap):
                     help="CUDA graph engine and --mode mlx: keep the keys and values of request states on the GPU "
                          "up to this many GB (least recently used evicted); a later request with the same state "
                          "computes only its questions and options, one whose state begins with a cached one only its "
-                         "new tokens (0: off); N%% = that share of the host's RAM")
+                         "new tokens (0: off); N%% = that share of the host's RAM (fixed at start-up); auto = half of "
+                         "the device memory available now plus the cache's own entries, read again as the cache is "
+                         "used (the GPU's on CUDA, the host's on Apple Silicon; needs psutil on macOS)")
     ap.add_argument("--state-cache-lock", dest="state_cache_lock", choices=["off", "on"], default="off",
                     help="--state-cache-gb in the CUDA graph engine: on continues cached states under the engine's "
                          "launch lock, which removes a rare HTTP 500 under concurrent requests (a torch.compile "
@@ -2730,8 +2752,10 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         names = ("hits", "misses", "prefix_hits", "evictions", "disk_loads", "disk_prefix_loads", "disk_writes",
                  "disk_write_drops", "disk_errors", "disk_evictions")
         return {"enabled": True,
-                "memory": {"budget_gb": st["budget_bytes"] / 2 ** 30, "budget_bytes": st["budget_bytes"],
-                           "used_bytes": st["used_bytes"], "entries": st["entries"], "bits": st["bits"],
+                "memory": {"budget": "auto" if st["budget_auto"] else st["budget_bytes"] / 2 ** 30,
+                           "budget_gb": st["budget_bytes"] / 2 ** 30, "budget_bytes": st["budget_bytes"],
+                           "used_bytes": st["used_bytes"], "available_bytes": st["available_bytes"],
+                           "entries": st["entries"], "bits": st["bits"],
                            "started_with": getattr(srv, "state_cache_spec", None)},
                 "disk": disk, "counters": {n: st[n] for n in names if n in st}}
 
@@ -2782,19 +2806,24 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                              "state_cache": cache_body()})
 
     async def state_cache_budget(request):
-        """POST /v1/state-cache/budget {"memory_gb": GB | "N%", "disk_gb": GiB | "auto"} (either or both)."""
+        """POST /v1/state-cache/budget {"memory_gb": GB | "N%" | "auto", "disk_gb": GiB | "auto"} (either or both). A
+        fixed memory budget above what the device can give the cache now (state_cache_over) is refused."""
         error, cache, body = await cache_request(request)
         if error is not None:
             return error
         mem, disk = body.get("memory_gb"), body.get("disk_gb")
         if mem is None and disk is None:
             return bad("give memory_gb, disk_gb or both")
-        if mem is not None:
+        loop = asyncio.get_running_loop()
+        if mem == "auto":
+            if await loop.run_in_executor(None, functools.partial(cache.available_now, fresh=True)) is None:
+                return bad('memory_gb "auto": the available memory is not readable here (install psutil); give GB')
+        elif mem is not None:
             if isinstance(mem, str) and mem.endswith("%"):
                 try:
                     share = float(mem[:-1])
                 except ValueError:
-                    return bad('memory_gb must be GB or "N%" of the host\'s RAM')
+                    return bad('memory_gb must be GB, "N%" of the host\'s RAM or "auto"')
                 if not 0 < share <= 100:
                     return bad('memory_gb "N%": 0 < N <= 100')
                 try:
@@ -2802,17 +2831,21 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                 except SystemExit as e:
                     return bad(str(e))
             elif isinstance(mem, bool) or not isinstance(mem, (int, float)):
-                return bad('memory_gb must be GB or "N%" of the host\'s RAM')
+                return bad('memory_gb must be GB, "N%" of the host\'s RAM or "auto"')
             if not mem > 0:
                 return bad("memory_gb must be above 0 (the cache is turned off with --state-cache-gb 0 at start-up)")
+            mem = int(mem * 2 ** 30)
+            over = await loop.run_in_executor(None, state_cache_over, srv.backend, mem)
+            if over is not None:
+                return bad(f"memory_gb {mem / 2 ** 30:.2f} is above what this device can give the state cache now "
+                           f"({over / 2 ** 30:.2f} GiB: available memory plus its entries); give less or \"auto\"")
         if disk is not None:
             if cache.disk is None:
                 return bad("no disk tier (--state-cache-dir)")
             if disk != "auto" and (isinstance(disk, bool) or not isinstance(disk, (int, float)) or not disk > 0):
                 return bad('disk_gb must be GiB above 0 or "auto"')
-        loop = asyncio.get_running_loop()
         if mem is not None:
-            await loop.run_in_executor(None, srv.backend.set_state_cache_budget, int(mem * 2 ** 30))
+            await loop.run_in_executor(None, srv.backend.set_state_cache_budget, mem)
         if disk is not None:
             await loop.run_in_executor(None, cache.disk.set_budget, "auto" if disk == "auto" else int(disk * 2 ** 30))
         return JSONResponse(cache_body())

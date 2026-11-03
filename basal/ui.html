@@ -403,7 +403,7 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
           <button class="btn" id="reset-counters" type="button" title="Hits, misses and evictions to 0 (the states stay)">Reset counters</button>
         </div>
         <div class="cache-row">
-          <label>Memory GiB <input id="budget-mem" type="number" step="0.5" min="0.5"></label>
+          <label>Memory GiB <input id="budget-mem" type="text" placeholder="auto"></label>
           <label id="budget-disk-l" hidden>Disk GiB <input id="budget-disk" type="text" placeholder="auto"></label>
           <button class="btn" id="apply-budgets" type="button" title="Until the server stops: its flags stay the source of truth">Apply budgets</button>
         </div>
@@ -707,14 +707,15 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
     setHTML('cache', `<div class="stats">${stat('Hit rate', looks ? (c.hits / looks * 100).toFixed(1) : '—', looks ? '%' : '')}` +
       `${stat('Entries', int(c.entries))}${stat('Hits', int(c.hits))}${stat('Misses', int(c.misses))}` +
       `${stat('Prefix hits', int(c.prefix_hits))}${stat('Evictions', int(c.evictions))}</div>` +
-      meter('Memory', `${gib(c.used_bytes)} of ${gib(c.budget_bytes)}`, c.used_bytes / c.budget_bytes, 'purple') +
+      meter('Memory', `${gib(c.used_bytes)} of ${gib(c.budget_bytes)}${c.budget_auto ? ' (auto)' : ''}` +
+            (c.available_bytes != null ? ` · ${gib(c.available_bytes)} free` : ''), c.used_bytes / c.budget_bytes, 'purple') +
       (disk ? meter('Disk', `${int(c.disk_entries)} files · ${gib(c.disk_bytes)} of ${gib(c.disk_budget_bytes)}${c.disk_budget_auto ? ' (auto)' : ''}`,
                     c.disk_bytes / c.disk_budget_bytes, 'amber') : ''));
     $('cache-actions').hidden = false;
     $('clear-disk').hidden = $('budget-disk-l').hidden = !disk;
     if (!S.cacheFilled) {  // the budget fields from the server once, not on every poll (they may be being edited)
       S.cacheFilled = true;
-      $('budget-mem').value = +(c.budget_bytes / 2 ** 30).toFixed(2);
+      $('budget-mem').value = c.budget_auto ? 'auto' : +(c.budget_bytes / 2 ** 30).toFixed(2);
       if (disk) $('budget-disk').value = c.disk_budget_auto ? 'auto' : +(c.disk_budget_bytes / 2 ** 30).toFixed(1);
     }
   }
@@ -750,10 +751,11 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
   });
   $('apply-budgets').addEventListener('click', async () => {
     const body = {}, mem = $('budget-mem').value.trim(), d = $('budget-disk').value.trim();
-    if (mem) body.memory_gb = Number(mem);
+    if (mem) body.memory_gb = mem === 'auto' || mem.endsWith('%') ? mem : Number(mem);
     if (d && !$('budget-disk-l').hidden) body.disk_gb = d === 'auto' ? 'auto' : Number(d);
     const j = await act('v1/state-cache/budget', body);
-    if (j) set('cache-msg', `Budgets: memory ${gib(j.memory.budget_bytes)}` + (j.disk ? `, disk ${j.disk.budget === 'auto' ? 'auto (' + gib(j.disk.budget_bytes) + ')' : gib(j.disk.budget_bytes)}` : '') + ' until the server stops');
+    const tier = t => t.budget === 'auto' ? 'auto (' + gib(t.budget_bytes) + ')' : gib(t.budget_bytes);
+    if (j) set('cache-msg', `Budgets: memory ${tier(j.memory)}` + (j.disk ? `, disk ${tier(j.disk)}` : '') + ' until the server stops');
   });
 
   function renderGpus(t) {
