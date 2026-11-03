@@ -37,7 +37,8 @@ URL (the official SDK was not tested). `POST /v1/basal` is the same endpoint; th
   "early_exit": "off" | "0.999" | "0.995" | "0.99" | "0.98",  // optional, --mode fast-exit only (basal-1.0)
   "media": [{"type": "image" | "audio", "data": "<base64>"}],  // optional, --media on servers only (basal-omni)
   "detail": "default" | "high",                     // optional, image tokens 280 / 1,120 (with media)
-  "lang": "pl" | "en"                               // optional, the prompt language when the state text does not show it
+  "lang": "pl" | "en",                              // optional, the prompt language when the state text does not show it
+  "state_cache": "store" | "no-store"               // optional, default "store"; no-store: read cached states, store none
 }
 ```
 
@@ -275,6 +276,47 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --cal
 - **Offer "cannot be determined"** (or "none of the options") when the state may not contain the answer.
 - **Use `criteria` descriptions** that say what each option means, not only a label; keep keys stable and send
   `"option_keys": "hide"` when keys are placeholders.
+
+## State cache management
+
+With `--state-cache-gb` or `--prefix-cache on`, the state cache is inspected and managed while the server runs. Budget
+changes last until the server stops: the start-up flags stay the source of truth. With `--api-keys`, the `POST` routes
+need an admin key (`"admin": true` in the key file; another key: 403 `FORBIDDEN`); `GET /v1/state-cache` takes any
+key, and without `--api-keys` all four are open, like `/metrics`. On a server without a state cache, `GET` answers
+`{"enabled": false}` and the `POST` routes 409 `NO_STATE_CACHE`; an invalid body is 400 `BAD_REQUEST` with the reason
+in `error`.
+
+- `GET /v1/state-cache`:
+
+  ```jsonc
+  {"enabled": true,
+   "memory": {"budget_gb": 12.8, "budget_bytes": 13743895347, "used_bytes": 524288000, "entries": 31, "bits": 16,
+              "started_with": "10%"},                    // --state-cache-gb as given
+   "disk": {"dir": "/data/sc", "model_dir": "/data/sc/3f2a...", "budget": "auto",   // or GiB; null without --state-cache-dir
+            "budget_bytes": 212600000000, "used_bytes": 1620000000, "entries": 96, "import": "same-engine"},
+   "counters": {"hits": 120, "misses": 31, "prefix_hits": 4, "evictions": 0, "disk_loads": 12, "disk_prefix_loads": 1,
+                "disk_writes": 31, "disk_write_drops": 0, "disk_errors": 0, "disk_evictions": 0}}
+  ```
+
+- `POST /v1/state-cache/clear` `{"tier": "memory" | "disk" | "all", "scope": "model" | "all-models"}`: removes the
+  cached states of a tier. `memory` keeps the files, so the next requests read their states back from disk; `disk`
+  removes this model's files (every engine's) after the queued writes land; `scope: "all-models"` also removes the
+  other models' directories under `--state-cache-dir` (`scope` only with `disk` or `all`). Answers
+  `{"cleared": {"memory_entries": n, "disk_files": m, "disk_directories": k}, "state_cache": <the GET body>}`. A
+  request already running keeps the states it read. Another server over the same directory finds the files gone and
+  counts a miss (`disk_errors`).
+- `POST /v1/state-cache/budget` `{"memory_gb": 8 | "25%", "disk_gb": 100 | "auto"}` (either or both): a new budget,
+  least recently used states out beyond it; `N%` is that share of the host's RAM, `auto` half of the free disk space
+  plus the files already there. `memory_gb` must be above 0 (the cache is turned off with `--state-cache-gb 0` at
+  start-up). On `--mode mlx` the wired memory limit follows the new budget. On the CUDA graph engine the graphs'
+  memory was sized at start-up: a larger budget than the one the server started with can run the GPU out of memory.
+  Answers the GET body.
+- `POST /v1/state-cache/counters/reset`: the counters (and the `basal_state_cache_*_total` counters of `/metrics`) to
+  0; the cached states stay. Prometheus' `rate()` reads this as a counter reset. Answers the GET body.
+
+A request with `"state_cache": "no-store"` reads cached states as any other (exact and prefix hits, memory and disk)
+but stores none: no new entry, no replacement of the state it extends, no file. For one-off states that would only
+push reusable ones out of the budget.
 
 ## MCP
 
