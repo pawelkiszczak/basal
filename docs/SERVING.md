@@ -187,15 +187,20 @@ benchmarking a GPU.
     `--lean on|pass2` (one compiled layer function: faster start-up, slower
     under load), `--tree flex` (a FlexAttention mask for the branches of a request), `--readout-layer on`,
     `--state-cache-gb N` (a state cache across requests; 2.3.1: also for states that begin with a cached one, e.g.
-    agent traces, which then compute only their new tokens; 2.5: `--state-cache-bits 8` keeps ~1.7x as many
+    agent traces, which then compute only their new tokens; `--state-cache-gb N%` sizes it as that share of the host's
+    RAM; 2.5: `--state-cache-bits 8` keeps ~1.7x as many
     states per GB, answers close to the uncached ones; `--state-cache-lock on` removes a rare HTTP 500 under
     concurrent requests at ~8% of the throughput at 8 clients, see WHATS_NEW 2.5's known limits; `--state-cache-dir
     DIR`: also every cached state as a `.safetensors` file under DIR, one subdirectory per model signature, read back
     on a memory miss and by later servers over the same directory, here and on `--mode mlx`, not for Qwen3.5;
-    `--state-cache-disk-gb G` bounds it, default 20, least recently used files out first; `--state-cache-import
+    `--state-cache-disk-gb G` bounds it, default `auto` (half of the free disk space plus the files already there,
+    refreshed as the cache is used), least recently used files out first; `--state-cache-prune-days D` removes, at
+    start-up, the directories of other models not used for D days; `--state-cache-import
     any-engine` also reads the files the other engine wrote for the same bf16 checkpoint, CUDA graph engine <->
     `--mode mlx`, whose answers are close to, not equal to, the uncached answers; the default `same-engine` reads only
-    its own engine's files), `--prefix-cache`, `--long-lane`. Measurements:
+    its own engine's files; while the server runs, the cache is cleared, resized and its counters reset through
+    [`/v1/state-cache`](API.md#state-cache-management), and a request with `"state_cache": "no-store"` reads cached
+    states without storing its own), `--prefix-cache`, `--long-lane`. Measurements:
     [HARDWARE.md](HARDWARE.md#kernels-of-the-cuda-graph-engine-one-h100),
     [disk tier](HARDWARE.md#state-cache-disk-tier).
 - **vLLM options (2.3):** `--vllm-preset default | deterministic` (deterministic: batch-invariant kernels, no prefix

@@ -24,7 +24,8 @@ from basal.ui import UI, Hist, Telemetry, exact, redact, size
 from tests.test_http_status import BODY, AppServer, Engine
 
 ROOT = Path(__file__).resolve().parents[1]
-ROUTES = ["/v1/systemone", "/v1/basal", "/v1/decisions", "/v1/models", "/health", "/metrics"]
+ROUTES = ["/v1/systemone", "/v1/basal", "/v1/decisions", "/v1/models", "/health", "/metrics", "/v1/state-cache",
+          "/v1/state-cache/clear", "/v1/state-cache/budget", "/v1/state-cache/counters/reset"]
 SECRET = "bsl_ui-test-secret"
 
 

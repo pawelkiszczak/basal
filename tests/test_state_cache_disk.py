@@ -618,7 +618,7 @@ def test_dir_flag_refused_for_qwen35():
 def test_defaults():
     from basal.server import parser
     a = parser().parse_args([])
-    assert (a.state_cache_dir, a.state_cache_disk_gb, a.state_cache_import) == (None, 20, "same-engine")
+    assert (a.state_cache_dir, a.state_cache_disk_gb, a.state_cache_import) == (None, "auto", "same-engine")
 
 
 def test_metrics_report_the_disk(mk):

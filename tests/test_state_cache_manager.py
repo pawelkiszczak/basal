@@ -259,3 +259,138 @@ def test_no_store_gdn(monkeypatch, tmp_path):
     got = be.run_shared([qs(longer, False)])
     assert max_dp(got, plain.run_shared([qs(longer)[:2]])) < 1e-5
     assert c.stats()["prefix_hits"] == 1 and c.has(c.key(ROOT)) and not c.has(c.key(longer))
+
+
+# -- basal-serve: flags and routes -------------------------------------------------------------------------------------
+
+def test_flags():
+    from basal.server import Server, host_ram_bytes, parser, resolve_cache_gb
+    a = parser().parse_args(["--state-cache-gb", "25%"])
+    assert a.state_cache_gb == "25%"
+    assert resolve_cache_gb("25%") == pytest.approx(0.25 * host_ram_bytes() / 2 ** 30)
+    assert resolve_cache_gb(3) == 3.0 and parser().parse_args(["--state-cache-gb", "1.5"]).state_cache_gb == 1.5
+    for bad in (["--state-cache-gb", "150%"], ["--state-cache-gb", "0%"], ["--state-cache-gb", "x"],
+                ["--state-cache-disk-gb", "0"], ["--state-cache-disk-gb", "lots"]):
+        with pytest.raises(SystemExit):
+            parser().parse_args(bad)
+    d = parser().parse_args([])
+    assert (d.state_cache_disk_gb, d.state_cache_prune_days) == ("auto", None)
+    assert parser().parse_args(["--state-cache-disk-gb", "5"]).state_cache_disk_gb == 5.0
+    with pytest.raises(SystemExit, match="needs --state-cache-dir"):
+        Server(parser().parse_args(["--mode", "mlx", "--state-cache-gb", "1", "--state-cache-prune-days", "7"]))
+
+
+class B:
+    policies = {}
+
+    def __init__(self, cache):
+        self.state_cache = cache
+
+    def set_state_cache_budget(self, n):
+        self.state_cache.set_budget(n)
+
+
+def srv_of(cache):
+    import asyncio
+
+    class Srv:
+        name, layout, long_tokens, state_cache_spec = "basal-test", "canonical", None, "10%"
+        backend = B(cache)
+
+        def load(self):
+            return {"running": 0, "queued": 0}
+
+        async def worker(self):
+            await asyncio.sleep(3600)
+    return Srv()
+
+
+def client(cache, keys=None):
+    from starlette.testclient import TestClient
+
+    from basal import server as S
+    from basal.auth import ApiKeys, protect
+    app = S.http_app(srv_of(cache), "fast")
+    return TestClient(protect(app, ApiKeys(keys), ()) if keys else app)
+
+
+def test_routes_off():
+    with client(None) as c:
+        assert c.get("/v1/state-cache").json() == {"enabled": False}
+        r = c.post("/v1/state-cache/clear", json={"tier": "memory"})
+        assert r.status_code == 409 and r.json()["code"] == "NO_STATE_CACHE"
+
+
+def test_routes_on(mk):
+    from basal.server import host_ram_bytes
+    c, _, _, _ = stored(mk)
+    with client(c) as h:
+        g = h.get("/v1/state-cache").json()
+        assert g["enabled"] and g["memory"]["entries"] == 1 and g["memory"]["bits"] == 16
+        assert g["memory"]["budget_bytes"] == 1 << 30 and g["memory"]["budget_gb"] == 1.0
+        assert g["memory"]["started_with"] == "10%"
+        assert g["disk"]["entries"] == 1 and g["disk"]["budget"] == 1.0 and g["disk"]["import"] == "same-engine"
+        assert g["disk"]["model_dir"] == str(c.disk.root) and g["disk"]["dir"] == str(mk.dir)
+        assert g["counters"]["disk_writes"] == 1 and set(g["counters"]) >= {"hits", "misses", "disk_evictions"}
+        r = h.post("/v1/state-cache/clear", json={"tier": "memory"})
+        assert r.status_code == 200 and r.json()["cleared"] == {"memory_entries": 1, "disk_files": 0,
+                                                                "disk_directories": 0}
+        assert r.json()["state_cache"]["memory"]["entries"] == 0 and r.json()["state_cache"]["disk"]["entries"] == 1
+        for body in ({"tier": "nothing"}, {}, {"tier": "memory", "scope": "all-models"},
+                     {"tier": "disk", "scope": "everywhere"}):
+            r = h.post("/v1/state-cache/clear", json=body)
+            assert r.status_code == 400 and r.json()["code"] == "BAD_REQUEST", body
+        assert h.post("/v1/state-cache/clear", content=b"{nope").status_code == 400
+        r = h.post("/v1/state-cache/clear", json={"tier": "all"})
+        assert r.json()["cleared"]["disk_files"] == 1 and r.json()["state_cache"]["disk"]["entries"] == 0
+        r = h.post("/v1/state-cache/budget", json={"memory_gb": "50%"})
+        assert r.status_code == 200
+        assert abs(r.json()["memory"]["budget_bytes"] - host_ram_bytes() / 2) <= 1
+        r = h.post("/v1/state-cache/budget", json={"memory_gb": 2, "disk_gb": "auto"})
+        assert r.json()["memory"]["budget_bytes"] == 2 << 30 and r.json()["disk"]["budget"] == "auto"
+        assert c.disk._fixed is None
+        assert h.post("/v1/state-cache/budget", json={"disk_gb": 3}).json()["disk"]["budget"] == 3.0
+        for body in ({"memory_gb": 0}, {"memory_gb": "0%"}, {"memory_gb": True}, {"disk_gb": -1}, {}):
+            r = h.post("/v1/state-cache/budget", json=body)
+            assert r.status_code == 400, body
+        assert "above 0" in h.post("/v1/state-cache/budget", json={"memory_gb": 0}).json()["error"]
+        c.get(b"z" * 16)
+        assert h.get("/metrics").text.count("basal_state_cache_misses_total 1") == 1
+        r = h.post("/v1/state-cache/counters/reset")
+        assert r.status_code == 200 and r.json()["counters"]["misses"] == 0
+        assert "basal_state_cache_misses_total 0" in h.get("/metrics").text
+
+
+def test_routes_without_a_disk_tier():
+    with client(StateCache(1 << 20)) as h:
+        assert h.get("/v1/state-cache").json()["disk"] is None
+        for path, body in (("clear", {"tier": "disk"}), ("clear", {"tier": "all"}), ("budget", {"disk_gb": 1})):
+            r = h.post(f"/v1/state-cache/{path}", json=body)
+            assert r.status_code == 400 and "no disk tier" in r.json()["error"]
+
+
+def test_routes_admin_key(tmp_path):
+    import hashlib
+    import json
+    keys = tmp_path / "keys.json"
+    keys.write_text(json.dumps({"keys": [
+        {"name": "ops", "sha256": hashlib.sha256(b"bsl_admin").hexdigest(), "admin": True},
+        {"name": "app", "sha256": hashlib.sha256(b"bsl_plain").hexdigest()}]}))
+    with client(StateCache(1 << 20), keys) as h:
+        plain, admin = {"Authorization": "Bearer bsl_plain"}, {"Authorization": "Bearer bsl_admin"}
+        assert h.get("/v1/state-cache", headers=plain).status_code == 200
+        for path, body in (("clear", {"tier": "memory"}), ("budget", {"memory_gb": 1}), ("counters/reset", None)):
+            r = h.post(f"/v1/state-cache/{path}", json=body, headers=plain)
+            assert r.status_code == 403 and r.json()["code"] == "FORBIDDEN"
+            assert h.post(f"/v1/state-cache/{path}", json=body, headers=admin).status_code == 200
+        assert h.post("/v1/state-cache/clear", json={"tier": "memory"}).status_code == 401
+
+
+def test_ui_state_has_disk_budget_auto(mk):
+    import json
+
+    from tests.test_ui import app_of
+    srv, u, _ = app_of()
+    srv.backend.state_cache = StateCache(1 << 30, disk=mk.tier(budget="auto"))
+    cache = json.loads(u.state({"requests": 0, "failed": 0, "seconds": 0.0}))["cache"]
+    assert cache["disk_budget_auto"] is True and cache["disk_budget_bytes"] > 0
