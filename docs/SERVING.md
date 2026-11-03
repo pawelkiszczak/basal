@@ -188,7 +188,9 @@ benchmarking a GPU.
     under load), `--tree flex` (a FlexAttention mask for the branches of a request), `--readout-layer on`,
     `--state-cache-gb N` (a state cache across requests; 2.3.1: also for states that begin with a cached one, e.g.
     agent traces, which then compute only their new tokens; `--state-cache-gb N%` sizes it as that share of the host's
-    RAM; 2.5: `--state-cache-bits 8` keeps ~1.7x as many
+    total RAM, `--state-cache-gb auto` as half of the device memory available now plus its own entries, read again as
+    the cache is used, and a fixed budget above what the device has left at start-up is warned about; 2.5:
+    `--state-cache-bits 8` keeps ~1.7x as many
     states per GB, answers close to the uncached ones; `--state-cache-lock on` removes a rare HTTP 500 under
     concurrent requests at ~8% of the throughput at 8 clients, see WHATS_NEW 2.5's known limits; `--state-cache-dir
     DIR`: also every cached state as a `.safetensors` file under DIR, one subdirectory per model signature, read back

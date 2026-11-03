@@ -146,7 +146,7 @@ def revision(srv, a):
     return md.name if md is not None and md.parent.name == "snapshots" else None
 
 
-def _disk_gb(spec):
+def _gb(spec):
     return "auto" if spec == "auto" else f"{spec:g} GB"
 
 
@@ -182,8 +182,8 @@ def facts(srv, a, mode):
         ["state once, ask many", getattr(srv, "soam", None)],
         ["context limit", f"{ctx[0]} tokens ({ctx[1]})" if ctx else None],
         ["context overflow", getattr(srv, "overflow", None)],
-        ["state cache", (f"{a.state_cache_gb:g} GB, {a.state_cache_bits}-bit" if getattr(a, "state_cache_gb", 0)
-                         else "off") + (f", disk {_disk_gb(a.state_cache_disk_gb)} at {a.state_cache_dir}"
+        ["state cache", (f"{_gb(a.state_cache_gb)}, {a.state_cache_bits}-bit" if getattr(a, "state_cache_gb", 0)
+                         else "off") + (f", disk {_gb(a.state_cache_disk_gb)} at {a.state_cache_dir}"
                                         if getattr(a, "state_cache_dir", None) else "")],
         ["max batch", getattr(srv, "max_batch", None)],
         ["python", sys.version.split()[0]],

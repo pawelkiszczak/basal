@@ -159,6 +159,45 @@ def test_mlx_budget_rewires(tmp_path, monkeypatch):
     be._wired_rec = None
     be.set_state_cache_budget(3 << 20)
     assert be.state_cache.budget == 3 << 20 and len(calls) == 1
+    be.state_cache = StateCache(1 << 30, available=lambda: 3 << 30)
+    be._wired_rec = 10 << 30
+    room = (10 << 30) - (1 << 20) - be.CACHE_BYTES
+    assert be.state_cache_ceiling() == 3 << 30  # the host's available memory is less than the working set's room
+    be.state_cache = StateCache(1 << 30, available=lambda: 20 << 30)
+    assert be.state_cache_ceiling() == room
+    be.set_state_cache_budget("auto")  # wired for the auto budget's value now
+    assert be.state_cache.auto and calls[-1] == min(10 << 30, (1 << 20) + be.CACHE_BYTES + (10 << 30))
+
+
+def test_auto_memory_budget():
+    """--state-cache-gb auto: half of (the memory available now + the cache's own entries), read again as the cache is
+    used: when the device's free memory drops, the next store evicts down to the new budget."""
+    free = [8 << 20]
+    c = StateCache("auto", available=lambda: free[0])
+    c.AVAILABLE_S = 0  # (1 s in serving)
+    assert c.auto and c.budget == 4 << 20
+    kv = [(torch.zeros(1, 2, 256, 64), torch.zeros(1, 2, 256, 64))]  # 256 KiB
+    for s in range(4):
+        c.put(c.key([s]), kv)
+    st = c.stats()
+    assert st["entries"] == 4 and st["budget_auto"] and st["available_bytes"] == 8 << 20
+    assert st["budget_bytes"] == int(0.5 * ((8 << 20) + st["used_bytes"]))
+    free[0] = 256 << 10  # another process took the memory
+    c.put(c.key([9]), kv)  # 5 x 256 KiB held; budget 0.5 * (256 KiB + 1.25 MiB) = 768 KiB
+    st = c.stats()
+    assert (st["entries"], st["used_bytes"], st["evictions"]) == (3, 768 << 10, 2)
+    c.set_budget(1 << 30)
+    assert not c.auto and c.budget == 1 << 30 and c.ceiling() == (256 << 10) + st["used_bytes"]
+    with pytest.raises(ValueError, match="not readable"):
+        StateCache("auto")
+    with pytest.raises(ValueError, match="not readable"):
+        StateCache("auto", available=lambda: None)
+
+
+def test_cache_budget():
+    from basal.engine import cache_budget
+    assert cache_budget("auto", 0.25) == "auto" and cache_budget(0) == 0
+    assert cache_budget(1, 0.25) == 1 << 30 and cache_budget(0, 0.25) == 2 ** 28
 
 
 # -- "state_cache": "no-store" -----------------------------------------------------------------------------------------
@@ -269,6 +308,7 @@ def test_flags():
     assert a.state_cache_gb == "25%"
     assert resolve_cache_gb("25%") == pytest.approx(0.25 * host_ram_bytes() / 2 ** 30)
     assert resolve_cache_gb(3) == 3.0 and parser().parse_args(["--state-cache-gb", "1.5"]).state_cache_gb == 1.5
+    assert parser().parse_args(["--state-cache-gb", "auto"]).state_cache_gb == "auto" == resolve_cache_gb("auto")
     for bad in (["--state-cache-gb", "150%"], ["--state-cache-gb", "0%"], ["--state-cache-gb", "x"],
                 ["--state-cache-disk-gb", "0"], ["--state-cache-disk-gb", "lots"]):
         with pytest.raises(SystemExit):
@@ -288,6 +328,9 @@ class B:
 
     def set_state_cache_budget(self, n):
         self.state_cache.set_budget(n)
+
+    def state_cache_ceiling(self):
+        return self.state_cache.ceiling()
 
 
 def srv_of(cache):
@@ -394,3 +437,24 @@ def test_ui_state_has_disk_budget_auto(mk):
     srv.backend.state_cache = StateCache(1 << 30, disk=mk.tier(budget="auto"))
     cache = json.loads(u.state({"requests": 0, "failed": 0, "seconds": 0.0}))["cache"]
     assert cache["disk_budget_auto"] is True and cache["disk_budget_bytes"] > 0
+
+
+def test_routes_auto_memory_and_ceiling():
+    """The memory budget "auto" through the API, and a fixed budget above what the device can give the cache now
+    (available memory plus its entries) refused."""
+    free = [2 << 30]
+    cache = StateCache(1 << 30, available=lambda: free[0])
+    with client(cache) as h:
+        g = h.get("/v1/state-cache").json()["memory"]
+        assert g["budget"] == 1.0 and g["available_bytes"] == 2 << 30
+        r = h.post("/v1/state-cache/budget", json={"memory_gb": 3})
+        assert r.status_code == 400 and "is above what this device can give" in r.json()["error"]
+        assert cache.budget == 1 << 30
+        assert h.post("/v1/state-cache/budget", json={"memory_gb": 1.5}).json()["memory"]["budget"] == 1.5
+        r = h.post("/v1/state-cache/budget", json={"memory_gb": "auto"})
+        m = r.json()["memory"]
+        assert r.status_code == 200 and m["budget"] == "auto" and m["budget_bytes"] == 1 << 30 and cache.auto
+    with client(StateCache(1 << 20)) as h:  # (no reading of the available memory)
+        r = h.post("/v1/state-cache/budget", json={"memory_gb": "auto"})
+        assert r.status_code == 400 and "not readable" in r.json()["error"]
+        assert h.post("/v1/state-cache/budget", json={"memory_gb": 4096}).status_code == 200  # no ceiling known

@@ -290,8 +290,9 @@ in `error`.
 
   ```jsonc
   {"enabled": true,
-   "memory": {"budget_gb": 12.8, "budget_bytes": 13743895347, "used_bytes": 524288000, "entries": 31, "bits": 16,
-              "started_with": "10%"},                    // --state-cache-gb as given
+   "memory": {"budget": 12.8, "budget_gb": 12.8, "budget_bytes": 13743895347,   // "budget": "auto" or GB
+              "used_bytes": 524288000, "available_bytes": 88784584704,          // device memory free outside the cache
+              "entries": 31, "bits": 16, "started_with": "10%"},              // --state-cache-gb as given
    "disk": {"dir": "/data/sc", "model_dir": "/data/sc/3f2a...", "budget": "auto",   // or GiB; null without --state-cache-dir
             "budget_bytes": 212600000000, "used_bytes": 1620000000, "entries": 96, "import": "same-engine"},
    "counters": {"hits": 120, "misses": 31, "prefix_hits": 4, "evictions": 0, "disk_loads": 12, "disk_prefix_loads": 1,
@@ -305,12 +306,16 @@ in `error`.
   `{"cleared": {"memory_entries": n, "disk_files": m, "disk_directories": k}, "state_cache": <the GET body>}`. A
   request already running keeps the states it read. Another server over the same directory finds the files gone and
   counts a miss (`disk_errors`).
-- `POST /v1/state-cache/budget` `{"memory_gb": 8 | "25%", "disk_gb": 100 | "auto"}` (either or both): a new budget,
-  least recently used states out beyond it; `N%` is that share of the host's RAM, `auto` half of the free disk space
-  plus the files already there. `memory_gb` must be above 0 (the cache is turned off with `--state-cache-gb 0` at
-  start-up). On `--mode mlx` the wired memory limit follows the new budget. On the CUDA graph engine the graphs'
-  memory was sized at start-up: a larger budget than the one the server started with can run the GPU out of memory.
-  Answers the GET body.
+- `POST /v1/state-cache/budget` `{"memory_gb": 8 | "25%" | "auto", "disk_gb": 100 | "auto"}` (either or both): a new
+  budget, least recently used states out beyond it. `N%` is that share of the host's total RAM, fixed when applied.
+  Memory `auto` is half of the device memory available now plus the cache's own entries, read again (at most once a
+  second) as the cache is used: when other work takes memory, the next stored state evicts down to the new budget. The
+  device is the GPU on the CUDA graph engine (free memory plus what PyTorch holds unused) and the host on Apple
+  Silicon (psutil's `available`; macOS needs `psutil`, else 400). Disk `auto` is half of the free disk space plus the
+  files already there. `memory_gb` must be above 0 (the cache is turned off with `--state-cache-gb 0` at start-up),
+  and a fixed one above what the device can give the cache now (`available_bytes` plus its entries; on `--mode mlx`
+  also within the recommended working set beside the weights) is refused with 400. On `--mode mlx` the wired memory
+  limit follows the new budget (for `auto`: its value now). Answers the GET body.
 - `POST /v1/state-cache/counters/reset`: the counters (and the `basal_state_cache_*_total` counters of `/metrics`) to
   0; the cached states stay. Prometheus' `rate()` reads this as a counter reset. Answers the GET body.
 

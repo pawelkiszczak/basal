@@ -42,8 +42,8 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from . import adapter as adapter_module
-from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, _varlen_attention, compact_refused,
-                     graph_memory_bytes, persist_compile_cache, set_attention, torch_varlen_available)
+from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, _varlen_attention, cache_budget,
+                     compact_refused, graph_memory_bytes, persist_compile_cache, set_attention, torch_varlen_available)
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -732,8 +732,8 @@ class GDNGraphBackend(GraphBackend):
         # --state-cache-gb: roots cut at the state boundary, kept as full-state checkpoints (keys / values + states);
         # --prefix-cache: also the template prefixes of short single-prompt requests (GraphBackend's budget)
         self.prefix = bool(prefix) and shared
-        gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
-        self.state_cache = StateCache(gb * 2 ** 30) if gb and shared else None
+        budget = cache_budget(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
+        self.state_cache = StateCache(budget, available=self._device_available) if budget and shared else None
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix ids, its row)]
         if self.compact and template in ("on", "auto"):
             self._template_prefixes(model_dir)
