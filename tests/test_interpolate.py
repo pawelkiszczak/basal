@@ -3,6 +3,8 @@ from the new checkpoint, shards (also nested ones) are kept, mismatched or quant
 anything is written, a tokenizer serialized differently is accepted while one that splits text differently needs
 --allow-tokenizer-difference, and the non-weight files come from --meta-from (on tiny checkpoints)."""
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,7 +59,8 @@ def make_ckpt(d, seed, sharded=False, extra=None, shape=(4, 8), config=None, tok
     (d / "config.json").write_text(json.dumps(config))
     (d / "tokenizer.json").write_text(json.dumps(tokenizer))
     (d / "basal.json").write_text(json.dumps({"name": f"m{seed}", "layout": "qfirst", "prompt": prompt}))
-    for f in ("README.md", "SHA256SUMS", "evidence_head.pt", "pytorch_model.bin", "pytorch_model.bin.index.json"):
+    for f in ("README.md", "SHA256SUMS", "evidence_head.pt", "NVFP4_AMAX.json", "pytorch_model.bin",
+              "pytorch_model.bin.index.json"):
         (d / f).write_text("x")
     (d / "think").mkdir()
     (d / "think" / "x.json").write_text("{}")
@@ -107,8 +110,37 @@ def test_sharded(tmp_path, subdir):
     out = interpolate(old, new, 0.5, tmp_path / "o")
     index = json.loads((out / "model.safetensors.index.json").read_text())
     assert all((out / f).is_file() for f in index["weight_map"].values())  # the index finds every shard
-    assert sorted(str(p.relative_to(out)) for p in out.rglob("*.safetensors")) == [
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*.safetensors")) == [
         f"{subdir}model-00001-of-00002.safetensors", f"{subdir}model-00002-of-00002.safetensors"]
+    r = load_dir(out)
+    assert torch.equal(r["a.weight"], ((to["a.weight"].float() + tn["a.weight"].float()) / 2).to(torch.bfloat16))
+    assert set(r) == set(tn)
+
+
+def hub_layout(src, root):
+    """src (a model folder) in the Hugging Face cache layout under root: every file moved to root/blobs and linked
+    back from root/snapshots/rev by a relative symlink, as snapshot_download leaves a repository. -> the snapshot."""
+    snap = Path(root) / "snapshots" / "rev"
+    blobs = Path(root) / "blobs"
+    blobs.mkdir(parents=True)
+    for n, f in enumerate(sorted(p for p in Path(src).rglob("*") if p.is_file())):
+        link = snap / f.relative_to(src)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        f.rename(blobs / f"b{n}")
+        os.symlink(os.path.relpath(blobs / f"b{n}", link.parent), link)
+    return snap
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+@pytest.mark.parametrize("subdir", ["", "weights/"])
+def test_sharded_checkpoints_from_the_hub_cache(tmp_path, subdir):
+    """Sharded checkpoints as snapshot_download leaves them (files are symlinks into blobs/, outside the snapshot
+    folder) interpolate like local folders; an index that names a path outside the folder is still refused."""
+    to = make_ckpt(tmp_path / "o1", 1, sharded=True, subdir=subdir)[1]
+    tn = make_ckpt(tmp_path / "n1", 2, sharded=True, subdir=subdir)[1]
+    old, new = hub_layout(tmp_path / "o1", tmp_path / "hub-old"), hub_layout(tmp_path / "n1", tmp_path / "hub-new")
+    out = interpolate(old, new, 0.5, tmp_path / "o")
+    assert not any(p.is_symlink() for p in out.rglob("*"))
     r = load_dir(out)
     assert torch.equal(r["a.weight"], ((to["a.weight"].float() + tn["a.weight"].float()) / 2).to(torch.bfloat16))
     assert set(r) == set(tn)
@@ -229,7 +261,7 @@ def test_streamed_file_matches_save_file(tmp_path):
 def test_meta_files_and_basal_json(pair, tmp_path):
     old, new, _, _ = pair
     out = interpolate(old, new, 0.25, tmp_path / "o")
-    for f in ("README.md", "SHA256SUMS", "evidence_head.pt", "think/x.json", "pytorch_model.bin",
+    for f in ("README.md", "SHA256SUMS", "evidence_head.pt", "NVFP4_AMAX.json", "think/x.json", "pytorch_model.bin",
               "pytorch_model.bin.index.json"):
         assert not (out / f).exists(), f
     assert (out / "config.json").exists() and (out / "tokenizer.json").exists()
@@ -245,6 +277,23 @@ def test_cli_meta_from_old(pair, tmp_path):
     info = json.loads((tmp_path / "m-a0.5" / "basal.json").read_text())
     assert (info["prompt"], info["name"]) == (1, "m1-interp-a0.5")  # format of the old checkpoint
     assert (tmp_path / "m-a1" / "model.safetensors").exists()
+
+
+def test_meta_from_another_checkpoint_must_match(pair, tmp_path):
+    """--meta-from a third checkpoint: its config.json and tokenizer.json become the merged model's, so another
+    architecture or vocabulary is refused before anything is written; the same ones (another calibration, another
+    basal.json) are taken."""
+    old, new, _, _ = pair
+    same = make_ckpt(tmp_path / "same", 3, prompt=1)[0]
+    out = interpolate(old, new, 0.5, tmp_path / "o1", meta_from=same)
+    assert json.loads((out / "basal.json").read_text())["name"] == "m3-interp-a0.5"
+    vocab = {**VOCAB, "c": 8}
+    for kw in (dict(tokenizer=tokenizer_json(vocab=vocab)),
+               dict(config={"architectures": ["LlamaForCausalLM"], "hidden_size": 16})):
+        other = make_ckpt(tmp_path / f"other{len(kw['tokenizer']) if 'tokenizer' in kw else 0}", 4, **kw)[0]
+        with pytest.raises(SystemExit, match="--meta-from"):
+            interpolate(old, new, 0.5, tmp_path / "o2", meta_from=other)
+        assert not (tmp_path / "o2").exists()
 
 
 @pytest.mark.parametrize("alphas", [["1.5"], ["0.1", "0.1000001"]])

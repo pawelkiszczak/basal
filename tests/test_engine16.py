@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from basal.engine import GraphBackend, causal_sdpa
-from tests.test_engine import separate, tiny
+from tests.test_engine import eager_shared, separate, tiny
 
 
 class Replay:
@@ -135,7 +135,7 @@ def test_plain_forward_builds_no_mask(monkeypatch):
     be._forward(torch.tensor([[1, 2, 3, 4]]))
     assert seen and all(s == (True, True) for s in seen)
     seen.clear()
-    be._eager_shared(GraphBackend._pack([[1, 2, 3], [1, 2, 4]]), [[5, 6], [5, 6]])
+    eager_shared(be, GraphBackend._pack([[1, 2, 3], [1, 2, 4]]), [[5, 6], [5, 6]])
     assert seen and all(s == (False, False) for s in seen)
 
 
@@ -265,7 +265,11 @@ def test_cascade_why(monkeypatch):
     class NoFlash:
         def __getattr__(self, name):
             raise AttributeError(name)
-    pytest.importorskip("torch.nn.attention.varlen")  # (its first import reads torch.ops.aten)
+    varlen = pytest.importorskip("torch.nn.attention.varlen")  # (its first import reads torch.ops.aten)
+
+    def varlen_attn(query, key, value, cu_seq_q, cu_seq_k, max_q, max_k, *, enable_gqa=False, seqused_k=None):
+        """The signature of a torch whose varlen_attn takes per-sequence key counts (2.13; 2.11's has no seqused_k)."""
+    monkeypatch.setattr(varlen, "varlen_attn", varlen_attn)
     monkeypatch.setattr(E.torch.ops, "aten", NoFlash())
     monkeypatch.setattr(E, "torch_varlen_available", lambda dtype: None)
     be = Stub(tiny())

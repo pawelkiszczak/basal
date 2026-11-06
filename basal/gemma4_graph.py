@@ -66,14 +66,17 @@ def is_gemma4(model):
     return str(getattr(model.config, "model_type", "")).startswith("gemma4")
 
 
-def is_gemma4_dir(model_dir):
-    """A model directory with a Gemma 4 config.json (before loading it)."""
+def is_gemma4_dir(model_dir, strict=False):
+    """A model directory with a Gemma 4 config.json (before loading it). strict: a config.json that cannot be read
+    (permissions, a full disk) or parsed raises instead of answering False (a missing one still answers False)."""
     import json
     from pathlib import Path
     p = Path(model_dir) / "config.json"
     try:
         return str(json.loads(p.read_text(encoding="utf-8")).get("model_type", "")).startswith("gemma4")
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        if strict and not isinstance(e, FileNotFoundError):
+            raise
         return False
 
 
@@ -116,6 +119,16 @@ def _flex_attention():
 
 
 LayerC = namedtuple("LayerC", "heads kv_heads d eps sizes")  # constants of a layer (sizes: of a merged q / k / v)
+
+
+def load_nvfp4_amax(amax):
+    """--nvfp4-amax as the NVFP4 path reads it: {"<layer>.<projection>": largest |input|} from a dict or a JSON file,
+    either that mapping or {"amax": mapping} (the shipped NVFP4_AMAX.json)."""
+    if not isinstance(amax, dict):
+        import json
+        with open(amax) as f:
+            amax = json.load(f)
+    return amax.get("amax", amax) if isinstance(amax.get("amax"), dict) else amax
 
 
 def _rms(x, w, eps):
@@ -260,10 +273,8 @@ class Gemma4Graph:
         else:  # the decoder layers come from host memory (--quant-load cpu): each one to `stream` (the GPU), merged and
             # quantised there before the next, the same operations on the same weights as above
             self.merged = self.fp8 = 0
-            if fp8 == "nvfp4" and not isinstance(nvfp4_amax, dict):
-                import json
-                with open(nvfp4_amax) as f:
-                    nvfp4_amax = json.load(f)
+            if fp8 == "nvfp4":
+                nvfp4_amax = load_nvfp4_amax(nvfp4_amax)
             for i, layer in enumerate(self.layers):
                 layer.to(stream)
                 self.merged += self._merge([i]) if merge else 0
@@ -385,13 +396,10 @@ class Gemma4Graph:
         {"<layer>.<projection>": the calibrated largest |input|}). The first and the last `keep` layers stay bf16, as
         do the embeddings and the head. Layer by layer, the bf16 weights freed as it goes; layers: their indices
         (default every layer). -> the number of GEMMs."""
-        import json
         from .nvfp4 import NVFP4Linear, build, fits
         if scope not in ("all", "mlp"):
             raise ValueError(f"--nvfp4-scope {scope!r}: all or mlp")
-        if not isinstance(amax, dict):
-            with open(amax) as f:
-                amax = json.load(f)
+        amax = load_nvfp4_amax(amax)
         build()
         n = 0
 

@@ -65,7 +65,6 @@ def resolve(name, revision=None, metadata_only=False):
 
 def default_device():
     """BASAL_DEVICE if set, else cuda, else Apple Silicon (mps), else cpu."""
-    import os
     if os.environ.get("BASAL_DEVICE"):
         return os.environ["BASAL_DEVICE"]
     if torch.cuda.is_available():
@@ -165,7 +164,6 @@ class EagerBackend:
             torch.backends.cuda.enable_cudnn_sdp(False)
             # basal 2.3: the engine's own Gemma 4 forward (basal/gemma4.py) unless --eager-forward hf (or
             # BASAL_EAGER_FORWARD=hf), the transformers forward of 2.2.0
-            import os
             forward = forward or os.environ.get("BASAL_EAGER_FORWARD") or "basal"
             if forward not in EAGER_FORWARDS:
                 raise ValueError(f"eager forward {forward!r} (one of {', '.join(EAGER_FORWARDS)})")
@@ -330,10 +328,7 @@ class EagerBackend:
                 flat = self._codes(torch.stack([h for g in hid for h in g]).float(), [x for g in groups for x in g[1]])
         else:
             flat = self.run([p for g in groups for p in g[0]], [x for g in groups for x in g[1]])
-        out, j = [], 0
-        for g in groups:
-            out.append(flat[j: j + len(g[0])]); j += len(g[0])
-        return out
+        return _split(flat, groups)
 
 
 EAGER_FORWARDS = ("basal", "hf")
@@ -527,13 +522,16 @@ RECURRENT_MODEL_TYPES = ("qwen3_5", "qwen3_next", "mamba", "jamba", "zamba", "ba
                          "nemotron_h", "lfm2", "recurrent_gemma", "rwkv")
 
 
-def recurrent_layers(model_dir):
+def recurrent_layers(model_dir, strict=False):
     """The recurrent-state layers of a model (Gated DeltaNet / linear attention as in Qwen3.5, Mamba, conv), read from
     its config.json before any weights are -> e.g. "18 linear_attention layers" or "model_type qwen3_5_text"; None for
-    an attention-only decoder or without a readable config.json."""
+    an attention-only decoder or without a readable config.json (strict: one that exists but cannot be read or
+    parsed raises instead)."""
     try:
         cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        if strict and not isinstance(e, FileNotFoundError):
+            raise
         return None
     cfgs = (cfg, cfg.get("text_config") or {})  # multimodal models: the decoder's settings in text_config
     for c in cfgs:
@@ -1049,6 +1047,415 @@ def kv_dequant(e, bits, keys):
     return (q.view(H, T, D // G, G).float() * step.float() + lo.float()).view(H, T, D).to(dtype)
 
 
+WROWS_BYTES = 64 << 20  # the fp32 code rows an engine keeps (one entry per option-code set, least recently used out)
+
+
+def code_rows(cache, key, make):
+    """cache[key], made by make() when missing: the fp32 output-head rows of one set of option codes. The cache keeps
+    the most recently used sets within WROWS_BYTES (every option count and code set was kept for good: up to ~0.7 GB);
+    an entry is the same rows whenever it is made again."""
+    w = cache.pop(key, None)
+    if w is None:
+        w = make()
+    cache[key] = w  # (most recently used last)
+    size = lambda x: 0 if x is None else int(x.nbytes)  # noqa: E731  (torch and MLX arrays)
+    total = sum(size(x) for x in cache.values())
+    for old in list(cache):
+        if total <= WROWS_BYTES or old == key:
+            break
+        total -= size(cache.pop(old))
+    return w
+
+
+def cache_signature(model_dir, name, revision, adapter, quant, kv_dtype):
+    """The compatibility signature of a model's cached states on disk (--state-cache-dir), a JSON string: two servers
+    reuse each other's files only when it is equal. weights: config.json and the names and sizes of the weight files
+    (not their bytes: the signature is computed at every start-up). The engine that wrote a file is not part of it
+    (DiskTier keeps it per file)."""
+    md = Path(model_dir)
+    files = "\n".join(f"{p.name}:{p.stat().st_size}" for p in sorted(md.glob("*.safetensors")))
+    cfg = md / "config.json"
+    weights = hashlib.sha256((cfg.read_bytes() if cfg.exists() else b"") + b"\n" + files.encode()).hexdigest()[:16]
+    payload = {"cache": 1,  # on-disk format version; bump when tensor names / layout change
+               "model": str(name), "revision": revision or "", "weights": weights,
+               "adapter": getattr(adapter, "name", adapter) or "", "quant": quant or "", "kv_dtype": kv_dtype}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+class DiskTier:
+    """The cold tier of a StateCache (--state-cache-dir): one .safetensors file per cached state under
+    root/<signature digest>/<first hex digit of the key>/<key>.<engine>.safetensors, per layer i tensors k.{i} and v.{i}
+    [kv heads, tokens, head size] in their dtype, the token ids and block hashes in the metadata. Written by a
+    background thread (save never waits: a full queue drops the write, counted), indexed at start-up from the files'
+    headers (scan), bounded by budget_bytes with least-recently-used eviction of the files this process knows.
+
+    engine: "graph" or "mlx", in each file's name and metadata (the two engines' states of one key differ in their last
+    bits, so they never share a file); a tier reads only its own engine's files. pack(kv) -> [(name, dtype, shape,
+    bytes)] runs on the caller's thread (device reads); unpack(path) -> (kv, metadata). A state's tag (save(tag=),
+    JSON) is kept in its file and indexed with it (tag()): what the engine needs to know about how the state was
+    computed (MLX: the uncached row count, MLXBackend._state)."""
+
+    VERSION = "1"
+    QUEUE = 16
+    SUBDIRS = "0123456789abcdef"
+    TMP_AGE = 600  # seconds: a leftover temporary file older than this is a crashed writer's
+
+    def __init__(self, root, budget_bytes, signature, engine, pack, unpack):
+        import queue
+        from collections import OrderedDict
+        self.signature, self.engine = signature, engine
+        self.root = Path(root) / hashlib.sha256(signature.encode()).hexdigest()[:16]
+        for s in self.SUBDIRS:
+            (self.root / s).mkdir(parents=True, exist_ok=True)
+        self.budget, self.used = int(budget_bytes), 0
+        self.pack, self.unpack = pack, unpack
+        self.entries, self.index, self.lock = OrderedDict(), {}, threading.Lock()  # key -> (path, size, tokens, blocks)
+        self.tags = {}  # key -> its file's tag (only tagged entries)
+        self.loads = self.prefix_loads = self.writes = self.write_drops = self.errors = self.evictions = 0
+        self.closed = False
+        self.pending, self.cancelled = set(), set()  # keys queued for writing; of those, deleted before written
+        self.queue = queue.Queue(maxsize=self.QUEUE)
+        self.scan()
+        self.thread = threading.Thread(target=self._writer, name="basal-state-cache-disk", daemon=True)
+        self.thread.start()
+
+    def _path(self, key):
+        h = key.hex()
+        return self.root / h[0] / f"{h}.{self.engine}.safetensors"
+
+    @staticmethod
+    def header(path):
+        """A safetensors file's header (its JSON object), without reading the tensors."""
+        import struct
+        with open(path, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            if n > 1 << 30:
+                raise ValueError(f"{path}: header of {n} bytes")
+            raw = f.read(n)
+        if len(raw) != n:
+            raise ValueError(f"{path}: truncated header")
+        return json.loads(raw)
+
+    def _accepts(self, md, engine):
+        """Whether a file's metadata is of this signature and of this engine, the one its name says."""
+        return (md.get("basal_state_cache") == self.VERSION and md.get("signature") == self.signature
+                and md.get("engine") == engine == self.engine)
+
+    def scan(self):
+        """Indexes the files of this signature not indexed yet, oldest first (their mtime); removes temporary files of
+        crashed writers. Idempotent. A file that cannot be read is skipped, not deleted (another server may own it)."""
+        import time
+        found, now = [], time.time()
+        with self.lock:
+            known = {e[0] for e in self.entries.values()}
+        for s in self.SUBDIRS:
+            for p in (self.root / s).iterdir():
+                try:
+                    st = p.stat()
+                    if ".tmp-" in p.name:
+                        if now - st.st_mtime > self.TMP_AGE:
+                            p.unlink(missing_ok=True)
+                        continue
+                    if p.suffix != ".safetensors" or p in known:
+                        continue
+                    name, _, engine = p.stem.partition(".")
+                    if engine != self.engine:  # (another engine's file of this key: never read)
+                        continue
+                    key = bytes.fromhex(name)
+                    md = self.header(p).get("__metadata__") or {}
+                    if not self._accepts(md, engine):
+                        continue
+                    tokens = np.asarray(json.loads(md["tokens"]), dtype=np.int64)
+                    if len(tokens) != int(md["tokens_n"]):
+                        raise ValueError(f"{p}: {len(tokens)} token ids, {md['tokens_n']} in its metadata")
+                    blocks = [bytes.fromhex(h) for h in json.loads(md["blocks"])]
+                    tag = json.loads(md["tag"]) if "tag" in md else None
+                    found.append((st.st_mtime, key, p, st.st_size, tokens, blocks, tag))
+                except FileNotFoundError:
+                    continue  # removed by another process meanwhile
+                except (OSError, ValueError, KeyError, TypeError):
+                    with self.lock:
+                        self.errors += 1
+        with self.lock:
+            for _, key, p, size, tokens, blocks, tag in sorted(found, key=lambda f: f[0]):
+                if key not in self.entries:
+                    self._add(key, p, size, tokens, blocks, tag)
+            self._evict()
+
+    def _add(self, key, path, size, tokens, blocks, tag=None):
+        """Indexes a file (lock held)."""
+        if key in self.entries:
+            self.used -= self.entries.pop(key)[1]
+        self.entries[key] = (path, size, tokens, blocks)
+        self.used += size
+        if tag is None:
+            self.tags.pop(key, None)
+        else:
+            self.tags[key] = tag
+        for h in blocks:
+            self.index.setdefault(h, {})[key] = None
+
+    def _evict(self):
+        """Least recently used files out until the tier fits its budget (lock held)."""
+        while self.used > self.budget and self.entries:
+            self._unlink(next(iter(self.entries)))
+            self.evictions += 1
+
+    def _unlink(self, key):
+        """Removes an entry, its block hashes and its file (lock held)."""
+        e = self.entries.pop(key, None)
+        if e is None:
+            return
+        path, size, _, blocks = e
+        self.tags.pop(key, None)
+        self.used -= size
+        for h in blocks:
+            keys = self.index.get(h)
+            if keys is not None:
+                keys.pop(key, None)
+                if not keys:
+                    del self.index[h]
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+    def _meta(self, layers, tokens, blocks, tag=None):
+        """A file's metadata (safetensors: strings only)."""
+        import time
+        from . import __version__
+        return {"basal_state_cache": self.VERSION, "signature": self.signature, "engine": self.engine,
+                "basal_version": __version__, "tokens": json.dumps([int(t) for t in tokens]),
+                "tokens_n": str(len(tokens)), "blocks": json.dumps([b.hex() for b in blocks]), "layers": str(layers),
+                "created": str(int(time.time())), **({} if tag is None else {"tag": json.dumps(tag)})}
+
+    def save(self, key, kv, tokens, blocks, replaces=None, tag=None):
+        """Queues a state for writing; False when the write is dropped (queue full, or the tier closed). tag: kept in
+        the file and indexed with it (tag())."""
+        import queue
+        with self.lock:
+            if self.closed:
+                self.write_drops += 1
+                return False
+            if key in self.entries:  # on disk already (its content is a function of the key)
+                self.entries.move_to_end(key)
+                if replaces is not None and replaces != key:
+                    self._unlink(replaces)
+                return True
+            self.cancelled.discard(key)
+            if key in self.pending:  # queued already: one write per key, so a delete() cancels it for good
+                if replaces is not None and replaces != key:
+                    self._delete(replaces)
+                return True
+        tokens = np.asarray(tokens, dtype=np.int64)
+        item = (key, self.pack(kv), self._meta(len(kv), tokens, blocks, tag), list(blocks), tokens, replaces, tag)
+        with self.lock:
+            if self.closed:  # (closed meanwhile: nothing is written after the writer's sentinel)
+                self.write_drops += 1
+                return False
+            try:
+                self.queue.put_nowait(item)
+            except queue.Full:
+                self.write_drops += 1
+                return False
+            self.pending.add(key)
+        return True
+
+    @staticmethod
+    def _write(path, items, meta):
+        """A safetensors file: header length (u64, little endian), the JSON header padded with spaces to a multiple of 8,
+        the tensors' bytes in item order. Returns its size in bytes."""
+        import struct
+        header, offset = {"__metadata__": meta}, 0
+        for name, dtype, shape, data in items:
+            header[name] = {"dtype": dtype, "shape": list(shape), "data_offsets": [offset, offset + len(data)]}
+            offset += len(data)
+        raw = json.dumps(header, separators=(",", ":")).encode()
+        raw += b" " * (-len(raw) % 8)
+        with open(path, "wb") as f:
+            f.write(struct.pack("<Q", len(raw)))
+            f.write(raw)
+            for item in items:
+                f.write(item[3])
+        return 8 + len(raw) + offset
+
+    def _writer(self):
+        import uuid
+        while True:
+            item = self.queue.get()
+            try:
+                if item is None:
+                    return
+                key, items, meta, blocks, tokens, replaces, tag = item
+                path = self._path(key)
+                tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
+                try:
+                    size = self._write(tmp, items, meta)
+                    os.replace(tmp, path)
+                except OSError:
+                    with self.lock:
+                        self.errors += 1
+                        self.pending.discard(key)
+                        self.cancelled.discard(key)
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    continue
+                with self.lock:
+                    self.pending.discard(key)
+                    if key in self.cancelled:  # deleted while queued (the entry replacing it was dropped)
+                        self.cancelled.discard(key)
+                        try:
+                            os.unlink(path)
+                        except FileNotFoundError:
+                            pass
+                        continue
+                    if replaces is not None and replaces != key:
+                        self._unlink(replaces)
+                    self._add(key, path, size, tokens, blocks, tag)
+                    self.writes += 1
+                    self._evict()
+            finally:
+                self.queue.task_done()
+
+    def load(self, key):
+        """An entry's (keys / values, token ids) read from its file, or None: not on disk, or unreadable (counted as an
+        error, the file removed)."""
+        with self.lock:
+            e = self.entries.get(key)
+            if e is None:
+                return None
+            self.entries.move_to_end(key)
+            path, _, own, _ = e
+        try:
+            kv, md = self.unpack(path)
+            tokens = json.loads(md["tokens"])
+            if not self._accepts(md, path.stem.partition(".")[2]) or not np.array_equal(tokens, own):
+                raise ValueError(f"{path}: not the indexed state")
+            if len(kv) != int(md["layers"]):
+                raise ValueError(f"{path}: {len(kv)} layers")
+        except Exception:  # (FileNotFoundError: evicted by another process; safetensors' own errors: a corrupt file)
+            with self.lock:
+                self.errors += 1
+                if self.entries.get(key) is e:
+                    self._unlink(key)
+            return None
+        with self.lock:
+            self.loads += 1
+        return kv, tokens
+
+    def best(self, tokens, blocks):
+        """The entry sharing the longest prefix with tokens (the most recently written of equals), or None. It holds the
+        deepest of these chained block hashes that any entry holds, so only that block's entries are compared."""
+        t = np.asarray(tokens, dtype=np.int64)
+        with self.lock:
+            for h in reversed(blocks):
+                keys = self.index.get(h)
+                if not keys:
+                    continue
+                best, matched = None, -1
+                for key in reversed(keys):
+                    own = self.entries[key][2]
+                    n = min(len(own), len(t))
+                    diff = np.nonzero(own[:n] != t[:n])[0]
+                    m = int(diff[0]) if len(diff) else n
+                    if m > matched:
+                        best, matched = key, m
+                return best
+        return None
+
+    def has(self, key):
+        with self.lock:
+            return key in self.entries
+
+    def tag(self, key):
+        """The tag of a state's file (None: not on disk, or untagged)."""
+        with self.lock:
+            return self.tags.get(key)
+
+    def delete(self, key):
+        """Removes an entry's file; one still queued is removed once written."""
+        with self.lock:
+            self._delete(key)
+
+    def _delete(self, key):
+        """delete() with the lock held."""
+        if key in self.pending:
+            self.cancelled.add(key)
+        self._unlink(key)
+
+    def flush(self):
+        """Waits until every queued write is on disk."""
+        self.queue.join()
+
+    def close(self):
+        """Writes what is queued, then stops the writer; later saves are dropped."""
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+        self.queue.put(None)
+        self.thread.join()
+
+    def stats(self):
+        with self.lock:
+            return dict(disk_entries=len(self.entries), disk_bytes=self.used, disk_budget_bytes=self.budget,
+                        disk_loads=self.loads, disk_prefix_loads=self.prefix_loads, disk_writes=self.writes,
+                        disk_write_drops=self.write_drops, disk_errors=self.errors, disk_evictions=self.evictions)
+
+
+_TORCH_DTYPES = {torch.bfloat16: "BF16", torch.float16: "F16", torch.float32: "F32"}
+
+
+def torch_codec(device):
+    """(pack, unpack) of DiskTier for torch entries: per layer (K, V) [kv heads, tokens, head size]."""
+
+    def pack(kv):
+        items = []
+        for i, (k, v) in enumerate(kv):
+            for name, x in ((f"k.{i}", k), (f"v.{i}", v)):
+                t = x.detach().contiguous().cpu()
+                raw = t.view(torch.int16) if t.dtype == torch.bfloat16 else t  # (numpy has no bfloat16: same bits)
+                items.append((name, _TORCH_DTYPES[t.dtype], list(t.shape), raw.numpy().tobytes()))
+        return items
+
+    def unpack(path):
+        from safetensors import safe_open
+        with safe_open(str(path), "pt", device=str(device)) as f:
+            md = f.metadata()
+            L = int(md["layers"])
+            if len(f.keys()) != 2 * L:
+                raise ValueError(f"{path}: {len(f.keys())} tensors for {L} layers")
+            return [(f.get_tensor(f"k.{i}"), f.get_tensor(f"v.{i}")) for i in range(L)], md
+    return pack, unpack
+
+
+def mlx_codec(mx):
+    """(pack, unpack) of DiskTier for MLX entries: per layer (K, V) [1, kv heads, tokens, head size], stored without
+    the batch axis (the torch layout)."""
+    names = {mx.bfloat16: "BF16", mx.float16: "F16", mx.float32: "F32"}
+
+    def pack(kv):
+        items = []
+        for i, (k, v) in enumerate(kv):
+            for name, x in ((f"k.{i}", k), (f"v.{i}", v)):
+                a = x[0]
+                raw = mx.view(a, mx.int16) if a.dtype == mx.bfloat16 else a
+                items.append((name, names[a.dtype], list(a.shape), np.array(raw).tobytes()))
+        return items
+
+    def unpack(path):
+        arrays, md = mx.load(str(path), return_metadata=True)
+        L = int(md["layers"])
+        if len(arrays) != 2 * L:
+            raise ValueError(f"{path}: {len(arrays)} tensors for {L} layers")
+        kv = [(arrays[f"k.{i}"][None], arrays[f"v.{i}"][None]) for i in range(L)]
+        mx.eval([t for e in kv for t in e])
+        return kv, md
+    return pack, unpack
+
+
 class StateCache:
     """Keys and values of request states (the root of a unit cut at the state boundary: template and state), keyed by a
     hash of their token ids, kept on the GPU within a byte budget with least-recently-used eviction. A request whose
@@ -1057,11 +1464,14 @@ class StateCache:
     one): longest() finds the cached state sharing the longest prefix, through chained hashes of 256-token blocks.
 
     bits (--state-cache-bits): 16 keeps the keys and values as computed; 8 or 4 stores them as integers with a scale per
-    group (kv_quant: keys per channel, values per token), 2x / ~3.5x more states per GB, given back in their dtype."""
+    group (kv_quant: keys per channel, values per token), 2x / ~3.5x more states per GB, given back in their dtype.
+
+    disk (--state-cache-dir): a DiskTier keeping every state stored with its token ids (16-bit, all its tokens) as a
+    file, read back on a memory miss (get, longest), also by later processes; an entry evicted here stays on disk."""
 
     BLOCK = 256  # tokens per block of the prefix index
 
-    def __init__(self, budget_bytes, salt=b"", bits=16):
+    def __init__(self, budget_bytes, salt=b"", bits=16, disk=None):
         from collections import OrderedDict
         if bits not in (16, 8, 4):
             raise ValueError(f"--state-cache-bits {bits}: 16, 8 or 4")
@@ -1070,6 +1480,7 @@ class StateCache:
         self.entries, self.lock = OrderedDict(), threading.Lock()
         self.index = {}  # chained block hash -> one key, or insertion-ordered keys sharing this prefix
         self.hits = self.misses = self.evictions = self.prefix_hits = 0
+        self.disk = disk
 
     def _blocks(self, tokens):
         """Chained hashes of the full BLOCK-token blocks of tokens: the i-th covers tokens[: BLOCK * (i + 1)]."""
@@ -1087,7 +1498,18 @@ class StateCache:
         caller will continue the found entry (a prefix hit is counted only then; default: yes)."""
         t = np.asarray(tokens, dtype=np.int64)
         blocks = self._blocks(t)
+        loaded = None  # a state read from disk that the memory budget cannot hold: matched here directly
+        if self.disk is not None:  # the best-matching state on disk, into memory for the scan below
+            key = self.disk.best(t, blocks)
+            if key is not None and not self._in_memory(key):
+                found = self._promote(key)
+                if found:
+                    with self.disk.lock:
+                        self.disk.prefix_loads += 1
+                    if not self._in_memory(key):
+                        loaded = (key, *found)
         rejected = set() if usable is not None else ()
+        best, read = None, False  # read: best is the state read from disk (16-bit, not a stored entry)
         with self.lock:
             for i in range(len(blocks) - 1, -1, -1):
                 keys = self.index.get(blocks[i])
@@ -1096,7 +1518,7 @@ class StateCache:
                 start = (i + 1) * self.BLOCK
                 # Deeper matching candidates have already been rejected, so only the next block can match.
                 stop, limit = min(len(t), start + self.BLOCK), min(len(t), start + self.BLOCK - 1)
-                best, matched = None, start - 1
+                matched = start - 1
                 # shortcut: scan this bucket only; consider a trie if large buckets dominate measured lookup time.
                 for key in keys if isinstance(keys, dict) else (keys,):
                     if key in rejected:
@@ -1108,18 +1530,37 @@ class StateCache:
                     diff = np.nonzero(own[start:n] != t[start:n])[0]
                     m = start + int(diff[0]) if len(diff) else n
                     if m > matched:
-                        kv = self._unpack(kv)  # (2.5: an 8-bit entry in its dtype, for the check and the caller)
-                        if usable is not None and not usable(kv, m, len(own)):
+                        # the check reads the stored shapes only: an 8 / 4-bit entry is dequantised once, for the
+                        # winner, after the lock (2.5.3 dequantised every improving candidate under it)
+                        if usable is not None and not usable(self._shapes(kv), m, len(own)):
                             rejected.add(key)
                             continue
                         best, matched = (key, kv, m, len(own)), m
                         if m == limit:
                             break
                 if best is not None:
-                    self.entries.move_to_end(best[0])
-                    self.prefix_hits += use is None or bool(use(best[0]))
-                    return best
-            return None
+                    break
+            if loaded is not None:
+                key, kv, own = loaded[0], loaded[1], np.asarray(loaded[2], dtype=np.int64)
+                n = min(len(own), len(t))
+                diff = np.nonzero(own[:n] != t[:n])[0]
+                m = int(diff[0]) if len(diff) else n
+                if (best is None or m > best[2]) and (usable is None or usable(kv, m, len(own))):
+                    best, read = (key, kv, m, len(own)), True
+            if best is None:
+                return None
+            if best[0] in self.entries:
+                self.entries.move_to_end(best[0])
+            self.prefix_hits += use is None or bool(use(best[0]))
+        return (best[0], best[1] if read else self._unpack(best[1]), best[2], best[3])
+
+    def _shapes(self, kv):
+        """A stored entry as usable() reads it: its tensors (16 bits), or stand-ins with their shapes only (8 / 4 bits:
+        kv_quant keeps the shape)."""
+        if self.bits == 16:
+            return kv
+        from types import SimpleNamespace
+        return [(SimpleNamespace(shape=k[3]), SimpleNamespace(shape=v[3])) for k, v in kv]
 
     def _drop(self, key):
         """Removes an entry and its blocks from the index (lock held)."""
@@ -1138,24 +1579,58 @@ class StateCache:
         import hashlib
         return hashlib.blake2b(np.asarray(tokens, dtype=np.int64).tobytes(), digest_size=16, key=self.salt).digest()
 
-    def get(self, key):
-        with self.lock:
-            e = self.entries.get(key)
-            if e is None:
-                self.misses += 1
-                return None
-            self.entries.move_to_end(key)
-            self.hits += 1
-            return self._unpack(e[0])
-
-    def has(self, key):
-        """Whether a state is cached (no recency update, not counted as a hit or a miss)."""
+    def _in_memory(self, key):
         with self.lock:
             return key in self.entries
 
-    def put(self, key, kv, tokens=None, replaces=None):
+    def _promote(self, key):
+        """A state read from disk into memory (not written back); whether it was found."""
+        found = self.disk.load(key)
+        if found is None:
+            return False
+        self.put(key, found[0], tokens=found[1], persist=False)
+        return found
+
+    def get(self, key):
+        with self.lock:
+            e = self.entries.get(key)
+            if e is not None:
+                self.entries.move_to_end(key)
+                self.hits += 1
+                return self._unpack(e[0])
+            if self.disk is None:
+                self.misses += 1
+                return None
+        found = self._promote(key)  # (the file is read outside the lock)
+        with self.lock:
+            if not found:
+                self.misses += 1
+                return None
+            self.hits += 1
+            e = self.entries.get(key)
+        return found[0] if e is None else self._unpack(e[0])  # (None: larger than the memory budget)
+
+    def has(self, key):
+        """Whether a state is cached, in memory or on disk (no recency update, not counted as a hit or a miss)."""
+        return self._in_memory(key) or (self.disk is not None and self.disk.has(key))
+
+    def tag(self, key):
+        """The tag a state was stored with on disk (put(tag=)), or None."""
+        return None if self.disk is None else self.disk.tag(key)
+
+    @staticmethod
+    def _full(kv, n):
+        """Whether every layer holds all n tokens (the token axis is -2 in the torch and the MLX layout)."""
+        return all(k.shape[-2] == n and v.shape[-2] == n for k, v in kv)
+
+    def put(self, key, kv, tokens=None, replaces=None, persist=True, tag=None):
         """Stores a state's keys / values; with its token ids (tokens) it is also found by states that begin with it.
-        replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step)."""
+        replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step).
+        persist: also write it to the disk tier (an entry read from there is not written back), with tag (JSON) in its
+        file."""
+        if persist and self.disk is not None and tokens is not None and self._full(kv, len(tokens)):
+            if not self.disk.save(key, kv, tokens, self._blocks(tokens), replaces, tag) and replaces is not None:
+                self.disk.delete(replaces)  # (no superseded entry left on disk beside a dropped write)
         if self.bits != 16:
             kv = [(kv_quant(k, self.bits, True), kv_quant(v, self.bits, False)) for k, v in kv]
             size = sum(t.numel() * t.element_size() for e in kv for x in e for t in x[:3])
@@ -1195,10 +1670,18 @@ class StateCache:
         if not self.lock.acquire(blocking=blocking):
             return None
         try:
-            return dict(entries=len(self.entries), used_bytes=self.used, budget_bytes=self.budget, hits=self.hits,
-                        misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits)
+            out = dict(entries=len(self.entries), used_bytes=self.used, budget_bytes=self.budget, hits=self.hits,
+                       misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits)
         finally:
             self.lock.release()
+        if self.disk is not None:
+            out.update(self.disk.stats())
+        return out
+
+    def close(self):
+        """Writes the disk tier's queued states and stops its writer."""
+        if self.disk is not None:
+            self.disk.close()
 
 
 class GraphBackend(EagerBackend):
@@ -1289,7 +1772,8 @@ class GraphBackend(EagerBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 global_attn="flex", adapter=None):
+                 global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
+                 state_cache_signature=None):
         if compile:
             persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
@@ -1412,7 +1896,13 @@ class GraphBackend(EagerBackend):
         used = state_cache_used(state_cache_gb, quant, fp8_scaling)
         self.state_cache_off = bool(state_cache_gb) and not used
         gb = max(used, self.PREFIX_GB if self.prefix else 0)
-        self.state_cache = StateCache(gb * 2 ** 30, bits=state_cache_bits) if gb and shared else None
+        self.state_cache = None
+        if gb and shared:
+            disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature, "graph",
+                            *torch_codec(self.dev)) \
+                if state_cache_dir else None
+            salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
+            self.state_cache = StateCache(gb * 2 ** 30, salt=salt, bits=state_cache_bits, disk=disk)
         self._alloc_kv()
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix token ids)]
         if self.compact and template in ("on", "auto") and self.gemma is None:  # (Gemma 4's template: 7 tokens)
@@ -1570,6 +2060,22 @@ class GraphBackend(EagerBackend):
             # compact rows of 12,288 tokens ran out of memory in warm-up (12.5 GB of graph pool, 20 Oct)
             self.COMPACT_LENS = [x for x in self.COMPACT_LENS if x <= self.TOKEN_BUDGET]
 
+    def _prefix_graph_shapes(self):
+        """(rows, branch tokens, root length) of the pass-2 graphs over cached template prefixes (--prefix-cache); Gemma 4:
+        only those whose rows x root fit the key / value buffer, which _fit_grid may have shrunk below them (the Llama
+        buffer holds them all, _kv_tokens)."""
+        out = [(b, S, L) for L in self.LENS if L <= self.PREFIX_ROOT for S in self.PREFIX_SFX for b in self.PREFIX_ROWS
+               if b * S <= self.TOKEN_BUDGET]
+        return [x for x in out if self.gemma is None or x[0] * x[2] <= self._kv_tokens()]
+
+    def _prefix_rows(self):
+        """Most short requests per forward over cached template prefixes: PREFIX_ROWS[-1], and for Gemma 4 no more rows
+        of the longest such root than its key / value buffer holds."""
+        if self.gemma is None:
+            return self.PREFIX_ROWS[-1]
+        L = next((x for x in self.PLAIN_LENS if x >= self.PREFIX_ROOT), self.PREFIX_ROOT)
+        return max(1, min(self.PREFIX_ROWS[-1], self._kv_tokens() // L))
+
     def _kv_tokens(self):
         """Tokens of the key / value buffer: the largest plain graph and the largest captured pass-2 graph's rows over
         its root (_pass2_ok; Gemma 4: within TOKEN_BUDGET, see _fit_grid)."""
@@ -1691,11 +2197,8 @@ class GraphBackend(EagerBackend):
                         if b * S <= self.TOKEN_BUDGET and self._pass2_ok(b, L):
                             self._graph_sfx(b, S, L)
             if self.prefix:  # pass 2 of short requests over a cached template prefix
-                for L in (x for x in self.LENS if x <= self.PREFIX_ROOT):
-                    for S in self.PREFIX_SFX:
-                        for b in self.PREFIX_ROWS:
-                            if b * S <= self.TOKEN_BUDGET:
-                                self._graph_sfx(b, S, L)
+                for b, S, L in self._prefix_graph_shapes():
+                    self._graph_sfx(b, S, L)
             if self.gemma is not None:
                 self._capture_deferred()
                 self._warm_long_sfx()
@@ -2338,7 +2841,6 @@ class GraphBackend(EagerBackend):
         text for its option orders) are computed once; positions are each token's index in its own prompt. cut: the
         root block ends after this many tokens (the state prefix of a request, the unit of the state cache) when every
         prompt is longer."""
-        import os
         ids, pos, seg, parent, last = [], [], [], [], [None] * len(toks)
         cut = cut if cut and all(len(t) > cut for t in toks) and len({tuple(t[:cut]) for t in toks}) == 1 else None
 
@@ -2371,13 +2873,13 @@ class GraphBackend(EagerBackend):
         rows are kept in fp32: the code logits are computed in fp32 from the hidden state (bf16 logits of magnitude
         16-32 have steps of 0.125, which clumps the probabilities)."""
         key = tuple(sorted({i for ids in lids for i in ids}))
-        if key not in self._wrows:
-            self._wrows[key] = self.model.lm_head.weight.index_select(0, self._to_dev(torch.tensor(key))).float()
+        W = code_rows(self._wrows, key, lambda: self.model.lm_head.weight.index_select(
+            0, self._to_dev(torch.tensor(key))).float())
         col = {t: j for j, t in enumerate(key)}
         K = max(map(len, lids))
         idx = self._to_dev(torch.tensor([[col[i] for i in ids] + [0] * (K - len(ids)) for ids in lids]))
         pad = self._to_dev(torch.tensor([[False] * len(ids) + [True] * (K - len(ids)) for ids in lids]))
-        return self._wrows[key], idx, pad
+        return W, idx, pad
 
     def _letters(self, z, idx, pad, lids):
         p = torch.softmax(z.float().gather(1, idx).masked_fill(pad, float("-inf")), -1).tolist()  # one device sync
@@ -2411,14 +2913,6 @@ class GraphBackend(EagerBackend):
         pos.copy_(self._to_dev(h_pos), non_blocking=True)
         mask.copy_(self._mask_from_seg(self._to_dev(h_seg), parents))
         return self._to_dev(torch.tensor(rows)), self._to_dev(torch.tensor(cols))
-
-    def _eager_shared(self, pack, lids):
-        """Readout of one packed row in a single eager masked forward (the reference for the masked graphs)."""
-        t, pp, sg, last, par = pack
-        h = self._forward_masked(torch.tensor([t], device=self.dev),
-                                 self._mask_from_seg(torch.tensor([sg], device=self.dev), [par]),
-                                 torch.tensor([pp], device=self.dev))[0, last]
-        return self._readout(h, lids)
 
     def _plain_hidden(self, packs, idx):
         """Single-prompt units -> hidden states at their readout positions (a plain graph, or an eager forward without
@@ -2855,7 +3349,7 @@ class GraphBackend(EagerBackend):
                          and len(packs[k][0]) - packs[k][2].index(1) <= self.PREFIX_SFX[-1]]
                 rest = [len(packs[k][0]) - packs[k][2].index(1) for k in short]
                 out += [([short[j] for j in idx], kind) for idx in self._chunks(rest, self.PREFIX_SFX, None,
-                                                                                self.PREFIX_ROWS[-1])]
+                                                                                self._prefix_rows())]
                 tree = [k for k in tree if k not in set(short)]
             roots = [packs[k][2].index(1) for k in tree]
             rest = [len(packs[k][0]) - r for k, r in zip(tree, roots)]
@@ -3013,6 +3507,12 @@ class ExitGraphBackend(GraphBackend):
         th = json.loads((hd / "thresholds.json").read_text(encoding="utf-8"))
         self.policies = {k: {int(L): t for L, t in v["taus"].items() if t <= 1.0} for k, v in th["levels"].items()}
         self.policies["off"] = {}
+        if default_policy not in self.policies:  # (else every request without its own policy failed)
+            raise ValueError(f"--early-exit {default_policy}: not a level of {hd / 'thresholds.json'} (one of "
+                             f"{', '.join(sorted(self.policies))})")
+        missing = sorted({L for pol in self.policies.values() for L in pol} - {int(L) for L in ck["layers"]})
+        if missing:
+            raise ValueError(f"{hd}: thresholds for layers without an exit head in heads.pt: {missing}")
         self.default_policy = default_policy
         self.exits = sorted({L for pol in self.policies.values() for L in pol})
         H = self.model.config.hidden_size
@@ -3027,6 +3527,9 @@ class ExitGraphBackend(GraphBackend):
             dynamo.config.cache_size_limit = 64
             self.segs = [torch.compile(f, dynamic=True) for f in self.segs]
         self.stats = {}
+        self._kv = None  # its segments read whole masked rows: the key / value buffer of pass 1 is never used
+        if self.dev.type == "cuda":
+            torch.cuda.empty_cache()
         for L in self.LENS:
             for b in self.BATCHES:
                 if b * L <= self.TOKEN_BUDGET or b == 1:
@@ -3173,7 +3676,10 @@ class MPSBackend(GraphBackend):
 
     @torch.no_grad()
     def run_shared(self, groups, policy=None):
-        if not self.shared:
+        # Gemma 4 (basal-omni): the engine's own forward, as --mode eager runs it: its masks per layer type keep the
+        # sliding window (one trie mask through the transformers forward reaches every layer as it is), and each
+        # group's shared prefix is computed once
+        if not self.shared or self.g4 is not None:
             return EagerBackend.run_shared(self, groups)
         units = self._units(groups)
         probs = [None] * len(units)
@@ -3396,10 +3902,7 @@ class VLLMBackend:
 
     def run_shared(self, groups, policy=None):
         flat = self.run([p for g in groups for p in g[0]], [x for g in groups for x in g[1]])
-        out, j = [], 0
-        for g in groups:
-            out.append(flat[j: j + len(g[0])]); j += len(g[0])
-        return out
+        return _split(flat, groups)
 
 
 class SGLangBackend:
@@ -3436,10 +3939,7 @@ class SGLangBackend:
 
     def run_shared(self, groups, policy=None):
         flat = self.run([p for g in groups for p in g[0]], [x for g in groups for x in g[1]])
-        out, j = [], 0
-        for g in groups:
-            out.append(flat[j: j + len(g[0])]); j += len(g[0])
-        return out
+        return _split(flat, groups)
 
 
 def _split(flat, groups):
@@ -3579,17 +4079,22 @@ class MLXBackend:
     COMPUTES = ("auto", "bf16")
 
     def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm", state_cache_gb=0,
-                 prefix=False, compute="auto", adapter=None):
+                 prefix=False, compute="auto", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
+                 state_cache_signature=None):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
-        self.state_cache = StateCache(gb * 2 ** 30) if gb else None
+        salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
+        self.state_cache = StateCache(gb * 2 ** 30, salt=salt) if gb else None
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
         self.max_rows = max_rows or self.MAX_ROWS
         self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute, adapter).result()
+        if self.state_cache is not None and state_cache_dir:  # (mlx is imported by _load; files read on the MLX thread)
+            self.state_cache.disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature,
+                                             "mlx", *mlx_codec(self.mx))
 
     def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto", adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
@@ -3753,12 +4258,11 @@ class MLXBackend:
         """fp32 rows of the output head for the code ids in key (cached), as GraphBackend._rows: the code logits are
         computed in fp32 from the hidden state (bf16 logits of magnitude 16-32 step by 0.125, which clumps the
         probabilities). None for a quantised head (its logits come from the head itself)."""
-        rows = self.__dict__.setdefault("_wrows", {})
-        if key not in rows:
+        def make():
             m = self.lm
             head = m.model.embed_tokens if m.args.tie_word_embeddings else m.lm_head
-            rows[key] = None if hasattr(head, "scales") else head.weight[self.mx.array(key)].astype(self.mx.float32)
-        return rows[key]
+            return None if hasattr(head, "scales") else head.weight[self.mx.array(key)].astype(self.mx.float32)
+        return code_rows(self.__dict__.setdefault("_wrows", {}), key, make)
 
     def _letters(self, h, lids):
         """Hidden states [n, d] at the readout positions -> softmax over each readout's codes (float32)."""
@@ -3952,16 +4456,23 @@ class MLXBackend:
         alive, so the cache would hold more memory than its budget counts. ref: the rows of the request's uncached
         forward (_uncut). A cached entry is continued only when its rows have the bits this request's uncached forward
         gives them (the same _kernels for the row count it was computed for); otherwise the root is computed afresh
-        (and still replaces the entry it extends)."""
+        (and still replaces the entry it extends). The same holds for an entry of exactly this root: one computed at
+        other row counts (another request about the same state: a single question, then other questions) is not
+        returned; the root's first entry keeps the plain key (StateCache.has, the server's cut), an entry at other
+        bits is keyed by the root and its kernels. The row count is also kept in the state's file
+        (StateCache.put(tag=)), so a later server process tells the same of a state it reads from disk."""
         mx, cache = self.mx, self.state_cache
+        refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
+        bits = self._kernels(ref)
+
+        def same_bits(old):
+            return self._kernels(refs[old] if old in refs else cache.tag(old)) == bits
         key = cache.key(root)
+        if bits and cache.has(key) and not same_bits(key):
+            key = cache.key(list(root) + [-1, *bits])
         kv = cache.get(key)
         if kv is not None:
             return kv
-        refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
-
-        def same_bits(old):
-            return self._kernels(refs.get(old)) == self._kernels(ref)
         initial, replaces = None, None
         found = cache.longest(root, use=same_bits)
         if found is not None:
@@ -3972,7 +4483,7 @@ class MLXBackend:
                     initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
         kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial, ref)]
         mx.eval(kv)
-        cache.put(key, kv, tokens=root, replaces=replaces)
+        cache.put(key, kv, tokens=root, replaces=replaces, tag=ref)
         refs[key] = ref
         if len(refs) > 2 * len(cache.entries) + 64:  # entries evicted or replaced since
             self._refs = {k: r for k, r in refs.items() if k in cache.entries}

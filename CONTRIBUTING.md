@@ -58,9 +58,10 @@ value contains spaces. Inspect commands without launching with `make -n`.
 
 ## Development checks
 
-The [pre-commit configuration](.pre-commit-config.yaml) provides fast, read-only checks for Python syntax and
-critical errors (Ruff `E9`, `F63`, `F7`, `F82`), merge conflicts, private keys, TOML, YAML, JSON, and JSONL.
-It covers the engine, server, clients, benchmarks, examples, tests, and figure scripts. JSON checks include the
+The [pre-commit configuration](.pre-commit-config.yaml) provides fast, read-only checks: Ruff with the rules of
+`pyproject.toml` (`E`, `F`, `W`), the same version CI runs over the whole repository (0.15.16), merge conflicts,
+private keys, TOML, YAML, JSON, and JSONL. It covers the engine, server, clients, benchmarks, examples, tests, tools,
+notebooks, and figure scripts. JSON checks include the
 checked-in OpenAPI fixture; JSONL checks parse each nonblank line, matching the batch runner. These are syntax
 checks, not request or response schema validation; the latter remains in `tests/test_server.py`.
 
@@ -140,7 +141,9 @@ Thank you to the people whose work is in this repository, by pull request:
   while GPU memory stays free ([#41](https://github.com/rkinas/basal/pull/41)); torch.compile's cache kept across
   reboots ([#47](https://github.com/rkinas/basal/pull/47)), less host work in the CUDA cascade
   ([#44](https://github.com/rkinas/basal/pull/44)) and `--compile-scope layer`
-  ([#49](https://github.com/rkinas/basal/pull/49)).
+  ([#49](https://github.com/rkinas/basal/pull/49)); in 2.5.4 `basal-prepare` building the engine `basal-serve`
+  runs ([#106](https://github.com/rkinas/basal/pull/106)) and the RTX 4090 measured with basal-2.0
+  ([#111](https://github.com/rkinas/basal/pull/111)).
 - Grzegorz Brzezinka ([@agentGreg](https://github.com/agentGreg)): the calibration report's per-type ECE as
   `basal-serve` applies the temperatures ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count for
   the 1% target in CALIBRATION.md ([#25](https://github.com/rkinas/basal/pull/25)), the Apple M5 Max benchmark tables in
@@ -166,8 +169,24 @@ Thank you to the people whose work is in this repository, by pull request:
   macOS for every pull request ([#53](https://github.com/rkinas/basal/pull/53)); a Python client for every question
   type, with `AsyncBasal` ([#58](https://github.com/rkinas/basal/pull/58)); a question named `<task>::<part>` in a
   request with task questions refused instead of misread ([#59](https://github.com/rkinas/basal/pull/59));
-  `basal-interpolate` ([#60](https://github.com/rkinas/basal/pull/60)); and changelog fragments in `docs/changes`
-  ([#55](https://github.com/rkinas/basal/pull/55)).
+  `basal-interpolate` ([#60](https://github.com/rkinas/basal/pull/60)); changelog fragments in `docs/changes`
+  ([#55](https://github.com/rkinas/basal/pull/55)); and in 2.5.3 `basal-run --preset` fixed
+  ([#91](https://github.com/rkinas/basal/pull/91)), batch flags measured on the DGX Spark
+  ([#94](https://github.com/rkinas/basal/pull/94)), tests independent of their order, GPU, torch version and runner
+  speed ([#86](https://github.com/rkinas/basal/pull/86), [#87](https://github.com/rkinas/basal/pull/87),
+  [#88](https://github.com/rkinas/basal/pull/88)) and the CI on two workers
+  ([#89](https://github.com/rkinas/basal/pull/89)).
+- Rafal Wiktorowicz ([@onlypositivetravelvibes-dotcom](https://github.com/onlypositivetravelvibes-dotcom)): the 2.5.2
+  fixes: the start-up 503 for every HTTP method ([#80](https://github.com/rkinas/basal/pull/80)), config probes that
+  say why they fell back ([#81](https://github.com/rkinas/basal/pull/81)), `basal-serve` on native Windows and
+  `--quant int8` ([#82](https://github.com/rkinas/basal/pull/82)), the provenance and flags of calibration files
+  ([#83](https://github.com/rkinas/basal/pull/83)) and HTTP 422 for an unknown question type
+  ([#84](https://github.com/rkinas/basal/pull/84)); in 2.5.3 Windows paths and `basal-attach` without symlink rights
+  ([#85](https://github.com/rkinas/basal/pull/85)) and `basal-bench` timing HTTP engines on prompts their cache has
+  not seen ([#90](https://github.com/rkinas/basal/pull/90)); in 2.5.4 `basal-loadtest`, `basal-calibrate` and
+  `basal-agree` on inputs they failed on ([#102](https://github.com/rkinas/basal/pull/102)), malformed requests
+  refused before the run ([#103](https://github.com/rkinas/basal/pull/103)) and request text that cannot forge a
+  turn ([#104](https://github.com/rkinas/basal/pull/104)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),

@@ -15,10 +15,13 @@ Input (JSONL): one /v1/systemone request per line, every question with its corre
                  "late": {"type": "noul", "instructions": "...", "gold": "yes"},
                  "urg":  {"type": "score", "instructions": "...", "criteria": ["low", "mid", "high"], "gold": 2}}}
   gold    choice: an option key or its description; noul: "yes" / "no" (true / false); score: the level index
-          (0 = first level), key or text; act: an outcome, as for choice (yes / no for true / false outcomes);
+          (0 = first level; an integer is always the index), key or text; act: an outcome, as for choice (yes / no for true / false outcomes);
           multi: the list of labels that apply (keys or descriptions; [] = none)
   group   optional, on the line or on a question: decisions of one group (twins, duplicates, one customer) stay on
-          the same side of the FIT / CERT split; default: one group per line (its questions share the state)
+          the same side of the FIT / CERT split; default: one group per line (its questions share the state). The
+          bound of a threshold counts every decision as independent: when a type or task has more FIT decisions than
+          groups (several claims or fields of one document, questions about one state), the report warns that errors
+          shared within a group make the bound optimistic
   family  optional, on the line or on a question: the task family of the leave-one-family-out ECE gate (default: the
           question name)
   id      optional, used in messages.
@@ -43,9 +46,12 @@ Method (the one the shipped files were fitted with):
   * prompt-format-2 models (basal.json "prompt": 2): the file is calibration file 2 ("prompt": 2), and choice questions
     also get a temperature per option-count bucket (2-10, 11-26, 27-255) fitted the same way where FIT has at least
     --min-per-type decisions in the bucket (otherwise the shipped bucket temperature, else the type temperature);
-  * for each target error r, the threshold is the lowest confidence whose accepted FIT decisions (at least 50; equal
-    confidences accepted together) have a one-sided 95% Clopper-Pearson upper bound <= r; CERT reports its coverage,
-    error and bound. The threshold is fitted per type (thresholds[r].per_type[type], on the type's own decisions), and
+  * for each target error r, the threshold comes from a fixed-sequence test on FIT: the confidence levels (equal
+    confidences accepted together) are tested from the most confident down, each with the one-sided 95%
+    Clopper-Pearson upper bound of its accepted decisions <= r, and the scan stops at the first level that fails; the
+    threshold is the last level that passed (none when the first fails). The first level tested is set by the counts
+    alone: the first that accepts enough decisions to meet the bound with one error (93 at 5%, 473 at 1%) when the
+    type has at least twice that many FIT decisions, else without an error (59 / 299; at least 50). CERT reports its coverage, error and bound. The threshold is fitted per type (thresholds[r].per_type[type], on the type's own decisions), and
     once pooled over all types (thresholds[r].confidence, informational: basal-serve never applies it). A type
     without a certified threshold of its own ("confidence": null, or no entry) has every automatic action of act and
     tool with that max_error deferred ("no certified threshold for this type at this max_error"). A few hundred
@@ -73,8 +79,9 @@ Method (the one the shipped files were fitted with):
     "task_gates"). The task thresholds a shipped file holds are kept only when the temperatures are (no decision
     questions in the input); otherwise a task without labelled questions has none and its answers report
     automated: null.
-  * fitted_on names the model (and its Hugging Face revision): basal-serve warns when a --calibration file was fitted
-    on another model or revision, and refuses it with --strict-calibration.
+  * fitted_on names the model (and its Hugging Face revision): basal-serve keeps a --calibration file fitted on
+    another model or revision for its temperatures only (its thresholds are not applied, the answers are marked
+    unvalidated) with a warning, and refuses it with --strict-calibration.
 """
 import argparse
 import asyncio
@@ -91,11 +98,13 @@ import torch
 
 from . import __version__
 from . import tasks as task_types
+from .cli import positive
 from .engine import resolve
+from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
-from .server import (MODES, Server, _text, add_engine_args, answer_set, calibration_file, calibration_name,
-                     calibration_orders, certified, default_mode, load_calibration, model_identity, refuse_lean_flex,
-                     temper, temperature, to_items)
+from .server import (MODES, UNVALIDATED_OUT, Server, _text, add_engine_args, answer_set, calibration_file,
+                     calibration_name, certified, default_mode, load_calibration, model_identity, refuse_lean_flex,
+                     temper, temperature, to_items, unvalidated_reason)
 from .sets import label_set_id
 from .sets import select as select_set
 
@@ -136,10 +145,13 @@ def gold_index(q, item):
             return 0 if s in YES else 1
         raise ValueError(f'gold must be "yes" or "no" (or true / false), got {g!r}')
     crit = q.get("criteria") or q.get("levels") or []
-    if isinstance(g, int) and not isinstance(g, bool) and item["type"] == "score" and isinstance(crit, list):
-        if 0 <= g < len(keys):
-            return g
-        raise ValueError(f"gold level {g} is out of range 0..{len(keys) - 1}")
+    if isinstance(g, int) and not isinstance(g, bool) and item["type"] == "score":  # an integer is the level index
+        if not 0 <= g < len(keys):
+            raise ValueError(f"gold level {g} is out of range 0..{len(keys) - 1}")
+        if str(g) in keys and keys.index(str(g)) != g:
+            raise ValueError(f"gold {g} is ambiguous: level index {g} is key {keys[g]!r}, while key {str(g)!r} is "
+                             f"level {keys.index(str(g))}; give the key as a string")
+        return g
     if not isinstance(g, (dict, list)) and str(g) in keys:
         return keys.index(str(g))
     texts = list(crit.values()) if isinstance(crit, dict) else list(crit)
@@ -282,6 +294,17 @@ def task_units(name, q, gold, state):
     return out
 
 
+# a labelled question is asked whatever the answers of the others: its gold is its answer (and a condition can name a
+# question of the other request, decisions or tasks)
+CONDITIONAL = ("ask_if", "depends_on")
+
+
+def group_of(q, rec, n):
+    """The split group of a labelled question: its own "group", else the line's "group", else the line's "id", else the
+    line number; null counts as not given (not one group "None" for every such line)."""
+    return str(next((x for x in (q.get("group"), rec.get("group"), rec.get("id")) if x is not None), n))
+
+
 def load(path):
     """Labelled JSONL -> (requests to send, decisions): the decision questions only (read() also returns the task
     questions). Raises InputError listing every problem with its line."""
@@ -293,7 +316,7 @@ def read(path):
     """Labelled JSONL -> (decision requests, decisions, task requests, labelled task decisions). Raises InputError
     listing every problem with its line."""
     errors, bodies, decisions, task_bodies, units = [], [], [], [], []
-    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+    for n, line in enumerate(read_lines(path), 1):
         if not line.strip():
             continue
         try:
@@ -327,14 +350,14 @@ def read(path):
                 if "gold" not in q:
                     errors.append(f'{at}: no "gold" answer')
                     continue
-                clean = {k: v for k, v in q.items() if k not in ("gold", "group", "family")}
+                clean = {k: v for k, v in q.items() if k not in ("gold", "group", "family") + CONDITIONAL}
                 try:
                     labelled = task_units(name, clean, q["gold"], rec["state"])
                 except (ValueError, KeyError, TypeError) as e:
                     errors.append(f"{at}: {str(e).removeprefix(f'question {name!r}: ')}")
                     continue
                 task_body["questions"][name] = clean
-                group = str(q.get("group", rec.get("group", rec.get("id", n))))
+                group = group_of(q, rec, n)
                 units += [dict(line=n, req=len(task_bodies), name=name, task=t, part=part, gold=g, group=group)
                           for part, g in labelled]
                 continue
@@ -350,7 +373,7 @@ def read(path):
                 errors.append(f'{at}: no "gold" answer')
                 continue
             clean = {k: v for k, v in q.items()
-                     if k not in ("gold", "group", "family", "evidence", "fallback_threshold")}
+                     if k not in ("gold", "group", "family", "evidence", "fallback_threshold") + CONDITIONAL}
             try:
                 item = to_items(rec["state"], {name: clean}, max_options(2))[0]  # the model's limit: when served
                 gold = gold_set(q, item) if t == "multi" else gold_index(q, item)
@@ -358,10 +381,9 @@ def read(path):
                 errors.append(f"{at}: {str(e).removeprefix(f'question {name!r}: ')}")
                 continue
             body["questions"][name] = clean
-            group = q.get("group", rec.get("group", rec.get("id", n)))
             d = dict(line=n, req=len(bodies), name=name, prim=item.get("base", t), gold=gold,
-                     keys=[str(k) for k in item["keys"]], group=str(group),
-                     family=str(q.get("family", rec.get("family", name))))
+                     keys=[str(k) for k in item["keys"]], group=group_of(q, rec, n),
+                     family=str(next((x for x in (q.get("family"), rec.get("family")) if x is not None), name)))
             if t == "multi":
                 d.update(prim="multi", set=dict(
                     id=label_set_id(item["keys"], item["labels"], item["fallback"]), objective=item["objective"],
@@ -438,6 +460,12 @@ async def over_http(endpoint, bodies, concurrency):
 def uncalibrated(entry, base):
     """The GET /v1/models entry of a running server -> the entry; refuses a server that applies temperatures."""
     temps = entry.get("temperature_per_prim")
+    buckets = entry.get("temperature_per_bucket") or {}  # {type: {bucket: T}}, a server with a file-2 calibration
+    if buckets:
+        temps = dict(temps or {})
+        for prim, per_bucket in buckets.items():
+            for bucket, t in per_bucket.items():
+                temps[f"{prim}/{bucket}"] = t
     if temps is None:
         print(f"warning: {base} does not report its temperatures (basal-serve before 2.0.0); make sure it runs with "
               "--no-calibration", file=sys.stderr)
@@ -455,8 +483,12 @@ def raw_rows(decisions, responses):
         if isinstance(r, Exception):
             failed[d["req"]] = f"line {d['line']}: {r}"
             continue
-        p = r["answers"][d["name"]]["probabilities"]
-        rows.append(dict(d, p=[float(p[k]) for k in d["keys"]]))
+        a = (r.get("answers") or {}).get(d["name"])
+        if not isinstance(a, dict) or not isinstance(a.get("probabilities"), dict):
+            failed[(d["req"], d["name"])] = f"line {d['line']}, question {d['name']!r}: no answer"
+            continue
+        p = a["probabilities"]
+        rows.append(dict(d, p=[float(p[k]) if isinstance(p.get(k), (int, float)) else math.nan for k in d["keys"]]))
     return rows, list(failed.values())
 
 
@@ -518,16 +550,23 @@ def ece(cs, bins=10):
     return float(e)
 
 
-_LGAMMA = [0.0]
+_LF = np.zeros(1)  # _LF[i] = log(i!), grown on demand
+
+
+def log_factorials(n):
+    """log(i!) for i = 0..n at least: one table grown by doubling (a slice of it costs nothing, where a list turned
+    into an array on every bound cost O(n) and made a threshold scan over n decisions O(n^2))."""
+    global _LF
+    if len(_LF) <= n:
+        _LF = np.array([math.lgamma(i + 1) for i in range(max(n + 1, 2 * len(_LF)))])
+    return _LF
 
 
 def cp_upper(e, n, alpha=ALPHA):
     """One-sided Clopper-Pearson upper bound of a binomial error rate (bisection on the binomial CDF, in log space)."""
     if n == 0:
         return 1.0
-    while len(_LGAMMA) <= n + 1:
-        _LGAMMA.append(math.lgamma(len(_LGAMMA) + 1))  # _LGAMMA[i] = log(i!)
-    lf = np.array(_LGAMMA[: n + 1])
+    lf = log_factorials(n)
     i = np.arange(e + 1)
     comb = lf[n] - lf[i] - lf[n - i]
 
@@ -557,17 +596,47 @@ def levels(cs):
     return out
 
 
+def within(e, n, risk, alpha=ALPHA):
+    """Whether the one-sided Clopper-Pearson upper bound of e errors in n is at most risk: P(X <= e) <= alpha for
+    X ~ Binomial(n, risk) (the bound is the p where that probability is alpha, and it falls as p grows), one binomial
+    tail instead of a bisection."""
+    if n == 0 or e / n > risk:
+        return False
+    lf = log_factorials(n)
+    i = np.arange(e + 1)
+    t = lf[n] - lf[i] - lf[n - i] + i * math.log(risk) + (n - i) * math.log1p(-risk)
+    m = t.max()
+    return math.exp(m) * float(np.exp(t - m).sum()) <= alpha
+
+
+def start_level(lv, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
+    """The first level the fixed sequence tests, of levels lv (levels()): the most confident one that accepts enough
+    decisions to meet the bound with one error (93 at 5%, 473 at 1%) when there are at least twice that many decisions,
+    else enough to meet it without an error (59 / 299; fewer cannot meet it at all). One error allowed at the start
+    keeps a single error among the very top decisions from ending the test, where the data can afford it. The start
+    depends on the counts only, never on which decisions are correct -> its index, None when no level accepts that
+    many."""
+    need = accepted_needed(risk, 1, alpha, min_n)
+    if not lv or lv[-1][1] < 2 * need:
+        need = accepted_needed(risk, 0, alpha, min_n)
+    return next((k for k, (_, n, _) in enumerate(lv) if n >= need), None)
+
+
 def threshold(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
-    """Most permissive confidence whose accepted decisions have an upper bound <= risk, scanned from the most confident
-    level down and stopped at the first level that fails after one passed (fixed sequence, as for the shipped files)."""
-    thr = None
-    for c, n, e in levels(cs):
-        if n < min_n:
-            continue
-        if e / n <= risk and cp_upper(e, n, alpha) <= risk:
-            thr = c
-        elif thr is not None:
+    """The certified threshold of a fixed-sequence test: the levels are tested from the most confident down, starting
+    at start_level (set by the counts alone, before any outcome is read), each at the one-sided bound <= risk, and the
+    scan stops at the first level that fails; the threshold is the last level that passed, None when the first one
+    fails. Testing in a fixed order and stopping at the first failure keeps the chance of certifying a threshold whose
+    accepted decisions are above `risk` at <= alpha; scanning on past failures until one level passes does not. A
+    level that adds no error to a passing one passes too (more decisions, the same errors: a lower bound), so the
+    bound is computed only where errors are added."""
+    lv = levels(cs)
+    k = start_level(lv, risk, alpha, min_n)
+    thr, passed = None, None  # passed: the errors of the last level that passed
+    for c, n, e in (lv[k:] if k is not None else ()):
+        if e != passed and not within(e, n, risk, alpha):
             break
+        thr, passed = c, e
     return thr
 
 
@@ -650,9 +719,10 @@ def no_threshold_reason(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
     need = accepted_needed(risk, 0, alpha, min_n)  # accepted decisions without an error
     if len(cs) < need:
         return f"a {risk:g} bound needs at least {need} accepted FIT decisions without an error; FIT has {len(cs)}"
-    best = min(((cp_upper(e, n, alpha), n) for _, n, e in levels(cs) if n >= min_n), default=None)
-    return (f"no confidence level on FIT meets the bound (lowest upper bound {best[0]:.3f}, "
-            f"at {best[1] / len(cs):.0%} coverage)") if best else "no confidence level on FIT accepts enough decisions"
+    lv = levels(cs)
+    c, n, e = lv[start_level(lv, risk, alpha, min_n)]
+    return (f"the first level tested (confidence {c:.4f}, the top {n} FIT decisions, {e} error{'' if e == 1 else 's'}) "
+            f"does not meet the bound (upper bound {cp_upper(e, n, alpha):.3f}), and the fixed sequence stops there")
 
 
 def gate(cs, thr):
@@ -674,6 +744,7 @@ def fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend=MIN_B
     blended with the shipped ones from min_blend decisions (0: never), else the shipped ones -> (temps, source,
     buckets, bucket source)."""
     temps, source = {}, {}
+    min_per_type = max(1, min_per_type)  # 0 would fit a type that has no decision at all (max() of nothing)
     for t in PRIMS:
         rs = [r for r in fit_rows if r["prim"] == t]
         if len(rs) >= min_per_type:
@@ -778,8 +849,8 @@ def fit_fallback(sets, T, min_per_set=30):
         cert_p = [(r, set_probs(r, T)) for r in rs if is_cert(r["group"])]
         e = dict(fallback=rs[0]["set"]["fallback"], labels=rs[0]["keys"], n=len(rs), n_fit=len(fit_p),
                  n_cert=len(cert_p))
-        if len(fit_p) < min_per_set:
-            out[sid] = dict(e, fallback_threshold=None, reason=f"{len(fit_p)} FIT questions < {min_per_set}")
+        if len(fit_p) < max(1, min_per_set):
+            out[sid] = dict(e, fallback_threshold=None, reason=f"{len(fit_p)} FIT questions < {max(1, min_per_set)}")
             continue
         best = max(FALLBACK_GRID, key=lambda t: set_metrics(fit_p, t)["iou"])
         fitted, default = set_metrics(cert_p, best), set_metrics(cert_p, None)
@@ -789,9 +860,12 @@ def fit_fallback(sets, T, min_per_set=30):
 
 
 def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk):
-    """The certified threshold of every type on its own decisions: a temperature changes neither the order of a type's
-    yes/no confidences nor (up to ties) of its other confidences, so the accepted decisions do not depend on it, while
-    one threshold pooled over the types moves with the temperatures of the others."""
+    """The certified threshold of every type on its own decisions, while one threshold pooled over the types moves
+    with the temperatures of the others. A temperature keeps the order of a type's yes/no confidences (the top
+    probability is monotone in T for two options), not of choice and score ones: with three or more options it can
+    swap two decisions (logits [0, -3, -3] and [0, -2, -20]: 0.909 > 0.881 at T = 1, 0.403 < 0.512 at T = 10), and
+    format-2 choice buckets have temperatures of their own. The levels are therefore ordered as served, with the
+    temperatures fitted on the same FIT decisions."""
     out = {}
     for t in PRIMS:
         cf = served([r for r in fit_rows if r["prim"] == t], temps, buckets)
@@ -837,9 +911,9 @@ def served_gate(rows, temps, buckets, cal, risk):
 
 def floor_thresholds(thresholds, targets):
     """A confidence certified at a target error is certified at every looser target too (its bound is below both), so a
-    looser target never keeps a stricter threshold than a tighter one: the scan stops at the first failing level after
-    a pass, and at a loose target it can pass early on a small top level and stop on a few errors below it (basal-omni
-    mini FP8, 17 Oct 2026: 5% at 0.9999 against 1% at 0.9587). Floors the pooled and per-type entries in place, marking
+    looser target never keeps a stricter threshold than a tighter one: the fixed sequence stops at its first failing
+    level, and at a loose target it starts on a small top level and can stop on a few errors below it (5% at 0.9999
+    against 1% at 0.9587). Floors the pooled and per-type entries in place, marking
     them "floored_from"; returns the targets whose entries changed."""
     changed = set()
     rs = sorted(float(r) for r in targets)
@@ -911,10 +985,35 @@ def fit_conformal(fit_rows, cert_rows, temps, buckets, levels):
     return dict(method=CONFORMAL_METHOD, levels=out)
 
 
+def row_problem(r):
+    """Why a row (an engine readout, or a line of a --save-rows file) cannot enter the fit, None when it can: its
+    probabilities must be finite numbers in [0, 1], one per option (at least two; multi: one per label), and its gold
+    an option index (multi: a list of label indices)."""
+    if not isinstance(r, dict) or r.get("prim") not in PRIMS + ("multi",):
+        return "not a row of a decision type"
+    p, g = r.get("p"), r.get("gold")
+    if not isinstance(p, list) or len(p) < (1 if r["prim"] == "multi" else 2) or any(isinstance(x, bool) or not isinstance(x, (int, float))
+                                                    or not 0 <= x <= 1 for x in p):  # NaN fails 0 <= x
+        return "probabilities that are not finite numbers in [0, 1]"
+    if r.get("keys") is not None and len(r["keys"]) != len(p):
+        return f"{len(p)} probabilities for {len(r['keys'])} options"
+    golds = g if r["prim"] == "multi" and isinstance(g, list) else [g]
+    if r["prim"] != "multi" and isinstance(g, list) or any(isinstance(x, bool) or not isinstance(x, int)
+                                                           or not 0 <= x < len(p) for x in golds):
+        return f"gold {g!r} is not an option index"
+    return None
+
+
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
         min_blend=MIN_BLEND, conformal=()):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
-    with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set."""
+    with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set.
+    Rows that cannot enter the fit (row_problem: NaN probabilities, a gold out of range) are left out and reported."""
+    dropped = [f"line {r.get('line', '?') if isinstance(r, dict) else '?'}: {why}"
+               for r in rows if (why := row_problem(r))]
+    rows = [r for r in rows if not row_problem(r)]
+    if not rows:
+        raise SystemExit("no decisions to fit: " + "; ".join(dropped[:3]))
     sets = [r for r in rows if r["prim"] == "multi"]
     rows = [r for r in rows if r["prim"] != "multi"]
     fit_rows = [r for r in rows if not is_cert(r["group"])]
@@ -924,7 +1023,8 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     temps, source, buckets, bsource = fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend)
     cs_fit, cs_cert = served(fit_rows, temps, buckets), served(cert_rows, temps, buckets)
     shipped_cert = served(cert_rows, shipped_T, shipped_B)
-    thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={})
+    thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={},
+                                  dropped=dropped)
     automated, automated_pooled, automated_error = {}, {}, {}
     for risk in targets:
         thr = threshold(cs_fit, risk)
@@ -961,6 +1061,7 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
         cert = [r for r in cert_rows if r["prim"] == t]
         # as served: a choice question of a format-2 file gets its option-count bucket temperature first
         report["types"][t] = dict(n=len(rs), n_fit=len(rs) - len(cert), n_cert=len(cert),
+                                  fit_groups=len({r["group"] for r in rs if not is_cert(r["group"])}),
                                   accuracy=float(np.mean([ok for _, ok in served(rs, {})])),
                                   T_shipped=shipped_T.get(t), T=temps.get(t), source=source.get(t, "default 1.0"),
                                   ece_shipped=ece(served(cert, shipped_T, shipped_B)),
@@ -1027,7 +1128,10 @@ def task_rows(units, responses):
         if isinstance(r, Exception):
             failed[u["req"]] = f"line {u['line']}: {r}"
             continue
-        a = r["answers"][u["name"]]
+        a = (r.get("answers") or {}).get(u["name"])
+        if not isinstance(a, dict):
+            failed[(u["req"], u["name"])] = f"line {u['line']}, question {u['name']!r}: no answer"
+            continue
         if u["task"] == "classify":
             conf, ok = a["confidence"], a["label"] == u["gold"]
         elif u["task"] == "verify":
@@ -1039,6 +1143,9 @@ def task_rows(units, responses):
                 continue
             kind, gold = u["gold"]
             conf, ok = f["confidence"], field_correct(kind, f["value"], gold)
+        if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0 <= conf <= 1:  # NaN is not in [0, 1]
+            failed[(u["req"], u["name"], u["part"])] = f"line {u['line']}, question {u['name']!r}: confidence {conf!r}"
+            continue
         rows.append(dict(task=u["task"], group=u["group"], c=float(conf), ok=bool(ok)))
     return rows, list(failed.values())
 
@@ -1055,6 +1162,7 @@ def fit_tasks(rows, targets, shipped=None):
         cf = [(r["c"], r["ok"]) for r in rs if not is_cert(r["group"])]
         cc = [(r["c"], r["ok"]) for r in rs if is_cert(r["group"])]
         e = dict(n=len(rs), n_fit=len(cf), n_cert=len(cc), accuracy=float(np.mean([r["ok"] for r in rs])),
+                 fit_groups=len({r["group"] for r in rs if not is_cert(r["group"])}),
                  method=METHOD, targets={})
         for risk in targets:
             old = ((shipped or {}).get(t) or {}).get(str(float(risk)))
@@ -1208,11 +1316,22 @@ def task_table(report):
     return "\n".join(lines)
 
 
+def clustered(name, n_fit, groups):
+    """The warning of a type or task with more FIT decisions than groups (None when each group has one)."""
+    if not groups or n_fit <= groups:
+        return None
+    return (f"{name}: {n_fit} FIT decisions in {groups} groups ({n_fit / groups:.1f} per group): the bound counts every "
+            "decision as independent, so when the decisions of one group share their errors (claims or fields of one "
+            "document, questions about one state) the certified thresholds are optimistic")
+
+
 def task_warnings(report, dropped=()):
     out = []
     for t, e in report.items():
         if e["n"] < RECOMMENDED:
             out.append(f"{t}: only {e['n']} labelled decisions: the bounds are loose")
+        if clustered(t, e["n_fit"], e.get("fit_groups")):
+            out.append(clustered(t, e["n_fit"], e.get("fit_groups")))
         for risk, x in e["targets"].items():
             if x["confidence"] is None:
                 out.append(f"max_error {float(risk):g}: {t} has no certified threshold; its answers report "
@@ -1232,7 +1351,11 @@ def warnings(report, targets):
         out.append(f"only {n} labelled decisions: the bounds are loose (a few hundred usually certify 5%)")
     if not report["n_fit"] or not report["n_cert"]:
         out.append("one side of the FIT / CERT split is empty: use more groups")
+    if report.get("dropped"):
+        out.append(f"{len(report['dropped'])} row(s) left out of the fit: " + "; ".join(report["dropped"][:3]))
     for t, r in report["types"].items():
+        if clustered(t, r["n_fit"], r.get("fit_groups")):
+            out.append(clustered(t, r["n_fit"], r.get("fit_groups")))
         if r["source"].startswith("fitted") and any(math.isclose(r["T"], x) for x in T_GRID):
             out.append(f"{t}: the fitted temperature is at the edge of the search ({r['T']:.2f}): too few errors "
                        "or too few decisions to fit it; label more or raise --min-per-type")
@@ -1292,21 +1415,38 @@ def engine_name(kind, quant, preset=None):
 def refit(a, targets, reference, reference_name):
     """--from-rows: the fit on the probabilities a --save-rows run recorded (no engine). The baseline is --calibration,
     else the file that run compared with."""
-    lines = Path(a.input).read_text(encoding="utf-8").splitlines()
-    head = json.loads(lines[0])
-    if head.get("basal_calibrate_rows") != 1:
+    try:
+        lines = read_lines(a.input)
+    except (OSError, UnicodeDecodeError) as e:  # a binary file, a directory
+        raise SystemExit(f"{a.input}: not a file written by basal-calibrate --save-rows ({type(e).__name__})") from None
+    try:
+        head = json.loads(lines[0])
+    except (IndexError, ValueError):
+        head = {}
+    if not isinstance(head, dict) or head.get("basal_calibrate_rows") != 1:
         raise SystemExit(f"{a.input}: not a file written by basal-calibrate --save-rows")
-    rows = [json.loads(x) for x in lines[1:] if x.strip()]
+    rows = []
+    for i, x in enumerate(lines[1:], 2):
+        if not x.strip():
+            continue
+        try:
+            row = json.loads(x)
+        except ValueError:
+            row = None
+        if not isinstance(row, dict):
+            raise SystemExit(f"{a.input}: line {i} is not a row written by basal-calibrate --save-rows")
+        rows.append(row)
     small = sample_size(rows, [], targets)
     for w in small:
         print(f"warning: {w}", file=sys.stderr)
-    base_file = Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None)
+    base_file = None if a.no_calibration else (
+        Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None))
     baseline = json.loads(base_file.read_text(encoding="utf-8")) if base_file is not None and base_file.exists() else {}
-    fo = calibration_orders(baseline)
-    if baseline and fo is not None and head.get("orders") is not None and fo != head["orders"]:  # as basal-serve
-        print(f"warning: {base_file.name} was fitted on {fo} option order(s), the rows on {head['orders']}: its "
-              "thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
-        baseline = {k: v for k, v in baseline.items() if k not in ("thresholds", "multi", "task_thresholds")}
+    why = unvalidated_reason(baseline, base_file.name, head.get("orders"), head.get("layout")) if baseline else None
+    if why:  # the rule of basal-serve (server.load_calibration), for the orders and layout the rows were read in
+        print(f"warning: {why} (the rows): its thresholds are not compared or kept (as in basal-serve)",
+              file=sys.stderr)
+        baseline = {k: v for k, v in baseline.items() if k not in UNVALIDATED_OUT}
     cal, report = fit(rows, baseline, targets, a.min_per_type, head["fmt"], a.min_family, reference, a.min_per_set,
                       a.min_blend, a.conformal)
     cal["gates"]["ece_reference"] = reference_name
@@ -1317,6 +1457,7 @@ def refit(a, targets, reference, reference_name):
                             multi=sum(r["prim"] == "multi" for r in rows), date=datetime.date.today().isoformat(),
                             model=head["model"], engine=head["engine"], orders=head["orders"],
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__} (--from-rows)")
+    cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision") if head.get(k) is not None})
     cal["certified_on"] = "CERT split of fitted_on.data (30% by group)"
     cal["baseline"] = str(base_file) if baseline else "none"
     print(table(report))
@@ -1372,7 +1513,7 @@ def parser():
                          "share) without writing a calibration file")
     ap.add_argument("--strict", action="store_true",
                     help="exit with status 1 when a type's leave-one-family-out ECE is above --reference")
-    ap.add_argument("--concurrency", type=int, default=32, help="requests in flight (the engine batches them)")
+    ap.add_argument("--concurrency", type=positive, default=32, help="requests in flight (the engine batches them)")
     add_engine_args(ap.add_argument_group("engine (in process, as basal-serve)"))
     ap.set_defaults(model=None)
     return ap
@@ -1495,6 +1636,7 @@ def main(argv=None):
         head = dict(basal_calibrate_rows=1, fmt=fmt, kind=kind, quant=quant, vllm_preset=preset, model=str(model),
                     engine=engine, data=Path(a.input).name, requests=len(bodies) - len(failed),
                     baseline=str(base_file) if baseline else None, orders=orders)
+        head.update(layout=a.layout, adapter=adapter, revision=revision)
         with open(a.save_rows, "w", encoding="utf-8") as f:
             for x in [head] + rows:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")

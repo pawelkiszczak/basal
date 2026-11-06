@@ -16,7 +16,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from .prompt import render
+from .prompt import defang, render
 
 MAX_SPAN = 80
 
@@ -39,21 +39,37 @@ class EvidenceHead(nn.Module):
 
 
 def best_spans(ls, le, rel, state, top=3):
+    """The top non-overlapping spans (start token i <= end token j < i + MAX_SPAN) by log p_start + log p_end, from
+    the top * 4 best candidates. Only the band of MAX_SPAN ends per start is scored ([n, MAX_SPAN], not [n, n]: a
+    32k-token state took 4 GB per score matrix), and only valid spans are candidates (a state of a few tokens has fewer
+    than top * 4: no inverted or empty span is returned)."""
     n = ls.shape[0]
-    sc = ls[:, None] + le[None, :]
-    mask = torch.ones(n, n, dtype=torch.bool, device=ls.device).triu().logical_and(
-        ~torch.ones(n, n, dtype=torch.bool, device=ls.device).triu(MAX_SPAN))
-    sc = sc.masked_fill(~mask, -1e9)
-    out, flat = [], sc.flatten().topk(min(top * 4, n * n))
+    w = min(MAX_SPAN, n)
+    end = torch.arange(n, device=ls.device)[:, None] + torch.arange(w, device=ls.device)[None]  # [n, w]
+    ok = end < n
+    sc = (ls[:, None] + le[end.clamp(max=n - 1)]).masked_fill(~ok, float("-inf"))
+    out, flat = [], sc.flatten().topk(min(top * 4, int(ok.sum())))
     for v, k in zip(flat.values.tolist(), flat.indices.tolist()):
-        i, j = divmod(k, n)
-        a, b = rel[i][0], rel[j][1]
+        i, d = divmod(k, w)
+        a, b = rel[i][0], rel[i + d][1]
         if any(not (b <= x["start"] or a >= x["end"]) for x in out):
             continue  # no overlapping spans
         out.append(dict(text=state[a:b], start=a, end=b, probability=math.exp(v)))
         if len(out) == top:
             break
     return out
+
+
+def shown_to_state(state, shown):
+    """Offsets into `shown` (the state with zero-width spaces inserted by prompt.defang) -> offsets into `state`: an
+    inserted character maps to the offset of the character after it."""
+    back, i = [], 0
+    for c in shown:
+        back.append(i)
+        if i < len(state) and c == state[i]:
+            i += 1
+    back.append(len(state))
+    return back
 
 
 class Evidence:
@@ -74,14 +90,18 @@ class Evidence:
         """Top non-overlapping spans of `state` (character offsets); spans starting at or after `limit` (e.g. in the
         appended facts block) are dropped."""
         prompt = render(self.tok, state, question, options, lang, self.fmt)
-        s0 = prompt.index("\n" + state) + 1
-        s1 = s0 + len(state)
+        shown = defang(self.tok, state)  # the state as the prompt shows it (special tokens broken)
+        s0 = prompt.index("\n" + shown) + 1
+        s1 = s0 + len(shown)
         enc = self.tok(prompt, add_special_tokens=False, return_offsets_mapping=True)
         idx = [i for i, (a, b) in enumerate(enc["offset_mapping"]) if a >= s0 and b <= s1 and b > a]
         if not idx:
             return []
         t0, t1 = idx[0], idx[-1] + 1
         rel = [(max(a - s0, 0), max(b - s0, 0)) for a, b in enc["offset_mapping"][t0:t1]]
+        if shown != state:  # offsets into the shown state -> offsets into the request's state
+            back = shown_to_state(state, shown)
+            rel = [(back[a], back[b]) for a, b in rel]
         dev = next(self.model.parameters()).device
         with self.lock:
             h = self.model.model(input_ids=torch.tensor([enc["input_ids"]], device=dev),

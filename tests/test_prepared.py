@@ -68,7 +68,8 @@ def test_save_and_load(tmp_path, monkeypatch):
 
     import basal
     calls = {}
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(tmp_path / "home"))
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", default_cache_dir())  # as Inductor sets it on import
     # basal-serve's case: nothing given before basal was imported (a test that loads Triton first sets the default)
     monkeypatch.setattr(basal, "INDUCTOR_CACHE_DIR_GIVEN", False)
@@ -100,6 +101,92 @@ def test_prepare_needs_a_gpu(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(SystemExit, match="CUDA GPU"):
         prepared.main(["--model", "x"])
+
+
+def test_prepare_builds_the_engine_basal_serve_runs(tmp_path, monkeypatch):
+    """basal-prepare starts the engine through basal-serve's Server with basal-serve's parse of the same flags (its
+    defaults too: 2.5.2 built GraphBackend with the constructor's, padded rows without the template prefix, which
+    basal-serve does not run on Hopper), loads no prepared directory itself, and writes where basal-serve's lookup for
+    those flags finds it."""
+    import basal.server as S
+    m = model(tmp_path / "m")
+    seen = []
+
+    class Built:
+        def __init__(self, a):
+            seen.append(a)
+            self.md = str(m)
+    monkeypatch.setattr(S, "Server", Built)
+    monkeypatch.setattr(S, "default_mode", lambda model, revision=None: "fast")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(prepared, "environment", lambda: dict(ENV))
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: None)
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    for flags in ([], ["--batches", "compact", "--compile-scope", "layer", "--attn", "fa2", "--mode", "fast"]):
+        prepared.main(["--model", str(m)] + flags)
+        want = S.parser().parse_args(["--model", str(m)] + flags + ["--prepared", "off"])
+        want.mode = "fast"
+        assert vars(seen[-1]) == vars(want)
+        attn = "fa2" if flags else "auto"
+        assert prepared.locate(m, prepared.key_fields(m, "fast", "bfloat16", attn)) is not None  # Server's lookup
+
+
+def test_other_flag_sets_add_their_kernels_to_the_directory(tmp_path, monkeypatch):
+    """The engine flags are not in the key: preparing the same model with basal-serve's defaults and with other flags
+    writes one Inductor file each (inductor.bin, inductor-<flags>.bin) into the one directory, the manifest lists
+    both, and a start loads both; preparing a flag set again replaces only its own file."""
+    blobs, loaded = iter([b"defaults", b"compact", b"compact again"]), []
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (next(blobs), None))
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda b: loaded.append(b))
+    f = dict(ENV, architecture="a", mode="fast", dtype="bfloat16", attn="auto")
+    d = tmp_path / "p"
+    prepared.save(d, f)
+    compact = prepared.inductor_file({"batches": "compact"})
+    prepared.save(d, f, flags={"batches": "compact"})
+    man = prepared.save(d, f, flags={"batches": "compact"})
+    assert man["files"] == sorted(["inductor.bin", compact, "manifest.json"]) and compact != "inductor.bin"
+    assert man["flag_sets"] == {"inductor.bin": {}, compact: {"batches": "compact"}}
+    assert (d / "inductor.bin").read_bytes() == b"defaults" and (d / compact).read_bytes() == b"compact again"
+    assert prepared.locate(tmp_path, f, str(d)) == d
+    out = prepared.load(d)
+    assert sorted(loaded) == [b"compact again", b"defaults"] and set(out["inductor"]) == {"inductor.bin", compact}
+
+
+def test_an_interrupted_save_leaves_the_previous_file(tmp_path):
+    """Files of a prepared directory are written under a temporary name and renamed over the old one: a write that
+    fails (an interrupted or overlapping save) leaves the previous file whole and no temporary file behind."""
+    p = tmp_path / "fla_configs.json"
+    p.write_text('{"kernels": {}}')
+
+    def broken(tmp):
+        tmp.write_text('{"ker')
+        raise OSError("disk full")
+    with pytest.raises(OSError):
+        prepared._replace(p, broken)
+    assert p.read_text() == '{"kernels": {}}' and sorted(x.name for x in tmp_path.iterdir()) == ["fla_configs.json"]
+
+
+def test_prepare_with_think_builds_the_think_server(tmp_path, monkeypatch):
+    """--think auto: basal-serve builds ThinkServer (its sidecar takes GPU memory before the graphs are sized), and so
+    does basal-prepare."""
+    import basal.server as S
+    import basal.think as T
+    m, built = model(tmp_path / "m"), []
+
+    class Built:
+        def __init__(self, a):
+            built.append(type(self).__name__)
+            self.md = str(m)
+    monkeypatch.setattr(S, "Server", type("Server", (Built,), {}))
+    monkeypatch.setattr(T, "ThinkServer", type("ThinkServer", (Built,), {}))
+    monkeypatch.setattr(S, "default_mode", lambda model, revision=None: "fast")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(prepared, "environment", lambda: dict(ENV))
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: None)
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    prepared.main(["--model", str(m), "--think", "auto"])
+    prepared.main(["--model", str(m)])
+    assert built == ["ThinkServer", "Server"]
 
 
 def gdn_model(d):
@@ -246,6 +333,18 @@ def test_broken_inductor_file_is_left_out(tmp_path, monkeypatch):
     assert prepared.load(tmp_path)["inductor"] == "not loaded (EOFError)"
 
 
+def test_broken_inductor_file_still_loads_the_fla_configs(tmp_path, monkeypatch):
+    def broken(b):
+        raise EOFError("truncated")
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", broken)
+    monkeypatch.setattr(gdn_graph, "FLA_CONFIGS", None)
+    (tmp_path / "inductor.bin").write_bytes(b"x")
+    (tmp_path / "fla_configs.json").write_text("{}")
+    out = prepared.load(tmp_path)
+    assert out["inductor"] == "not loaded (EOFError)" and out["fla"] == str(tmp_path / "fla_configs.json")
+    assert gdn_graph.FLA_CONFIGS == tmp_path / "fla_configs.json"
+
+
 def test_save_lists_its_files(tmp_path, monkeypatch):
     monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"kernels", None))
     man = prepared.save(tmp_path / "p", dict(ENV, architecture="a", mode="fast", dtype="bfloat16", attn="auto"))
@@ -256,3 +355,38 @@ def test_prepare_into_model_needs_a_local_directory(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     with pytest.raises(SystemExit, match="local model directory"):
         prepared.main(["--model", "Remek/not-a-dir", "--into-model"])
+
+
+def test_only_trusted_publishers_kernels_load_from_the_hub(tmp_path, monkeypatch, capsys):
+    """Compiled kernels are code the compiler cache runs: --prepared auto loads those a Hugging Face repository ships
+    (fetched, or in its snapshot) only for a trusted publisher (BASAL_PREPARED_TRUST, default Remek); for others only
+    what basal-prepare wrote into the user cache on this machine. A local model directory is trusted."""
+    import huggingface_hub
+
+    import basal.engine
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    monkeypatch.delenv("BASAL_PREPARED_TRUST", raising=False)
+    snap = model(tmp_path / "snap")
+    f = prepared.key_fields(snap, "fast", env=ENV)
+    k = prepared.key(f)
+    d = snap / "prepared" / k
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(json.dumps(dict(fields=f, key=k, files=["inductor.bin", "manifest.json"])))
+    (d / "inductor.bin").write_text("kernels")
+    asked, loaded = [], []
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **kw: asked.append(a) or (_ for _ in ()).throw(
+        FileNotFoundError("none")))
+    monkeypatch.setattr(basal.engine, "persist_compile_cache", lambda: None)
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda b: loaded.append(b))
+    assert prepared.startup(snap, f, "auto", "someone/x", "main") is None  # its snapshot's kernels: not loaded
+    assert loaded == [] and asked == [] and "not trusted" in capsys.readouterr().out
+    assert prepared.startup(snap, f, "auto", "Remek/x", "main")["dir"] == str(d) and loaded == [b"kernels"]
+    monkeypatch.setenv("BASAL_PREPARED_TRUST", "someone, other")
+    assert prepared.startup(snap, f, "auto", "someone/x", "main")["dir"] == str(d)
+    monkeypatch.setenv("BASAL_PREPARED_TRUST", "")
+    assert prepared.startup(snap, f, "auto", "Remek/x", "main") is None  # nobody trusted
+    assert prepared.startup(snap, f, "auto", str(snap), None)["dir"] == str(d)  # a local model directory
+    own = tmp_path / "cache" / k  # what basal-prepare wrote on this machine loads for any publisher
+    own.mkdir(parents=True)
+    (own / "manifest.json").write_text(json.dumps(dict(fields=f, key=k, files=["manifest.json"])))
+    assert prepared.startup(snap, f, "auto", "someone/x", "main")["dir"] == str(own)

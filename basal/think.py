@@ -32,9 +32,10 @@ from pathlib import Path
 import httpx
 import torch
 
-from . import server
+from . import rank, server, tasks
 from .engine import resolve
 from .facts import inject as inject_facts
+from .jsonl import read_lines
 from .prompt import PREFILL, RequestError, render
 from .server import (Server, act_answer, certified, check_calibration, refuse_lean_flex, temper, temperature,
                      to_items)
@@ -52,7 +53,7 @@ class Sidecar:
     def __init__(self, model, adapter=None, python=None, mem=0.3, max_len=8192, max_options=255, deterministic=False,
                  url=None, log="basal-think-vllm.log"):
         self.name = "think" if adapter else "base"
-        self.max_len, self.proc, self.http = max_len, None, None
+        self.max_len, self.proc, self.http, self.log_file = max_len, None, None, None
         self.lock = asyncio.Lock() if deterministic else None  # --deterministic: one vLLM request at a time
         if url:  # a running server: --served-model-name base, and --lora-modules think=<adapter> with an adapter
             self.url = url.rstrip("/")
@@ -75,7 +76,8 @@ class Sidecar:
         # its own Python: none of the server's PYTHONPATH (an overlay built for another Python breaks vLLM's imports);
         # same process group as the server: stopping the server's group stops vLLM too
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
-        self.proc = subprocess.Popen(cmd, stdout=open(log, "ab"), stderr=subprocess.STDOUT, env=env)
+        self.log_file = open(log, "ab")  # (vLLM's output; closed with the sidecar)
+        self.proc = subprocess.Popen(cmd, stdout=self.log_file, stderr=subprocess.STDOUT, env=env)
         atexit.register(self.close)
 
     def close(self):
@@ -85,6 +87,8 @@ class Sidecar:
                 self.proc.wait(30)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        if self.log_file is not None:
+            self.log_file.close()
 
     def wait_ready(self, timeout=1200):
         t0 = time.time()
@@ -216,10 +220,15 @@ class ThinkServer(Server):
         todo = []
         if mode != "off" and not out["usage"].get("truncated"):
             state = body["state"]
-            if body.get("facts") == "auto":  # the state readout 1 saw
-                state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
-            todo = [q for q in to_items(state, body["questions"], self.max_options, force_lang=body.get("lang"))
-                    if self.routed(q, out["answers"][q["name"]], mode)]
+            if body.get("facts") == "auto":  # the state readout 1 saw (off the event loop, as basal-serve reads it)
+                text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+                state = await asyncio.to_thread(inject_facts, text)
+            # the plain questions answered (not tasks or rank, which are answered from several decisions, nor a
+            # question ask_if skipped: null)
+            plain = {n: q for n, q in body["questions"].items()
+                     if isinstance(q, dict) and not tasks.is_task(q) and not rank.is_rank(q)}
+            todo = [q for q in to_items(state, plain, self.max_options, force_lang=body.get("lang"))
+                    if out["answers"].get(q["name"]) is not None and self.routed(q, out["answers"][q["name"]], mode)]
         n_think = 0
         for q, (res, why) in zip(todo, await asyncio.gather(*(self.think_one(q) for q in todo))):
             old = out["answers"][q["name"]]
@@ -240,6 +249,8 @@ class ThinkServer(Server):
             n_think += 1
         out["usage"]["think_questions"] = n_think
         for a in out["answers"].values():  # every answer of a think server says whether it used the reasoning
+            if not isinstance(a, dict):  # (null: skipped by ask_if)
+                continue
             th = a.get("think") or {}
             a.setdefault("meta", {})["think"] = {"used": "tokens" in th, "tokens": th.get("tokens", 0)}
         out["usage"]["latency_ms"] = round(out["usage"]["latency_ms"] + (time.perf_counter() - t0) * 1000, 2)
@@ -309,7 +320,7 @@ def rows_main(argv):
     ap.add_argument("--concurrency", type=int, default=32)
     a = ap.parse_args(argv)
     bodies, decisions = load(a.data)
-    lines = Path(a.data).read_text(encoding="utf-8").splitlines()
+    lines = read_lines(a.data)
     for b in bodies:
         b["think"] = a.think
         if a.text:

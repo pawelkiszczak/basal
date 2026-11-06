@@ -48,16 +48,16 @@ import torch
 from . import adapter as adapter_module
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
-                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
-                     resolve, set_fp8_fast_accum)
+                     VLLM_PRESETS, VLLMBackend, cache_signature, fp8_refused, gemma_fast_kernels, recurrent_layers,
+                     recurrent_refused, resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
-from .facts import inject as inject_facts
+from .facts import MAX_CHARS as FACTS_MAX_CHARS, inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
-from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, lang_of, letter_ids, max_options,
-                     media_messages, model_format, model_layout, model_option_isolation, model_two_way, once_ids,
-                     option_tokens, reads_request, render, tokens_once)
+from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, defang, lang_of, letter_ids,
+                     max_options, media_messages, model_format, model_layout, model_option_isolation, model_two_way,
+                     once_ids, option_tokens, reads_request, render, tokens_once)
 from .sets import label_set_id
 from .sets import select as select_set
 from .sets import validate as validate_set
@@ -67,7 +67,7 @@ from .tools import answer as tool_answer
 from .tools import parse as parse_tools
 from .tools import set_answer as tool_set_answer
 
-RELEASE_DATE = "2026-11-02"  # the engine's release date (GET /v1/models), not the served model's
+RELEASE_DATE = "2026-11-05"  # the engine's release date (GET /v1/models), not the served model's
 
 MODES = {
     # mode: (backend, quantisation, compile)
@@ -102,10 +102,8 @@ def nvfp4_args(a, md=None, quant=None):
         path = Path(md) / NVFP4_AMAX
     if not path:
         return {}
-    import json
-    with open(path) as f:
-        amax = json.load(f)
-    return dict(nvfp4_amax=amax.get("amax", amax), nvfp4_scope=getattr(a, "nvfp4_scope", "all"))
+    from .gemma4_graph import load_nvfp4_amax
+    return dict(nvfp4_amax=load_nvfp4_amax(str(path)), nvfp4_scope=getattr(a, "nvfp4_scope", "all"))
 
 
 def nvfp4_calibration_refused(md, kind, quant, a):
@@ -154,12 +152,20 @@ def default_mode(model=None, revision=None):
     return "eager"
 
 
+def _config_unreadable(probe, model, e):
+    """The warning for a model whose config.json a probe could not read: the probe answers its default, the cause
+    (a permission error, a full disk) is no longer swallowed with it."""
+    print(f"basal: warning: {probe}: cannot read the config of {model}: {type(e).__name__}: {str(e)[:300]}",
+          file=sys.stderr, flush=True)
+
+
 def _gemma4(model, revision=None):
     """A Gemma 4 model (basal-omni), from its config.json; False when that cannot be read (the server says why)."""
     from .gemma4_graph import is_gemma4_dir
     try:
-        return is_gemma4_dir(resolve(model, revision, metadata_only=True))
-    except Exception:  # offline without the model cached, a wrong name: the model load reports it
+        return is_gemma4_dir(resolve(model, revision, metadata_only=True), strict=True)
+    except Exception as e:  # offline without the model cached, a wrong name: the model load reports it
+        _config_unreadable("_gemma4", model, e)
         return False
 
 
@@ -167,8 +173,9 @@ def _recurrent(model, revision=None):
     """The recurrent-state layers of a model (recurrent_layers), from its config.json; None when that cannot be read
     (the model load reports it)."""
     try:
-        return recurrent_layers(resolve(model, revision, metadata_only=True))
-    except Exception:
+        return recurrent_layers(resolve(model, revision, metadata_only=True), strict=True)
+    except Exception as e:
+        _config_unreadable("_recurrent", model, e)
         return None
 
 
@@ -176,8 +183,9 @@ def _gdn(model, revision=None):
     """A Qwen3.5 model of Gated DeltaNet and attention layers (gdn_graph.is_gdn: the recurrent models the CUDA graph
     engine serves), from its config.json; False when that cannot be read."""
     try:
-        return is_gdn(resolve(model, revision, metadata_only=True))
-    except Exception:
+        return is_gdn(resolve(model, revision, metadata_only=True), strict=True)
+    except Exception as e:
+        _config_unreadable("_gdn", model, e)
         return False
 
 
@@ -186,10 +194,10 @@ def validate_quant(mode, quant):
     if quant is None:
         return
     kind = MODES[mode][0]
-    if quant == "q8" and kind == "mlx" or quant in ("fp8", "nvfp4") and kind in ("graph", "exit"):
+    if quant == "q8" and kind == "mlx" or quant in ("fp8", "nvfp4", "int8") and kind in ("graph", "exit"):
         return
     raise SystemExit(f"--quant {quant} is not supported with --mode {mode} "
-                     "(q8 only for mlx; fp8 and nvfp4 only for the CUDA graph modes)")
+                     "(q8 only for mlx; fp8, nvfp4 and int8 only for the CUDA graph modes)")
 
 
 def _text(x):
@@ -224,6 +232,14 @@ def yes_no(lang, crit=None):
                                 _text(crit.get("false") or ("Nie" if lang == "pl" else "No"))])
 
 
+def listed_options(name, crit):
+    """A list of option keys -> {key: None}. A key that is a non-finite number (NaN, or 1e999 read as inf) is refused:
+    it became a key of the answer's probabilities, which are then no JSON (HTTP 500 after the engine's run)."""
+    if any(isinstance(k, float) and not math.isfinite(k) for k in crit):
+        raise RequestError(f"question {name!r}: an option key must be a string or a finite number")
+    return {k: None for k in crit}
+
+
 def check_body(body):
     """The shape of a decision request (its questions are read by to_items) -> RequestError (HTTP 422)."""
     if not isinstance(body, dict):
@@ -248,6 +264,8 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
     state_pl = not force_lang and lang_of(state) == "pl"  # once per request, not once per question
     for name, q in questions.items():
         t = q.get("type", "choice")
+        if t not in ("choice", "noul", "score", "act", "multi", "tool"):
+            raise RequestError(f"question {name!r}: unknown type {t!r}")
         instr = _text(q.get("instructions", ""))
         lang = force_lang or ("pl" if state_pl else lang_of(instr))
         extra = {}
@@ -255,7 +273,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
         if t == "multi":  # one yes/no branch per label
             crit = q.get("criteria") or {}
             if isinstance(crit, list):
-                crit = {k: None for k in crit}
+                crit = listed_options(name, crit)
             if not crit:
                 raise RequestError(f"question {name!r}: multi needs criteria")
             keys = list(crit)
@@ -299,8 +317,10 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
                 base = "noul"
             else:
                 base = q.get("base", "choice")
+                if base not in ("choice", "noul"):
+                    raise RequestError(f"question {name!r}: base must be \"choice\" or \"noul\", got {base!r}")
                 if isinstance(crit, list):
-                    crit = {k: None for k in crit}
+                    crit = listed_options(name, crit)
                 keys, opts = named_options(crit, q.get("option_keys", "show"))
             extra = dict(base=base, act=act_spec(name, q, keys))
         elif t == "noul":  # yes/no; optional criteria {"true": ..., "false": ...}; answer = P(true)
@@ -314,7 +334,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
         else:  # choice: {key: description} or [keys]
             crit = q.get("criteria") or {}
             if isinstance(crit, list):
-                crit = {k: None for k in crit}
+                crit = listed_options(name, crit)
             keys, opts = named_options(crit, q.get("option_keys", "show"))
         if not 2 <= len(opts) <= max_opts:
             what = " (tools and extra options)" if t == "tool" else ""
@@ -322,6 +342,19 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
         out.append(dict(name=name, type=t, keys=keys, state=state, question=instr, options=opts, lang=lang,
                         branches=[(instr, opts)], option_keys=q.get("option_keys", "show"), **extra, **lim))
     return out
+
+
+def _cost(name, v):
+    """A cost of an act question: a finite number (the legacy coercion of numeric text stays)."""
+    try:
+        c = float(v)
+    except (TypeError, ValueError, OverflowError):  # (OverflowError: an integer beyond the largest float)
+        c = math.inf if isinstance(v, int) else None
+        if c is None:
+            raise RequestError(f"question {name!r}: a cost must be a number, got {v!r}") from None
+    if not math.isfinite(c):
+        raise RequestError(f"question {name!r}: a cost must be a finite number, got {v!r}")
+    return c
 
 
 def act_spec(name, q, outcomes):
@@ -336,15 +369,15 @@ def act_spec(name, q, outcomes):
     if not isinstance(costs, dict) or not costs:
         raise RequestError(f"question {name!r}: act needs costs")
     if set(costs) <= {"wrong", "defer"} and not isinstance(costs.get("wrong"), dict):
-        w = float(costs["wrong"])
+        w = _cost(name, costs["wrong"])
         C = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
         if "defer" in costs:
-            C["defer"] = {z: float(costs["defer"]) for z in outcomes}
+            C["defer"] = {z: _cost(name, costs["defer"]) for z in outcomes}
         return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=max_error)
     for a, row in costs.items():
         if not isinstance(row, dict) or set(row) != set(outcomes):
             raise RequestError(f"question {name!r}: costs[{a!r}] must give a cost for every outcome {outcomes}")
-    C = {a: {z: float(v) for z, v in row.items()} for a, row in costs.items()}
+    C = {a: {z: _cost(name, v) for z, v in row.items()} for a, row in costs.items()}
     defer = q.get("defer_action") or next((a for a in ("defer", "human") if a in C), None)
     return dict(costs=C, defer=defer, max_error=max_error)
 
@@ -829,7 +862,7 @@ def order_average_arg(value):
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
                    calibration_warning=None, vllm_preset=None, layout=None, two_way=None, option_isolation=False,
-                   certified=None, context=None, adapter=None):
+                   certified=None, context=None, adapter=None, buckets=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
     model's prompt format, the option orders served, why the --calibration file may not belong to the model, the
@@ -839,6 +872,7 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
              "mode": mode, "early_exit": sorted(policies), "temperature_per_prim": dict(temperatures or {})}
+    entry["temperature_per_bucket"] = buckets or {}
     if prompt_format is not None:
         entry["prompt_format"] = prompt_format
     if media:  # --media on: the media the served model takes
@@ -993,7 +1027,10 @@ def calibration_mismatch(cal, name, md, adapter=None):
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return None
     model, rev = model_identity(name, md)
-    key = lambda s: str(s).rstrip("/").split("/")[-1].lower()  # a repo id, a local copy or a served name
+    # both Hugging Face snapshots (a revision on each side): the whole repo id, so OrgA/x is not OrgB/x; otherwise the
+    # last part of the path, so a local copy matches its repo id
+    full = bool(fitted.get("revision") and rev)
+    key = lambda s: (str(s) if full else Path(str(s)).name).lower()
     if key(fitted["model"]) != key(model):
         return f"it was fitted on {fitted['model']}, the served model is {model}"
     if fitted.get("revision") and rev and fitted["revision"] != rev:
@@ -1004,8 +1041,22 @@ def calibration_mismatch(cal, name, md, adapter=None):
     return None
 
 
-# the parts of a file fitted on other option orders or another layout that do not hold for the served ones
+# the parts of a file fitted on other option orders, another layout or another model that do not hold for the served
+# ones
 UNVALIDATED_OUT = ("thresholds", "multi", "task_thresholds", "conformal")
+
+
+def unvalidated_reason(data, name, orders, layout="canonical"):
+    """Why the thresholds of calibration `data` (file `name`) do not hold for the served option orders and layout, None
+    when they do (or the file does not say): the rule of load_calibration, shared with basal-calibrate --from-rows."""
+    if not data:
+        return None
+    if calibration_layout(data) != (layout or "canonical"):  # another layout's thresholds do not hold here (2.4.1)
+        return f"{name} was fitted on the {calibration_layout(data)} layout, served with --layout {layout or 'canonical'}"
+    fitted = calibration_orders(data)
+    if fitted is not None and orders is not None and fitted != orders:
+        return f"{name} was fitted on {fitted} option order(s), served with {orders}"
+    return None
 
 
 def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layout="canonical", adapter=None):
@@ -1024,17 +1075,13 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     if data and adapter and not path and cal.parent != adapter.path:
         why = f"{cal.name} belongs to the base model, served with --adapter {adapter.name}"
         return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
-    if data and calibration_layout(data) != layout:  # another layout's thresholds do not hold here (2.4.1)
-        why = f"{cal.name} was fitted on the {calibration_layout(data)} layout, served with --layout {layout}"
-        return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
     fitted = calibration_orders(data)
     alt = cal.with_name(f"{cal.stem}.o{orders}{cal.suffix}")
-    if fitted is not None and fitted != orders and not path and alt.exists():
-        cal, data = alt, json.loads(alt.read_text(encoding="utf-8"))
-        fitted = calibration_orders(data)
-    if fitted is None or fitted == orders:
+    if calibration_layout(data) == layout and fitted is not None and fitted != orders and not path and alt.exists():
+        return load_calibration(md, kind, alt, quant, orders, off, preset, layout, adapter)
+    why = unvalidated_reason(data, cal.name, orders, layout)
+    if why is None:
         return data, cal, None
-    why = f"{cal.name} was fitted on {fitted} option order(s), served with {orders}"
     return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
 
 
@@ -1125,6 +1172,12 @@ class Server:
             raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or "
                              "--mode mlx and is not combined with --deterministic (a cached state changes the shapes of "
                              "the forwards)")
+        if getattr(a, "state_cache_dir", None) is not None:
+            if not (getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on"):
+                raise SystemExit("--state-cache-dir needs --state-cache-gb or --prefix-cache on")
+            if kind not in ("graph", "mlx"):
+                raise SystemExit("--state-cache-dir works with the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
+                                 "nvfp4) and --mode mlx")
         if getattr(a, "layout", None) not in (None, "canonical"):
             refuse_layout_caches(a.layout, a)
         if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind not in ("graph", "mlx")):
@@ -1180,7 +1233,8 @@ class Server:
                 why = gdn_refused(a.quant or quant, getattr(a, "state_cache_gb", 0),
                                   getattr(a, "prefix_cache", "off") == "on", getattr(a, "batches", "default"),
                                   lean_arg(getattr(a, "lean", "off")), getattr(a, "tree", "dense"),
-                                  getattr(a, "readout_layer", "off"), getattr(a, "template_prefix", "off"))
+                                  getattr(a, "readout_layer", "off"), getattr(a, "template_prefix", "off"),
+                                  disk=getattr(a, "state_cache_dir", None) is not None)
                 # --long-lane on Qwen3.5: bf16 answers 0.12 pt further from fp32 than eager's (five questions per state),
                 # so only with --long-lane-gdn on
                 if not why and getattr(a, "long_lane", "off") == "on" and getattr(a, "long_lane_gdn", "off") != "on":
@@ -1228,7 +1282,7 @@ class Server:
         if why:
             raise SystemExit(why)
         shared = self.orders != 1 or self.soam  # prefix sharing: option orders, or the questions of a request
-        base = a.model.rstrip("/").split("/")[-1]
+        base = Path(a.model).name or Path(a.model).resolve().name  # --model . : the directory's name
         self.name = a.name or (f"{base}+{self.adapter.name}" if self.adapter else base)
         quant = a.quant or quant
         why = nvfp4_calibration_refused(md, kind, quant, a)
@@ -1247,6 +1301,15 @@ class Server:
             self.prepared = prepared.startup(md, fields, getattr(a, "prepared", "auto"), a.model, a.revision)
             print(f"basal: prepared start-up: {self.prepared or 'none for this GPU and version (basal-prepare writes it)'}",
                   flush=True)
+        # --state-cache-dir: the compatibility signature of the cached states' files (engine.cache_signature)
+        disk_kwargs = dict(state_cache_dir=getattr(a, "state_cache_dir", None),
+                           state_cache_disk_gb=getattr(a, "state_cache_disk_gb", 20.0),
+                           state_cache_signature=None)
+        if disk_kwargs["state_cache_dir"] is not None:
+            kv_dtype = "bf16" if kind == "mlx" else {"bfloat16": "bf16", "float16": "f16", "float32": "f32"}.get(
+                a.dtype, a.dtype)
+            disk_kwargs["state_cache_signature"] = cache_signature(md, *model_identity(a.model, md), self.adapter,
+                                                                   quant, kv_dtype)
         if kind == "eager":
             self.backend = EagerBackend(md, a.dtype, device=a.device, media=getattr(a, "media", "off") == "on",
                                         forward=getattr(a, "eager_forward", None),
@@ -1268,7 +1331,8 @@ class Server:
                                       forward=getattr(a, "mlx_forward", "mlx-lm"),
                                       compute=getattr(a, "mlx_compute", "auto"),
                                       state_cache_gb=getattr(a, "state_cache_gb", 0),
-                                      prefix=getattr(a, "prefix_cache", "off") == "on", adapter=self.adapter)
+                                      prefix=getattr(a, "prefix_cache", "off") == "on", adapter=self.adapter,
+                                      **disk_kwargs)
         elif kind == "mps":
             self.backend = MPSBackend(md, a.dtype, shared=shared, device=a.device, adapter=self.adapter)
         elif kind == "gguf":
@@ -1301,7 +1365,7 @@ class Server:
                                         quant_load=getattr(a, "quant_load", "gpu"),
                                         state_cache_bits=getattr(a, "state_cache_bits", 16),
                                         graph_memory_gb=getattr(a, "graph_memory_gb", None), **nvfp4_args(a, md, quant),
-                                        adapter=self.adapter)
+                                        adapter=self.adapter, **disk_kwargs)
             if getattr(a, "state_cache_lock", "off") == "on":  # before lane() copies the backend
                 self.backend.state_cache_lock = True
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
@@ -1332,12 +1396,17 @@ class Server:
         own = a.calibration or (bool(self.adapter) and cal.parent == self.adapter.path)
         self.cal_mismatch = calibration_mismatch(self.cal, a.model, md, self.adapter) if own and not a.no_calibration \
             else None
+        unvalidated = self.cal_unvalidated
         if self.cal_mismatch:
             if getattr(a, "strict_calibration", False):
                 raise SystemExit(f"{cal}: {self.cal_mismatch} (--strict-calibration)")
-            print(f"basal: warning: {cal.name}: {self.cal_mismatch}; its thresholds were certified on that model "
+            # its thresholds were certified on that model: kept for the temperatures only, as a file of other orders
+            self.cal = {k: v for k, v in self.cal.items() if k not in UNVALIDATED_OUT}
+            self.cal_unvalidated = unvalidated or f"{cal.name}: {self.cal_mismatch}"
+            print(f"basal: warning: {cal.name}: {self.cal_mismatch}; its thresholds were certified on that model, so "
+                  "they are not applied: max_error defers and the answers are marked \"calibration\": \"unvalidated\" "
                   "(refit with basal-calibrate, or --strict-calibration to refuse such a file)", flush=True)
-        if self.cal_unvalidated:
+        if unvalidated:
             base_file = self.adapter and not a.calibration and cal.parent != self.adapter.path
             print(f"basal: warning: {self.cal_unvalidated}; its answers are marked \"calibration\": \"unvalidated\" "
                   "and max_error defers (" + ("fit a file for the adapter with basal-calibrate --adapter and put it in "
@@ -1506,6 +1575,8 @@ class Server:
         finally:
             for fut in futs:
                 self.waiting.pop(fut, None)
+                if not fut.done():  # cancelled, or another entry failed: its queued work is dropped (forward)
+                    fut.cancel()
             if wait[0]:
                 self.queued -= 1
         return outs
@@ -1534,7 +1605,7 @@ class Server:
         prompt and the user header "State:" / "Stan:"), checked against the prompt's token ids; None when not found."""
         head = FORMATS[self.fmt]["templates"][q["lang"]]["user"].split("{state}")[0]
         text = render(self.tok, q["state"], q["question"], q["options"], q["lang"], self.fmt)
-        i = text.find(head + q["state"]) if q["state"] else -1
+        i = text.find(head + defang(self.tok, q["state"])) if q["state"] else -1  # as rendered (special tokens broken)
         if i < 0:
             return None
         memo = self.__dict__.setdefault("_template_ids", {})
@@ -1553,11 +1624,12 @@ class Server:
         short state can also be a word of the system prompt)."""
         head = FORMATS[self.fmt]["templates"][q["lang"]]["user"].split("{state}")[0]
         text = render(self.tok, q["state"], q["question"], q["options"], q["lang"], self.fmt)
-        i = text.find(head + q["state"]) if q["state"] else -1
+        shown = defang(self.tok, q["state"])  # the state as rendered (special tokens broken)
+        i = text.find(head + shown) if q["state"] else -1
         if i < 0:
             return None
         full = self.tok(text, add_special_tokens=False).input_ids
-        pre = self.tok(text[: i + len(head) + len(q["state"])], add_special_tokens=False).input_ids
+        pre = self.tok(text[: i + len(head) + len(shown)], add_special_tokens=False).input_ids
         while pre and full[: len(pre)] != pre:  # the last token merges with what follows: end one token earlier
             pre = pre[:-1]
         return len(pre) or None
@@ -1652,6 +1724,10 @@ class Server:
             self.long_ready.set()
         while True:
             await self.long_ready.wait()
+            self.long_entries[:] = [e for e in self.long_entries if not e[2].done()]  # (cancelled: dropped)
+            if not self.long_entries:
+                self.long_ready.clear()
+                continue
             now, rate = time.perf_counter(), self.long_rate
             order = sorted(self.long_entries, key=lambda e: ((now - e[5]) / (e[6] * rate) + 1, -e[6]), reverse=True)
             batch, total = [], 0  # the highest response ratios first, up to LONG_BATCH requests / LONG_BATCH_TOKENS
@@ -1697,31 +1773,32 @@ class Server:
             slots.release()
             return
         self.started(batch)
+        live = [b for b in batch if not b[2].done()]  # (a cancelled request's entries cost the engine nothing)
         lanes = getattr(self, "lanes", None)
         backend = self.free_lanes.pop() if lanes else self.backend  # (slots: never more calls than lanes)
         try:
-            for pol in {b[3] for b in batch}:  # requests with the same early-exit policy run together
-                ix = [i for i, b in enumerate(batch) if b[3] == pol]
+            for pol in {b[3] for b in live}:  # requests with the same early-exit policy run together
+                ix = [i for i, b in enumerate(live) if b[3] == pol]
                 kw = {}
                 if getattr(backend, "streams", False):
-                    kw["done"] = lambda j, res, ix=ix: loop.call_soon_threadsafe(_answer, batch[ix[j]][2], res)
+                    kw["done"] = lambda j, res, ix=ix: loop.call_soon_threadsafe(_answer, live[ix[j]][2], res)
                 groups = []
                 for i in ix:  # (prompts, code ids[, state prefix length for the state cache])
-                    cut = batch[i][4] if len(batch[i]) > 4 else None
-                    groups.append((batch[i][0], batch[i][1]) + ((cut,) if cut else ()))
+                    cut = live[i][4] if len(live[i]) > 4 else None
+                    groups.append((live[i][0], live[i][1]) + ((cut,) if cut else ()))
                 out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
                 for i, o in zip(ix, out):
-                    _answer(batch[i][2], o)
+                    _answer(live[i][2], o)
         except Exception as e:  # noqa: BLE001
-            _fail([b[2] for b in batch], e)
+            _fail([b[2] for b in live], e)
         finally:
             if lanes:
                 self.free_lanes.append(backend)
             slots.release()
             if getattr(self, "gate", None) is not None:
                 self.gate.main_done(len(batch), time.perf_counter() - t_call)
-            if getattr(self, "backlog", None) is not None:  # seconds per prompt token, for the HRRN ratios
-                tokens = sum(max(map(len, b[0]), default=0) for b in batch)
+            if getattr(self, "backlog", None) is not None and live:  # seconds per prompt token, for the HRRN ratios
+                tokens = sum(max(map(len, b[0]), default=0) for b in live)
                 self.sched_rate = 0.8 * self.sched_rate + 0.2 * (time.perf_counter() - t_call) / max(tokens, 1)
 
     @staticmethod
@@ -1809,12 +1886,20 @@ class Server:
         if body.get("facts", "off") not in ("off", "auto"):
             raise RequestError('facts must be "off" or "auto"')
         if body.get("facts") == "auto":  # append computed calendar / arithmetic facts (PL dates, gaps, VAT)
-            state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+            # (a regex pass over the whole state, linear in its length: off the event loop, which answers /health
+            # meanwhile)
+            text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+            if len(text) > FACTS_MAX_CHARS:
+                raise RequestError(f'facts "auto" reads a state of at most {FACTS_MAX_CHARS} characters, this one has '
+                                   f'{len(text)}: send "facts": "off" or a shorter state')
+            state = await asyncio.to_thread(inject_facts, text)
         if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
             if body.get("media") is not None:
                 raise RequestError("give media or images, not both")
             body = dict(body, media=images_as_media(body["images"]))
-        m = self.media_of(body, pol)
+        # (a request with media is decoded off the event loop; without, media_of is None at once)
+        m = self.media_of(body, pol) if body.get("media") is None else \
+            await asyncio.get_running_loop().run_in_executor(None, self.media_of, body, pol)
         lang = body.get("lang")  # the prompt language when the text alone does not show it (a state that is only media)
         if lang is not None and lang not in ("pl", "en"):
             raise RequestError('lang must be "pl" or "en"')
@@ -1891,6 +1976,13 @@ class Server:
         images, audio, order = decode(body["media"], kinds, getattr(self.backend, "max_audio_s", None))
         return dict(images=images, audio=audio, kinds=order, max_soft_tokens=soft, detail=body.get("detail", "default"))
 
+    def media_pool(self):
+        """The thread of the engine's media calls: the engines read one media request at a time (a lock), so requests
+        waiting for it wait here, never in the default executor's threads, which the text batches need."""
+        if getattr(self, "_media_pool", None) is None:
+            self._media_pool = ThreadPoolExecutor(1, thread_name_prefix="basal-media")
+        return self._media_pool
+
     async def ask_media(self, qs, branches, m):
         """Position probabilities of every prompt of every branch, with the request's media -> (outs, prompt tokens,
         the longest prompt of each branch, media tokens)."""
@@ -1903,11 +1995,11 @@ class Server:
             question, options = q["branches"][b[1]]
             for perm, lid in zip(b[2], b[4]):
                 msgs.append(media_messages(q["state"], question, [options[c] for c in perm], m["kinds"], q["lang"],
-                                           self.fmt))
+                                           self.fmt, self.tok))
                 ids.append(lid)
                 where.append(j)
         limit = getattr(self, "context", None)
-        res = await asyncio.get_running_loop().run_in_executor(None, functools.partial(
+        res = await asyncio.get_running_loop().run_in_executor(self.media_pool(), functools.partial(
             self.backend.run_media, msgs, ids, m["images"], m["audio"], m["max_soft_tokens"], limit[0] if limit else None))
         outs, longest = [[] for _ in branches], [0] * len(branches)
         for j, (p, n, _) in zip(where, res):
@@ -2211,6 +2303,13 @@ def add_engine_args(ap):
                     help="--state-cache-gb / --prefix-cache: 16 keeps the cached keys and values as computed; 8 stores "
                          "them as 8-bit integers with a scale per group (keys per channel, values per token): about "
                          "1.7x more cached states per GB, answers close to (not equal to) the uncached ones")
+    ap.add_argument("--state-cache-dir", dest="state_cache_dir", default=None,
+                    help="with --state-cache-gb / --prefix-cache on: also keep every cached state as a .safetensors "
+                         "file under this directory (one subdirectory per model signature), read back on a memory "
+                         "miss, also by later server processes; least recently used files evicted at "
+                         "--state-cache-disk-gb")
+    ap.add_argument("--state-cache-disk-gb", dest="state_cache_disk_gb", type=float, default=20.0,
+                    help="--state-cache-dir: GiB of state files kept on disk (default 20)")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
                     help="CUDA graph engine and --mode mlx: compute the template prefix (chat template, system "
                          "prompt, the header up to the state) once and run short requests over its cached keys and "
@@ -2316,7 +2415,7 @@ def parser():
                          "CALIBRATION.json; fit your own with basal-calibrate)")
     ap.add_argument("--strict-calibration", dest="strict_calibration", action="store_true",
                     help="refuse to start when the --calibration file was fitted on another model or revision "
-                         "(default: a warning)")
+                         "(default: a warning, and its thresholds are not applied)")
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
     ap.add_argument("--rank-max-candidates", dest="rank_max_candidates", type=int, default=rank.MAX_CANDIDATES,
                     metavar="N", help="rank questions (experimental): at most N candidates per request, all its rank "
@@ -2366,8 +2465,13 @@ class Starting:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Retry-After", "5")
                 self.end_headers()
-                self.wfile.write(body)
-            do_GET = do_POST = do_HEAD = _answer
+                if self.command != "HEAD":  # HEAD gets the status and the headers of GET, never a body
+                    self.wfile.write(body)
+
+            def __getattr__(self, name):  # any method (TRACE, CONNECT, a made-up one) gets the same answer, not a 501
+                if name.startswith("do_"):
+                    return self._answer
+                raise AttributeError(name)
 
             def log_message(self, *_):
                 pass
@@ -2383,7 +2487,8 @@ class Starting:
         # whole life, so the port stayed taken after stop() and the real server's bind failed (address already in
         # use): the child closes its copy at once
         sock = self.httpd.socket
-        os.register_at_fork(after_in_child=sock.close)
+        if hasattr(os, "register_at_fork"):
+            os.register_at_fork(after_in_child=sock.close)
 
     def stop(self):
         if self.httpd is not None:
@@ -2430,12 +2535,14 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         return JSONResponse(body, status_code=status)
 
     async def systemone(request):
+        t = time.perf_counter()
+        counts["requests"] += 1  # (a body that is not JSON counts too, as on /v1/decisions)
         try:
             body = await request.json()
-        except ValueError as e:  # not JSON (or not UTF-8)
+        except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
+            counts["failed"] += 1
+            counts["seconds"] += time.perf_counter() - t
             return failed(RequestError(f"the request body is not valid JSON: {e}"))
-        t = time.perf_counter()
-        counts["requests"] += 1
         try:
             return JSONResponse(await srv.serve(body))
         except Exception as e:  # noqa: BLE001
@@ -2452,7 +2559,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         try:
             try:
                 body = await request.json()
-            except ValueError as e:  # not JSON (or not UTF-8)
+            except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
                 raise RequestError(f"the request body is not valid JSON: {e}") from None
             s1, specs = dec.to_systemone(body)
             return JSONResponse(dec.to_decision(await srv.serve(s1), specs))
@@ -2476,7 +2583,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                                            certified_table(srv.cal),
                                            context={"limit": srv.context[0] if srv.context else None,
                                                     "overflow": srv.overflow, "truncate_head": srv.trunc_head},
-                                           adapter=srv.adapter.identity if getattr(srv, "adapter", None) else None))
+                                           adapter=srv.adapter.identity if getattr(srv, "adapter", None) else None,
+                                           buckets=srv.cal.get("temperature_per_bucket")))
 
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})
@@ -2516,6 +2624,24 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                        [({}, st["prefix_hits"])]),
                       ("basal_state_cache_evictions_total", "states evicted for the budget", "counter",
                        [({}, st["evictions"])])]
+                if "disk_entries" in st:  # --state-cache-dir
+                    m += [("basal_state_cache_disk_bytes", "bytes of state files on disk", "gauge",
+                           [({}, st["disk_bytes"])]),
+                          ("basal_state_cache_disk_budget_bytes", "--state-cache-disk-gb", "gauge",
+                           [({}, st["disk_budget_bytes"])]),
+                          ("basal_state_cache_disk_entries", "state files on disk", "gauge", [({}, st["disk_entries"])]),
+                          ("basal_state_cache_disk_loads_total", "states read from disk", "counter",
+                           [({}, st["disk_loads"])]),
+                          ("basal_state_cache_disk_prefix_loads_total", "states read from disk as a prefix", "counter",
+                           [({}, st["disk_prefix_loads"])]),
+                          ("basal_state_cache_disk_writes_total", "state files written", "counter",
+                           [({}, st["disk_writes"])]),
+                          ("basal_state_cache_disk_write_drops_total", "state files not written (queue full)",
+                           "counter", [({}, st["disk_write_drops"])]),
+                          ("basal_state_cache_disk_errors_total", "state files that could not be written or read",
+                           "counter", [({}, st["disk_errors"])]),
+                          ("basal_state_cache_disk_evictions_total", "state files evicted for the disk budget",
+                           "counter", [({}, st["disk_evictions"])])]
             m.append(("basal_state_cache_snapshot_timestamp_seconds", "Unix time of the cache values above (0: none "
                       "read yet)", "gauge", [({}, cache_seen["at"])]))
         return PlainTextResponse(prometheus(m), media_type="text/plain; version=0.0.4")
@@ -2531,6 +2657,9 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             yield
         for task in tasks:
             task.cancel()
+        cache = getattr(srv.backend, "state_cache", None)
+        if cache is not None:  # --state-cache-dir: the states queued for writing reach the disk
+            cache.close()
 
     routes = [Route("/v1/systemone", systemone, methods=["POST"]), Route("/v1/basal", systemone, methods=["POST"]),
               Route("/v1/decisions", decisions, methods=["POST"]), Route("/v1/models", models),
@@ -2567,8 +2696,10 @@ def main():
     attn = getattr(srv.backend, "attn", None)
     rows = getattr(srv.backend, "compact_kernel", None)  # compact rows: their kernel, and the template prefix with them
     fwd = getattr(srv.backend, "forward", None)  # MLX: basal's forward (what it merged) or mlx-lm's
+    conv = getattr(srv.backend, "conv_kernel", None)  # Qwen3.5: the Gated DeltaNet convolution's kernel
     info = (f" attention {attn}" if attn else "") + (f" compact rows {rows}" if rows else "") \
         + (" template prefix" if rows and getattr(srv.backend, "template", None) else "") \
+        + (f" convolution {conv}" if conv else "") \
         + (f" forward {fwd}" if isinstance(fwd, str) else "") \
         + (" compute bfloat16" if getattr(srv.backend, "compute", None) == "bfloat16" else "") \
         + (f" adapter {srv.adapter.name} ({srv.backend.adapter_modules} layers)" if srv.adapter else "") \

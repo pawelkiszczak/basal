@@ -24,6 +24,7 @@ quadrature with M >= n nodes integrates them exactly up to rounding; all prefixe
 import builtins
 import hashlib
 import json
+import math
 from functools import lru_cache
 
 import numpy as np
@@ -160,6 +161,8 @@ def validate(name, objective, keys, threshold=None, min=None, max=None, exclusiv
     n = len(keys)
     if objective not in OBJECTIVES:
         raise ValueError(f"question {name!r}: objective must be one of {list(OBJECTIVES)}, got {objective!r}")
+    if objective in ("iou", "f1") and n > 256:  # (expected_scores; refused after the engine's run before)
+        raise ValueError(f"question {name!r}: objective {objective!r} takes at most 256 labels, got {n}")
     if exclusive is not None:
         if not isinstance(exclusive, list) or not all(isinstance(e, str) for e in exclusive):
             raise ValueError(f"question {name!r}: exclusive must be a list of label keys")
@@ -175,6 +178,15 @@ def validate(name, objective, keys, threshold=None, min=None, max=None, exclusiv
                 or not 0 <= fallback_threshold <= 1:
             raise ValueError(f"question {name!r}: fallback_threshold must be a number in 0..1")
     if objective == "threshold":
+        if threshold is not None:
+            try:
+                finite = math.isfinite(float(threshold))  # the legacy coercion ("0.25") stays; NaN and inf are refused
+            except OverflowError:
+                finite = False  # an integer beyond the largest float (10**400) is as infinite as inf
+            except (TypeError, ValueError):
+                finite = True  # not a number at all: refused below with "could not convert", as before
+            if not finite:
+                raise ValueError(f"question {name!r}: threshold must be a finite number, got {threshold!r}")
         for k, v in (("min", min), ("max", max)):
             if v is not None:
                 try:

@@ -38,6 +38,7 @@ only these temperatures: thresholds, coverage and the engine-level types (act, m
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -89,6 +90,19 @@ def _lit(text):
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") + '"'
 
 
+STRING_T = '(t ~ "")'  # the option as a string, whatever the label or description was
+
+
+def _fang(var, specials):
+    """Jinja expression for `var` as basal-serve shows it after prompt.defang (each special token broken by a
+    zero-width space after its first character)."""
+    from .prompt import _ZWSP
+
+    for n in specials:
+        var = f"{var}.replace({_lit(n)}, {_lit(n[0] + _ZWSP + n[1:])})"
+    return var
+
+
 def chat_frame(tok):
     """The model's chat template around one system and one user message, with the generation prompt as basal renders
     it (no thinking): (before the system text, between the two, after the user text, whether the template trims the
@@ -107,11 +121,13 @@ def chat_frame(tok):
     return head, mid, tail, trims
 
 
-def systemone_template(head, mid, tail, trims=False):
+def systemone_template(head, mid, tail, trims=False, specials=()):
     """basal prompt format 2 (canonical layout, one option order) as a template for llama.cpp's /v1/systemone. Its
     variables: state, instructions (text or JSON), type, options [{key, description}] in the order llama.cpp reads the
     labels A, B, ... (a choice in request order, noul true then false, score levels low to high). `trims`: the chat
-    template strips the user text (llama.cpp's trim strips ASCII whitespace only, Python's strip all of it)."""
+    template strips the user text (llama.cpp's trim strips ASCII whitespace only, Python's strip all of it).
+    `specials`: the special tokens of the tokenizer (prompt.special_names), broken in the state, the question and the
+    options as prompt.defang does."""
     from .prompt import CODES, PL_CHARS, PREFILL, TEMPLATES_2
 
     def turn(lang):
@@ -133,6 +149,9 @@ def systemone_template(head, mid, tail, trims=False):
         "{%- set ns = namespace(pl=false, opts=\"\") -%}",
         f"{{%- set s = {text('state')} -%}}",
         f"{{%- set q = {text('instructions')} -%}}",
+        # a request text cannot write a special token of the tokenizer (prompt.defang); Polish letters are not changed
+        f"{{%- set s = {_fang('s', specials)} -%}}",
+        f"{{%- set q = {_fang('q', specials)} -%}}",
         # Polish when the state has a Polish letter, else when the question has one (basal-serve's rule)
         f"{{%- for c in [{pl}] -%}}{{%- if c in s -%}}{{%- set ns.pl = true -%}}{{%- endif -%}}{{%- endfor -%}}",
         "{%- if not ns.pl -%}",
@@ -156,6 +175,7 @@ def systemone_template(head, mid, tail, trims=False):
         "{%- elif d is none -%}{%- set t = k -%}",
         f"{{%- else -%}}{{%- set t = k ~ \": \" ~ {text('d')} -%}}",
         "{%- endif -%}",
+        f"{{%- set t = {_fang(STRING_T, specials)} -%}}",
         "{%- set ns.opts = ns.opts ~ (\"\" if loop.first else \"\\n\") ~ codes[loop.index0] ~ \". \" ~ t -%}",
         "{%- endfor -%}",
         "{%- if ns.pl -%}{{- " + turn("pl") + " -}}{%- else -%}{{- " + turn("en") + " -}}{%- endif -%}"])
@@ -267,7 +287,9 @@ def systemone_metadata(model_dir, calibration=None):
         raise ValueError("--systemone needs a prompt-format-2 model in the canonical layout, read one way, without "
                          "isolated options (its basal.json)")
     tok = AutoTokenizer.from_pretrained(model_dir)
-    template = systemone_template(*chat_frame(tok))
+    from .prompt import special_names
+
+    template = systemone_template(*chat_frame(tok), specials=special_names(tok))
     check_systemone(tok, template)
     cal_path = systemone_calibration(model_dir, calibration)
     temps = systemone_temperatures(json.loads(cal_path.read_text(encoding="utf-8")))
@@ -366,10 +388,12 @@ def main(argv=None):
             if done.returncode != 0:
                 sys.exit(f"basal-export-gguf: llama.cpp's converter failed (exit {done.returncode}); "
                          "see its output above")
-        try:
-            ranked, total = fix_gguf(raw, out, model_dir, decision)
+        part = Path(tmp) / out.name  # written in full first, then renamed: an interrupted export leaves no
+        try:  # truncated file under the output's name (nor overwrites an older one)
+            ranked, total = fix_gguf(raw, part, model_dir, decision)
         except ValueError as e:
             sys.exit(f"basal-export-gguf: {e}")
+        os.replace(part, out)
     print(f"wrote {out}: {ranked}/{total} token scores from BPE merges, add_space_prefix=false")
     if decision:
         print(f"  decision model for /v1/systemone ({SYSTEMONE_TYPE}, at most {SYSTEMONE_MAX_OPTIONS} options), "

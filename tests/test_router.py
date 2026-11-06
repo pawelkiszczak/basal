@@ -196,6 +196,47 @@ def test_starting_answers_503_then_frees_the_port():
         s.bind(("127.0.0.1", port))
 
 
+def _raw_request(port, request):
+    """The bytes the server sends back for a raw request over a plain socket (no client library hides the body)."""
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as c:
+        c.sendall(request)
+        data = b""
+        while chunk := c.recv(4096):
+            data += chunk
+    return data.partition(b"\r\n\r\n")
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH", "TRACE", "CONNECT",
+                                    "PROPFIND"])
+def test_starting_answers_every_http_method_with_503_and_retry_after(method):
+    """A router or a load balancer may probe with any method: PUT, DELETE, OPTIONS and PATCH used to get the standard
+    library's 501 HTML page without Retry-After, the others the 503; TRACE, CONNECT and made-up methods still did.
+    HEAD sends the status and the headers only, never the body (checked on the raw socket)."""
+    st = S.Starting("127.0.0.1", 0)  # port 0: the system picks a free one, no race with another process
+    try:
+        port = st.httpd.server_address[1]
+        head, _, body = _raw_request(port, f"{method} /health HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n".encode())
+        lines = head.decode().split("\r\n")
+        headers = {k.lower(): v for k, v in (ln.split(": ", 1) for ln in lines[1:])}
+        assert lines[0].split()[1] == "503" and headers["retry-after"] == "5"
+        assert headers["content-type"] == "application/json"
+        if method == "HEAD":
+            assert body == b""
+        else:
+            assert json.loads(body) == {"status": "starting"}
+    finally:
+        st.stop()
+
+
+def test_starting_needs_no_fork_hook_where_the_platform_has_none(monkeypatch):
+    """Native Windows has no os.register_at_fork: basal-serve died with AttributeError before loading the model."""
+    monkeypatch.delattr(os, "register_at_fork", raising=False)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    S.Starting("127.0.0.1", port).stop()
+
+
 def _sleep(seconds):
     time.sleep(seconds)
 
@@ -411,7 +452,6 @@ def test_replicas_end_when_the_router_is_killed(tmp_path):
     assert _gone(pids), "a replica outlived a killed router"
 
 
-@posix
 def test_router_exits_1_when_every_replica_exited(tmp_path):
     port, rport = _free_port(), _free_port()
     p = subprocess.Popen([sys.executable, "-c", ROUTER, EXITER, "--gpus", "0,1", "--port", str(port),
@@ -974,6 +1014,30 @@ def test_key_headers_are_the_last_authorization_and_x_api_key():
            (b"content-type", b"text/plain")]
     assert R.key_headers(raw) == {"authorization": b"Bearer a", "x-api-key": b"k2"}
     assert R.key_headers([(b"content-type", b"application/json")]) == {}
+    # a value with surrounding whitespace ("Bearer " with no token) is no valid HTTP header to send on: the router
+    # answered 502 instead of the replica's 401
+    assert R.key_headers([(b"authorization", b"Bearer "), (b"x-api-key", b" k\t")]) == {"authorization": b"Bearer",
+                                                                                         "x-api-key": b"k"}
+
+
+def test_router_passes_client_errors_on_to_the_replica():
+    """A state with a lone surrogate and a body nested too deeply for the parser are the replica's client errors to
+    answer; the router failed on them with 500 (hashing the routing key, reading the state)."""
+    seen = []
+
+    def handler(req):
+        if req.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        seen.append(len(req.content))
+        return httpx.Response(422, json={"error": "client error", "code": "INVALID_REQUEST"})
+    rt = R.Router(["http://r0"], transport=httpx.MockTransport(handler))
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        deep = b'{"state": ' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+        for body in (b'{"state": "a \\ud800 b", "questions": {}}', deep):
+            r = c.post("/v1/systemone", content=body, headers={"content-type": "application/json"})
+            assert r.status_code == 422 and r.json()["code"] == "INVALID_REQUEST"
+    assert len(seen) == 2
 
 
 def test_router_passes_api_keys_on_to_replicas_with_api_keys(tmp_path):
@@ -1002,7 +1066,7 @@ def test_router_passes_api_keys_on_to_replicas_with_api_keys(tmp_path):
             name, value = next(iter(headers.items()))
             assert [h[name.lower()] for h in (seen["small"][-1], seen["big"][-1])] == [value, value]
         assert c.get("/v1/models").status_code == 401
-        assert c.get("/v1/models", headers={"X-API-Key": KEY}).json() == {"object": "list", "data": [{"id": "big"}]}
+        assert c.get("/v1/models", headers={"X-API-Key": KEY}).json() == {"object": "list", "data": [{"id": "small"}]}
     assert len(seen["llm"]) == 2 and not any({"authorization", "x-api-key"} & set(h) for h in seen["llm"])
     assert keys.usage()[0]["last_used"] is not None
 

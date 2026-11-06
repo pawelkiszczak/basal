@@ -82,15 +82,22 @@ benchmarking a GPU.
   minutes the first time, about half with a warm compile cache). A request with several branches (option orders,
   questions, `multi` labels) runs in two exact passes: the state once, keeping its keys and values, then all branches
   over them ([SOAM.md](SOAM.md#which-kernel-runs)).
-- **Prepared start-up** (2.5): `basal-prepare --model <model> [--mode fast|fp8|nvfp4]` starts the engine once on this GPU
-  and saves what it compiled (Inductor's kernels and autotuning results, and for Qwen3.5 models the configs fla's
-  kernels picked) under `~/.cache/basal/prepared/<key>` (or `--out`). `basal-serve --prepared auto` (the default) loads
-  such a directory before compiling when its key matches: the GPU, the torch / triton / fla / CUDA and basal versions
-  (a basal patch release that changes no compiled code keeps the key: 2.5.1 loads 2.5.0's directories), the model's
-  architecture (config.json; fine-tunes of one architecture share it), the mode, dtype and attention. A
-  model may ship its own under `prepared/<key>/`. Then the server compiles nothing it has not seen and picks the same
-  kernels in every start; CUDA graphs are still captured. `--prepared off` compiles as before; `--prepared <dir>`
-  loads that directory or refuses to start.
+- **Prepared start-up** (2.5): `basal-prepare --model <model> [basal-serve's engine flags]` starts the engine once on
+  this GPU as `basal-serve` starts it with those flags (its defaults included: on Hopper compact rows with the template
+  prefix; give the flags the server will run with, such as `--mode fp8`, `--batches compact` or `--compile-scope
+  layer`) and saves what it compiled (Inductor's kernels and autotuning results, and for Qwen3.5 models the configs
+  fla's kernels picked) under `~/.cache/basal/prepared/<key>` (or `--out`). `basal-serve --prepared auto` (the
+  default) loads such a directory before compiling when its key matches: the GPU, the torch / triton / fla / CUDA and
+  basal versions (a basal patch release that changes no compiled code keeps the key: 2.5.1 loads 2.5.0's directories),
+  the model's architecture (config.json; fine-tunes of one architecture share it), the mode, dtype and attention. The
+  other engine flags are not in the key: preparing again with other flags adds their kernels to the same directory
+  (one `inductor*.bin` per flag set, all loaded), and a start with flags it was not prepared with compiles what it
+  lacks. A model may ship its own under `prepared/<key>/`. Then the server compiles nothing it has not seen
+  and picks the same kernels in every start; CUDA graphs are still captured. `--prepared off` compiles as before;
+  `--prepared <dir>` loads that directory or refuses to start. Compiled kernels are code the compiler cache runs, so
+  the ones a Hugging Face repository ships load only for trusted publishers: `BASAL_PREPARED_TRUST` (comma-separated
+  owners, `*` for every one; default `Remek`). A local model directory, `--prepared <dir>` and what `basal-prepare`
+  wrote on this machine are trusted as they are.
 - **Batching**: concurrent requests are batched into the same forward passes and every request is answered as soon as
   its passes are read out. Under load the server waits up to `--batch-window-ms` (default 3) for as many requests as
   the previous batch had; an idle server answers at once. `--max-batch` and `--wait-ms` control batching further.
@@ -189,9 +196,13 @@ benchmarking a GPU.
     `--state-cache-gb N` (a state cache across requests; 2.3.1: also for states that begin with a cached one, e.g.
     agent traces, which then compute only their new tokens; 2.5: `--state-cache-bits 8` keeps ~1.7x as many
     states per GB, answers close to the uncached ones; `--state-cache-lock on` removes a rare HTTP 500 under
-    concurrent requests at ~8% of the throughput at 8 clients, see WHATS_NEW 2.5's known limits), `--prefix-cache`,
-    `--long-lane`. Measurements:
-    [HARDWARE.md](HARDWARE.md#kernels-of-the-cuda-graph-engine-one-h100).
+    concurrent requests at ~8% of the throughput at 8 clients, see WHATS_NEW 2.5's known limits; `--state-cache-dir
+    DIR`: also every cached state as a `.safetensors` file under DIR, one subdirectory per model signature, read back
+    on a memory miss and by later servers over the same directory, here and on `--mode mlx`, not for Qwen3.5;
+    `--state-cache-disk-gb G` bounds it, default 20, least recently used files out first; each engine reads only the
+    files it wrote), `--prefix-cache`, `--long-lane`. Measurements:
+    [HARDWARE.md](HARDWARE.md#kernels-of-the-cuda-graph-engine-one-h100),
+    [disk tier](HARDWARE.md#state-cache-disk-tier).
 - **vLLM options (2.3):** `--vllm-preset default | deterministic` (deterministic: batch-invariant kernels, no prefix
   cache, no chunked prefill; repeatable answers at a throughput cost) loads `CALIBRATION.vllm.<preset>.json` when the
   model ships one, else `CALIBRATION.vllm.json`, else `CALIBRATION.json`, and is reported in `GET /v1/models`;
@@ -228,8 +239,8 @@ benchmarking a GPU.
 
   `basal-fuse-adapter` rewrites the model's safetensors files with the decoder layers' weights merged as `--adapter`
   merges them at load (the same tensor names, dtypes and shards) and copies the other files, except the base model's
-  `CALIBRATION` files, NVFP4 activation scales and checksums, which do not hold for the merged weights. It reads one
-  weights file at a time.
+  `CALIBRATION` files, NVFP4 activation scales, evidence head and checksums, which do not hold for the merged
+  weights. It reads one weights file at a time.
 
   The merge is PEFT's `merge_and_unload` on every framework: `(B @ A) · scale` in float32, added to the weight in
   float32 and rounded once to the weight's dtype. The update is computed once on the CPU for every engine (the graph
@@ -457,8 +468,9 @@ basal-serve --model Remek/basal-omni-1.0-mini --mode fast --ui on   # then open 
 `--ui full` also shows the requests themselves: a click on a row of the recent requests opens the request as it was
 sent and its answer (or the error). The server keeps references to the last 200 requests' bodies (images included) and
 answers in memory, with no copy and nothing on disk, and serialises one only when the page asks for it
-(`GET /ui/request/<id>`). That text is visible to whoever can open the page: on a shared host use `--api-keys`. `--ui on`
-never keeps a request's text.
+(`GET /ui/request/<id>`). That text is visible to whoever can open the page: on a shared host use `--api-keys`, with
+which a kept request opens only for the key that sent it or an admin key (`"admin": true`; another client's key gets
+403). `--ui on` never keeps a request's text.
 
 **Open one page at a time.** What the page costs a request: one append of its metadata to a ring in memory (0.3 µs on an
 Apple M4 Pro's CPU, 0.7 µs on the H100 host's). The rest (totals, percentiles, rates, the configuration view) is computed when a page reads
@@ -549,6 +561,9 @@ reaches (`--replicas`, `--escalate`, `--blend`, `--route`; never to the `--fallb
 `BASAL_FALLBACK_API_KEY` if set). Give every replica the same `--api-keys` file (with `--gpus`, after `--`). The router
 checks no key itself: its `GET /health` and `/metrics` stay open (replica URLs and counters, no answers), and the key
 goes to the replicas over plain HTTP unless their URLs are HTTPS, so keep them on loopback or a private network.
+The router also passes the request's `X-Request-Id` (the client's, or a `req_<hex>` it makes) to every replica the
+request reaches and answers with it as `x-request-id`, so one request has one id in the client's and the replicas'
+logs.
 
 ## Inference on a JSONL file
 
@@ -575,8 +590,12 @@ Each input line is either a **simple item** or a **full request** (the formats c
 
 Simple items are sent with placeholder keys and `"option_keys": "hide"`, so the model sees exactly the option texts.
 Each output line contains `id`, the full `answers` (probabilities, confidence) and the server `latency_ms`; simple items
-also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. At the
-end `basal-run` prints a summary (items per second, median latency and accuracy if gold labels are present).
+also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. A line
+that is not valid (not JSON, a simple item without options) or whose request fails gets `error`, and the run goes on.
+Answers are written as they arrive, in input order, to `<output>.part`, which becomes `<output>` at the end (an
+interrupted run keeps its answers so far there). An existing `--output` file is replaced when the run ends (an
+interrupted run leaves it as it was); `--output` cannot be the `--input` file. At the end `basal-run` prints a summary
+(items per second, median latency and accuracy if gold labels are present).
 Ready-to-run examples (Polish and English) in `basal/examples/` of the repository, also installed with the package
 (`$EX` above):
 
@@ -610,7 +629,7 @@ review = llamaindex_tool("http://127.0.0.1:8000", preset="compliance", lang="en"
   `crewai_tool` a CrewAI `BaseTool` (whose result is the answers as JSON text).
 - Without a preset the tool takes `state` and `questions`: the HTTP API's questions object ([API.md](API.md)); JSON
   text is accepted too. With `preset=` the questions are fixed and the agent passes only the state; `lang="pl"` or
-  `"en"` picks the wording (default: the language of the state).
+  `"en"` picks the wording (default: the `lang` of the `client=` given, else the language of the state).
 - The frameworks are not dependencies of basal: install the one you use (`uv pip install langchain-core`,
   `llama-index-core` or `crewai`). An adapter whose framework is missing says which package to install.
 - MCP hosts need no adapter: `basal-serve --mcp on` serves the same decisions at `/mcp`, and `basal-mcp` is a stdio
@@ -629,8 +648,11 @@ basal-run --list-presets
 basal-run --preset triage --input tickets.jsonl --output out.jsonl     # input lines: {"state": "..."}; --lang pl|en
 ```
 
-In Python: `Basal(url).preset(state, "triage")` (`from basal.client import Basal`). A preset holds plain HTTP-API
-questions, so it is a starting point: copy one and edit it for your own rules.
+In Python: `Basal(url).preset(state, "triage")` (`from basal.client import Basal`). The wording is in the `lang`
+given, else in the client's (`Basal(url, lang="pl")`), else in the language of the state: Polish when it has more
+signs of Polish (diacritics, common words such as `nie`, `jest`, `czy`, also typed without diacritics) than common
+English words. A preset holds plain HTTP-API questions, so it is a starting point: copy one and edit it for your own
+rules.
 
 ### Guardrails and routing (2.5)
 
@@ -653,9 +675,13 @@ b.route(ticket)  # {"route": "billing" | ... | "human", "complexity": "moderate"
 **Policies.** `strict` and `permissive` (`presets.POLICIES`) map each hazard to an action: `jailbreak`, `policy_break`
 and `harmful` block, `self_harm` is `support` (show help, do not just refuse), `medical` is a review under `strict` and
 allowed under `permissive`. `severity` blocks from level 2 (`strict`) or 3 (`permissive`), and sends level 1 or 2 to
-review. The precedence is fixed: **support > block > review > pass**, over all checks. A missing answer (a skipped
-question) is a review, never a pass. A policy is a plain dict (`act_at`, `review_at`, `severity`, `hazards`): pass your own
-to `guard(answers, policy)`.
+review. The precedence is fixed: **support > block > review > pass**, over all checks. Every question of the battery
+must be answered: a missing or null answer, and a malformed one (a yes/no probability that is not a finite number in
+[0, 1], a severity without its level probabilities, with `max_error` an answer without a true / false `abstain`), is a
+review, never a pass. The battery is the built-in one of the answers (`guard_output` when they hold `policy_break`,
+else `guard_input`); a battery of your own, or an intentional part of one, is named with
+`guard(answers, policy, expect=["harmful", "spam"])` (TypeScript: the fourth argument). A policy is a plain dict
+(`act_at`, `review_at`, `severity`, `hazards`): pass your own to `guard(answers, policy)`.
 
 **Where the thresholds come from.** Two modes:
 

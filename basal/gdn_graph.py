@@ -21,7 +21,7 @@ readout, and changes three things:
 
 The layers are transformers' own modules (projections, norms, MLP, rotary embedding); the Gated DeltaNet kernel is fla's
 (flash-linear-attention), as in the eager reference. Not here (refused before loading, with what to use instead): fp8 /
-nvfp4, compact rows, the prefix cache, template prefixes, --readout-layer on, --lean, the long lane.
+nvfp4.
 - **State cache** (--state-cache-gb, 2.5): a request cut at its state boundary keeps its root as a full-state checkpoint:
   the attention layers' keys and values of the state and, per Gated DeltaNet layer, the recurrent state and convolution
   tail after its last token. A later request with the same state copies them where pass 1 would have written them and
@@ -34,6 +34,7 @@ import functools
 import inspect
 import json
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -50,19 +51,22 @@ GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
 GDN_LAYERS = {"linear_attention", "full_attention"}
 
 
-def _decoder_config(model_dir):
-    """config.json of a model directory, the decoder part (text_config of a multimodal wrapper); None if unreadable."""
+def _decoder_config(model_dir, strict=False):
+    """config.json of a model directory, the decoder part (text_config of a multimodal wrapper); None if unreadable
+    (strict: one that exists but cannot be read or parsed raises instead)."""
     try:
         cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError) as e:
+        if strict and not isinstance(e, FileNotFoundError):
+            raise
         return None
     return cfg.get("text_config") or cfg
 
 
-def is_gdn(model_dir):
+def is_gdn(model_dir, strict=False):
     """A Qwen3.5 decoder of Gated DeltaNet and full-attention layers (what GDNGraphBackend serves), from config.json.
     Other recurrent models (Qwen3-Next, Mamba and hybrids) stay refused by the graph engine."""
-    c = _decoder_config(model_dir)
+    c = _decoder_config(model_dir, strict)
     if not c or c.get("model_type") not in GDN_MODEL_TYPES:
         return False
     kinds = set(c.get("layer_types") or ())
@@ -79,12 +83,17 @@ def fla_rule():
 
 
 def refused(quant=None, state_cache_gb=0, prefix=False, batches="default", lean=False, tree="dense",
-            readout_layer="off", template="off", device=True):
+            readout_layer="off", template="off", device=True, disk=False):
     """Why GDNGraphBackend cannot serve a Qwen3.5 model with these settings (None: it can), before anything is loaded.
-    device: also check for a CUDA GPU and fla (the server checks the settings before the download, the engine both).
+    Only quantisation is refused: the state cache, the prefix cache, compact rows, template prefixes and the long lane
+    run since 2.5 (their arguments stay for the callers). device: also check for a CUDA GPU and fla (the server checks
+    the settings before the download, the engine both).
     --lean / --tree flex change nothing here, as for basal-omni's Gemma 4 forward: Qwen35Graph is lean already (one
     compiled function per layer kind, called with each layer's weights), and its pass 2 has no trie mask (one row per
-    leaf)."""
+    leaf). disk (--state-cache-dir): its cached states carry recurrent states, not the files' keys / values layout."""
+    if disk:
+        return ("--state-cache-dir is not available for Qwen3.5 (Gated DeltaNet) models: their cached states carry "
+                "recurrent states, not only attention keys and values; serve them without it")
     if quant:
         return (f"--mode {quant} is not available for Qwen3.5 (Gated DeltaNet) models: the CUDA graph engine serves "
                 "them in bf16 (--mode fast); --mode vllm runs their FP8 checkpoints")
@@ -165,6 +174,18 @@ def fla_conv1d():
     return causal_conv1d
 
 
+def conv_kernel(cuda):
+    """The Gated DeltaNet convolution's kernel -> (fla's causal_conv1d or None, its name): on CUDA fla's where this fla
+    has it, else torch's conv1d (_conv; cuDNN on CUDA). torch's rounds differently (SiLU on the bf16 output, not in fp32
+    before the rounding) from fla's, the one --mode fast was checked with: on CUDA that fallback is said on stderr."""
+    conv = fla_conv1d() if cuda else None
+    if cuda and conv is None:
+        print("basal: warning: this flash-linear-attention has no causal_conv1d (fla.modules.conv.causal_conv1d): the "
+              "Gated DeltaNet convolution runs on torch's conv1d (cuDNN), which rounds differently from fla's kernel "
+              "--mode fast was checked with (flash-linear-attention 0.5.2)", file=sys.stderr, flush=True)
+    return conv, "fla causal_conv1d" if conv is not None else "torch conv1d"
+
+
 def fla_varlen():
     """fla's pieces for compact rows (prompts packed back to back in one row): the forward of its Gated DeltaNet rule
     and its l2 norm, which take the chunk indices of the packed prompts as an argument; None when this fla has no such
@@ -237,8 +258,9 @@ def _varlen_sdpa(q, k, v, cu, scale, layer=0, impl=None):
 # fla's Triton kernels pick their launch config by timing the candidates at the first launch of every shape key
 # (triton.autotune), so two starts of the server could pick different configs, round differently and give different
 # probabilities (and a new shape stalled a request while it was timed). FLA_CONFIGS holds the configs an H100 picked for
-# the keys basal's pass shapes use (fla_record): with it every fla kernel takes the recorded config of its key, and
-# its most common one for any other key, without timing. Only on the GPU and fla version it was recorded with.
+# the keys basal's pass shapes use (fla_record): with it every recorded fla kernel takes the recorded config of its
+# key, and its most common one for any other key, without timing (a kernel not in the table autotunes as before). Only
+# on the GPU and fla version it was recorded with.
 FLA_CONFIGS = Path(__file__).parent / "fla_configs.json"
 
 
@@ -301,7 +323,9 @@ class _PinnedCache(dict):
 def fla_pin(path=None):
     """Give fla's autotuners the recorded configs (see FLA_CONFIGS; a prepared start-up's own table replaces it,
     prepared.load) -> the number of kernels pinned, 0 when the table is for another GPU or fla version (they autotune
-    as before), or missing. BASAL_FLA_PIN=0 turns it off."""
+    as before), or missing. Only the kernels in the table are pinned: a kernel the recording never launched has no
+    measured config (its first candidate may not even fit the GPU), so it autotunes as without a table.
+    BASAL_FLA_PIN=0 turns it off."""
     path = path or FLA_CONFIGS
     if os.environ.get("BASAL_FLA_PIN", "1") != "1" or not Path(path).exists() or not torch.cuda.is_available():
         return 0
@@ -311,15 +335,14 @@ def fla_pin(path=None):
     if table.get("gpu") != torch.cuda.get_device_name() or table.get("fla") != fla.__version__:
         return 0
     n = 0
+    def cfg(d):
+        return Config(d["kwargs"], num_warps=d["num_warps"], num_stages=d["num_stages"], num_ctas=d["num_ctas"],
+                      maxnreg=d["maxnreg"])
     for name, t in _fla_autotuners().items():
         e = table["kernels"].get(name)
         if e is not None:
-            cfg = lambda d: Config(d["kwargs"], num_warps=d["num_warps"], num_stages=d["num_stages"],  # noqa: E731
-                                   num_ctas=d["num_ctas"], maxnreg=d["maxnreg"])
             t.cache = _PinnedCache({tuple(k): cfg(c) for k, c in e["keys"]}, cfg(e["default"]))
-        else:  # a kernel basal's passes never launched: its first candidate, so it is not timed either
-            t.cache = _PinnedCache({}, t.configs[0])
-        n += 1
+            n += 1
     return n
 
 
@@ -432,7 +455,7 @@ class Qwen35Graph:
                    gdn_out=lambda h, o, z, gw, out_w: _gdn_out(h, o, z, gw, out_w, geps),
                    att_in=lambda h, nw, w, qn, kn, cos, sin: _att_in(h, nw, w, qn, kn, cos, sin, eps, qs, d, rd),
                    att_out=_att_out, rms=lambda h, w: _rms(h, w, eps))
-        conv = fla_conv1d() if cuda else None  # on CUDA fla's kernel, uncompiled (Triton), in both modes
+        conv, self.conv_kernel = conv_kernel(cuda)  # on CUDA fla's kernel, uncompiled (Triton), in both modes
         self.conv, self.conv_sizes, self.cuda = conv, cs, cuda
         # compact rows (GDNGraphBackend sets them): the attention kernel, fla's varlen pieces, the template prefixes
         self.varlen = self.fla_v = self.template_kv = self.template_st = None
@@ -658,17 +681,18 @@ class GDNGraphBackend(GraphBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 device=None, global_attn="flex", adapter=None):
+                 device=None, global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
+                 state_cache_signature=None):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
         # engine; quantisation is refused here. graph_memory_gb: the pass-2 graphs captured, _pin_memory). device:
-        # "mps" / "cpu" (GDNMPSBackend: no CUDA graphs, uncompiled)
+        # "mps" / "cpu" (GDNMPSBackend: no CUDA graphs, uncompiled). state_cache_dir ..: refused (refused(disk=))
         if compile == "layer":
             raise ValueError(f"{model_dir}: --compile-scope layer: the bf16 Llama forward only (Qwen3.5's compiled "
                              "code is per layer kind already)")
         if compile:
             persist_compile_cache()  # before anything compiles (GraphBackend.__init__)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template,
-                      device is None)  # before loading
+                      device is None, disk=state_cache_dir is not None)  # before loading
         if state_cache_bits != 16 and not why:
             why = "--state-cache-bits 8 is for attention keys and values; recurrent states are cached as computed"
         if global_attn != "flex" and not why:
@@ -692,6 +716,9 @@ class GDNGraphBackend(GraphBackend):
             if fla_varlen() is None:
                 raise ValueError(f"{model_dir}: --batches compact needs flash-linear-attention's "
                                  "chunk_gated_delta_rule forward with chunk indices (flash-linear-attention 0.5)")
+            if fla_conv1d() is None:  # (compact rows call it with the chunk indices; there is no torch fallback)
+                raise ValueError(f"{model_dir}: --batches compact needs flash-linear-attention's causal_conv1d "
+                                 "(fla.modules.conv.causal_conv1d, flash-linear-attention 0.5.2)")
             # (fp32, which the FlashAttention kernels do not take: one SDPA call per prompt, no graph; the gates' fp32
             # rows)
             self.compact_kernel = ("sdpa per prompt" if dtype == "float32" else "fa3" if self.attn == "fa3"
@@ -704,6 +731,7 @@ class GDNGraphBackend(GraphBackend):
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL
         self.net = Qwen35Graph(self.model, compile=compile and cuda)
+        self.conv_kernel = self.net.conv_kernel  # (reported at start-up)
         self.fla_pinned = fla_pin() if cuda else 0  # (after Qwen35Graph imported fla's kernels)
         self.fwd, self.fwd_sfx = self.net.forward, self.net.forward_suffix
         if self.compact:

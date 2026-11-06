@@ -161,6 +161,41 @@ describe("errors", () => {
   });
 });
 
+describe("errors through the whole response (a fetch of the test's own)", () => {
+  const respond = (body, status = 200) => async () => new Response(body, { status });
+  const stream = (start) => new ReadableStream({ start });
+
+  test("a body that stalls after the headers is a timeout, one that breaks is a network error", async () => {
+    const stall = async (_u, init) => new Response(stream((c) => init.signal.addEventListener("abort", () => c.error(init.signal.reason))));
+    await assert.rejects(new Basal({ fetch: stall, timeout: 0.05 }).health(), (e) => e instanceof BasalError && e.kind === "timeout" && e.retryable);
+    const broken = respond(stream((c) => { c.enqueue(new TextEncoder().encode('{"sta')); c.error(new TypeError("socket hang up")); }));
+    await assert.rejects(new Basal({ fetch: broken }).health(), (e) => e instanceof BasalError && e.kind === "network" && /socket hang up/.test(e.detail));
+  });
+
+  test("the caller's abort while the body is read passes through", async () => {
+    const ac = new AbortController();
+    const slow = async (_u, init) => new Response(stream((c) => {
+      init.signal.addEventListener("abort", () => c.error(init.signal.reason));
+      setTimeout(() => ac.abort(new Error("mine")), 10);
+    }));
+    await assert.rejects(new Basal({ fetch: slow }).health(ac.signal), (e) => !(e instanceof BasalError) && e.message === "mine");
+  });
+
+  test("statuses and malformed JSON keep their kinds; only 503 is retryable", async () => {
+    await assert.rejects(new Basal({ fetch: respond("not json") }).health(), (e) => e.kind === "server" && e.status === 200 && !e.retryable);
+    for (const [status, kind, retryable] of [[422, "validation", false], [500, "server", false], [503, "unavailable", true],
+      [429, "server", false], [502, "server", false], [504, "server", false]])
+      await assert.rejects(new Basal({ fetch: respond('{"error": "x"}', status) }).health(),
+        (e) => e.status === status && e.kind === kind && e.retryable === retryable && e.detail === "x");
+  });
+
+  test("a timeout that is not a number of seconds > 0 is refused; a fraction of a millisecond is rounded", async () => {
+    for (const timeout of [0, -1, NaN, Infinity, "5", 5e9]) assert.throws(() => new Basal({ timeout }), RangeError, String(timeout));
+    const ok = respond('{"status": "ok", "running": 0, "queued": 0}');
+    assert.equal((await new Basal({ fetch: ok, timeout: 0.0015 }).health()).status, "ok");
+  });
+});
+
 describe("request bodies (a recording fetch)", () => {
   const recorder = (answers) => {
     const seen = [];
@@ -216,10 +251,31 @@ describe("presets", () => {
 
   test("guard() and route() decide as the Python functions on the shared cases", () => {
     for (const c of fixture.guard)
-      assert.deepEqual(guard(c.answers, c.policy, c.max_error ?? undefined), c.expect, JSON.stringify(c).slice(0, 80));
+      assert.deepEqual(guard(c.answers, c.policy, c.max_error ?? undefined, c.battery ?? undefined), c.expect,
+        JSON.stringify(c).slice(0, 80));
     assert.deepEqual(POLICIES, fixture.policies);
     for (const c of fixture.route) assert.deepEqual(route(c.answers, 0.6, c.max_error ?? undefined), c.expect);
     assert.throws(() => guard({}, "lax"), /unknown policy/);
+  });
+
+  test("guard() and route() never pass a non-finite or out-of-range probability", () => {
+    const noul = (p) => ({ type: "noul", noul: p, probabilities: { true: p, false: 1 - p }, confidence: 0.9 });
+    const base = () => ({ jailbreak: noul(0), harmful: noul(0), medical: noul(0), self_harm: noul(0),
+      severity: { type: "score", probabilities: { 0: 0.97, 1: 0.01, 2: 0.01, 3: 0.01 }, confidence: 0.97 } });
+    assert.equal(guard(base()).action, "pass");
+    for (const bad of [NaN, Infinity, -Infinity, -0.1, 1.1]) {
+      const a = base();
+      a.harmful = noul(bad);
+      assert.equal(guard(a).action, "review", String(bad));
+      assert.equal(guard(a).checks.harmful.why, "malformed answer");
+      const s = base();
+      s.severity.probabilities = { 0: bad, 1: 0.1 };
+      assert.equal(guard(s).action, "review", String(bad));
+      const comp = { probabilities: { 0: 0.2, 1: 0.8 } };
+      assert.equal(route({ intent: { choice: "billing", confidence: bad }, complexity: comp }).route, "human");
+    }
+    assert.equal(guard({}).action, "review");
+    assert.equal(guard({ harmful: noul(0) }, "strict", undefined, ["harmful"]).action, "pass");
   });
 
   test("guard() asks the battery with max_error and returns the decision with the answers", async () => {

@@ -25,6 +25,14 @@ def tiny():
     return m
 
 
+def eager_shared(be, pack, lids):
+    """Readout of one packed row in a single eager masked forward (the reference for the masked graphs)."""
+    t, pp, sg, last, par = pack
+    h = be._forward_masked(torch.tensor([t], device=be.dev), be._mask_from_seg(torch.tensor([sg], device=be.dev), [par]),
+                           torch.tensor([pp], device=be.dev))[0, last]
+    return be._readout(h, lids)
+
+
 def separate(m, toks, lids):
     """Reference: one forward per prompt, full log-softmax over the vocabulary, softmax over the letters."""
     out = []
@@ -86,7 +94,7 @@ def test_soam_many_branches_equal_separate():
         be.LENS = lens
         units = be._units([(toks, lids)])
         assert len(units) == 1
-        probs = [be._eager_shared(pk, ul) if lens == [64] else be._long(pk, ul) for pk, ul, k, a in units]
+        probs = [eager_shared(be, pk, ul) if lens == [64] else be._long(pk, ul) for pk, ul, k, a in units]
         res = GraphBackend._assemble([(toks, lids)], units, probs)[0]
         for r, e in zip(res, ref):
             assert torch.allclose(torch.tensor(r), e, atol=1e-5)
@@ -259,7 +267,8 @@ def test_graph_engine_keeps_the_compile_cache_across_reboots_unless_set(monkeypa
 
     import basal
     from basal.engine import GraphBackend
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(tmp_path / "home"))
     mine, tmp_default = tmp_path / "mine", default_cache_dir()
     default = tmp_path / "home" / ".cache" / "basal" / "torchinductor"
     for given, preset, compile, want in ((False, None, True, default), (False, tmp_default, True, default),
@@ -278,7 +287,7 @@ def test_graph_engine_keeps_the_compile_cache_across_reboots_unless_set(monkeypa
             pass
         assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(want) and cache_dir() == str(want)
         assert CacheBase.get_local_cache_path().is_relative_to(want)
-    if os.geteuid() != 0:  # root writes anywhere
+    if hasattr(os, "geteuid") and os.geteuid() != 0:  # root writes anywhere (POSIX directory modes)
         monkeypatch.setenv("HOME", str(tmp_path / "ro"))
         (tmp_path / "ro" / ".cache" / "basal" / "torchinductor").mkdir(parents=True, mode=0o500)
         monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", tmp_default)
@@ -287,3 +296,57 @@ def test_graph_engine_keeps_the_compile_cache_across_reboots_unless_set(monkeypa
         except Exception:
             pass
         assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == tmp_default
+
+
+def test_code_rows_kept_within_their_budget(monkeypatch):
+    """The fp32 code rows of each option-code set are cached in least-recently-used order within WROWS_BYTES (every set
+    was kept for good), and the readouts are the same with a cache too small for one set."""
+    import basal.engine as eng
+    m = tiny()
+    be = Stub(m)
+    be.tok = type("Tok", (), {"pad_token_id": 0})()
+    sets = [list(range(3, 3 + k)) for k in range(2, 12)]
+    full = [be._readout(torch.randn(1, m.config.hidden_size, generator=torch.Generator().manual_seed(k)), [ids])
+            for k, ids in enumerate(sets)]
+    assert len(be._wrows) == len(sets)  # the default budget holds them all here
+    monkeypatch.setattr(eng, "WROWS_BYTES", 4 * m.config.hidden_size * 6)  # room for a set of at most 6 rows
+    be._wrows.clear()
+    for k, ids in enumerate(sets):
+        got = be._readout(torch.randn(1, m.config.hidden_size, generator=torch.Generator().manual_seed(k)), [ids])
+        assert got == full[k]
+        assert sum(int(w.nbytes) for w in be._wrows.values()) <= max(eng.WROWS_BYTES, 4 * m.config.hidden_size * len(ids))
+    assert list(be._wrows) == [tuple(sets[-1])]  # the latest set; the older ones made room
+
+
+def test_backends_split_flat_readouts_with_one_helper():
+    """Every backend that reads groups as one flat list splits it with engine._split (one implementation), and the
+    engine keeps no test-only reference path."""
+    import inspect
+
+    import basal.engine as eng
+    src = inspect.getsource(eng)
+    assert src.count("out.append(flat[j: j + len(g[0])])") == 1  # in _split only
+    assert not hasattr(eng.GraphBackend, "_eager_shared")
+    assert eng._split([1, 2, 3, 4, 5], [([0, 0], None), ([0], None), ([0, 0], None)]) == [[1, 2], [3], [4, 5]]
+
+
+def test_mps_backend_gemma4_reads_the_sliding_window():
+    """--mode mps of a Gemma 4 model (basal-omni): states longer than the sliding window are read with the window in
+    the sliding layers (the engine's own Gemma 4 forward, as --mode eager), so every readout equals the model's own
+    forward of the prompt alone; a 4D trie mask through the transformers forward would let the sliding layers see the
+    whole state."""
+    import threading
+
+    from basal.gemma4 import Gemma4Forward
+    from test_gemma4_graph import tiny as gtiny
+    m = gtiny("e4b", torch.float32)  # window 5
+    be = MPSStub(m)
+    be.g4, be.lock = Gemma4Forward(m), threading.Lock()
+    be.head, be.softcap = m.lm_head, m.config.final_logit_softcapping
+    state = [1, 5, 9, 11, 3, 4, 6, 12, 13, 14, 15, 16]
+    g1 = ([state + [20 + q, 21, 30 + o, 31 - o] for q in range(2) for o in range(2)], [[7, 8]] * 4)
+    g2 = ([state + [22, 23]], [[7, 8, 9]])
+    out = be.run_shared([g1, g2])
+    for (toks, lids), res in zip([g1, g2], out):
+        for r, e in zip(res, separate(m, toks, lids)):
+            assert torch.allclose(torch.tensor(r), e.float(), atol=1e-5)

@@ -55,10 +55,15 @@ Off by default (the replicas' answers then pass through untouched):
                --escalate http://127.0.0.1:8003 --escalate-below 0.9   (pico on 8001, mini on 8002, ultra on 8003)
   basal-router --replicas http://127.0.0.1:8003 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8001 \
                --blend-weights 0.6 0.2 0.2   (ultra first: answers that are not blended are its own)
-GET /health: 200 when at least one replica is ready, else 503; /metrics: per replica in flight, requests routed by
+GET /health: 200 when a replica of --replicas / --gpus (the pool of ordinary requests) is ready, else 503 (the ready
+replicas of every pool in its "pools"); /metrics: per replica in flight, requests routed by
 state / by load, failures, readiness, answers per cascade level, blended answers, fallback calls by result
-(Prometheus); /v1/models: the first ready replica's. --ui on: GET /ui, one live page of the router and every replica
+(Prometheus); /v1/models: the first ready replica's of that pool. --ui on: GET /ui, one live page of the router and every replica
 (each replica's own panels when it runs with --ui on); GET /ui/state, its JSON.
+
+Request ids: the client's X-Request-Id (or a req_<hex> the router makes when it has none or an invalid one) goes to
+every replica the request reaches and comes back as the response's x-request-id, so the replicas' logs and the client
+name one request alike.
 
 API keys: a client's Authorization / X-API-Key header is passed on, as it came, to every replica its request reaches
 (--replicas, --escalate, --blend, --route; never to --fallback), so replicas started with --api-keys (the same key file
@@ -88,10 +93,11 @@ SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (sp
 
 
 def state_key(body):
-    """The routing key of a request body: its state with whitespace normalised (None without a state)."""
+    """The routing key of a request body: its state with whitespace normalised (None without a state, or for a body
+    that is not JSON or nested too deeply to read: the replica answers that client error)."""
     try:
         state = json.loads(body).get("state")
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, RecursionError):
         return None
     if not isinstance(state, str) or not state.strip():
         return None
@@ -102,8 +108,11 @@ SCRIPTS = ("latin", "cyrillic", "greek", "arabic", "hebrew", "cjk")
 
 
 def script_of(text):
-    """The script most of the letters of text are in (SCRIPTS, or "other"; None without letters)."""
+    """The script most of the letters of text are in (SCRIPTS, or "other"; None without letters). A state that is not a
+    string is read as its JSON text, as basal-serve shows it to the model (keys too)."""
     import unicodedata
+    if text is not None and not isinstance(text, str):
+        text = _text(text)
     count = {}
     for ch in text or "":
         if ch.isalpha():
@@ -262,11 +271,12 @@ KEY_HEADERS = ("authorization", "x-api-key")  # a client's API key, as basal-ser
 def key_headers(raw):
     """The client's API key headers among raw ASGI headers, values as bytes, the last of each name (as basal-serve
     reads them): passed on to the replicas, never to the --fallback LLM. {} without them."""
-    return {k: v for k, v in ((n.decode("latin1").lower(), v) for n, v in raw) if k in KEY_HEADERS}
+    return {k: v.strip() for k, v in ((n.decode("latin1").lower(), v) for n, v in raw) if k in KEY_HEADERS}
 
 
 def _h(text):
-    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+    # (surrogatepass: a state with a lone surrogate, "\ud800" in its JSON, still has a key; the replica refuses it)
+    return int.from_bytes(hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest()[:8], "big")
 
 
 class Ring:
@@ -356,7 +366,7 @@ class Router:
         if any(name.startswith("script:") for name in self.rings):  # --route
             try:
                 sc = script_of(json.loads(body).get("state"))
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, TypeError):  # (not JSON, not an object: the replica refuses it)
                 sc = None
             if sc is not None:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
@@ -378,7 +388,7 @@ class Router:
             req, resp = json.loads(body), json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
-            if req.get("media"):
+            if req.get("media") is not None or req.get("images") is not None:  # (images: the alias of media)
                 return content
             go = []
             for q, a in answers.items():
@@ -469,11 +479,11 @@ class Router:
             members = [(self.blend_weight, resp.get("model"), a)] + [
                 (w, m, x[q]) for w, m, x in others if isinstance(x.get(q), dict) and x[q].get("type") == a["type"]
                 and isinstance(x[q].get("probabilities"), dict) and list(x[q]["probabilities"]) == keys]
-            members = [m for m in members if m[0] > 0]
+            members = [m for m in members if m[0] > 0]  # (a weight of 0: the model takes no part, the first one too)
             if len(members) > 1:
-                answers[q] = blend_answer(a, members)
-            elif members:  # only one model answered: its answer as it is
-                a["blend"] = {"models": [members[0][1]], "weights": [members[0][0]]}
+                answers[q] = blend_answer(members[0][2], members)
+            elif members:  # only one model answered (or has a weight): its answer as it is
+                answers[q] = dict(members[0][2], blend={"models": [members[0][1]], "weights": [members[0][0]]})
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
         return json.dumps(resp, ensure_ascii=False).encode()
 
@@ -575,16 +585,24 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
 
     async def post(request):
         headers = {"content-type": "application/json", **key_headers(request.headers.raw)}
+        if request.scope.get("basal.request_id"):  # (request_ids below: the client's, or one it made)
+            headers["x-request-id"] = request.scope["basal.request_id"]
         status, content, ctype = await router.forward(request.url.path, await request.body(), headers)
         return Response(content, status_code=status, media_type=ctype)
 
+    def main_ready():
+        """The ready replicas of the pool of ordinary requests: an escalation or blend pool alone serves none."""
+        return sorted(r for r in router.pools["main"] if r in router.ready)
+
     async def health(_):
-        body = {"status": "ok" if router.ready else "starting", "ready": len(router.ready),
-                "replicas": len(router.replicas), "in_flight": sum(router.load.values())}
-        return JSONResponse(body, status_code=200 if router.ready else 503)
+        up = bool(main_ready())
+        body = {"status": "ok" if up else "starting", "ready": len(router.ready),
+                "replicas": len(router.replicas), "in_flight": sum(router.load.values()),
+                "pools": {name: sum(r in router.ready for r in urls) for name, urls in router.pools.items()}}
+        return JSONResponse(body, status_code=200 if up else 503)
 
     async def models(request):
-        for r in sorted(router.ready):
+        for r in main_ready():
             try:
                 resp = await router.client.get(r + "/v1/models", timeout=10, headers=key_headers(request.headers.raw))
                 return Response(resp.content, status_code=resp.status_code, media_type="application/json")
@@ -613,11 +631,15 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
         if on_stop is not None:  # (uvicorn's shutdown: before it re-raises the signal that stopped it)
             await asyncio.get_running_loop().run_in_executor(None, on_stop)
 
+    from starlette.middleware import Middleware
+
+    from .auth import request_ids
+    ids = [Middleware(request_ids)]  # x-request-id on every response, passed on to the replicas
     routes = [Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
               Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)]
     if ui is None:
-        return Starlette(routes=routes, lifespan=lifespan)
-    return ui.page(Starlette(routes=ui.routes(routes), lifespan=lifespan))
+        return Starlette(routes=routes, lifespan=lifespan, middleware=ids)
+    return ui.page(Starlette(routes=ui.routes(routes), lifespan=lifespan, middleware=ids))
 
 
 class Replicas:

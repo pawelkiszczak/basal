@@ -212,16 +212,17 @@ class Basal(_Client):
 
     def preset(self, state, name, lang=None, max_error=None):
         """The answers to a ready question set (basal/presets.py: triage, moderation, compliance, guard_input,
-        guard_output, route_intent) about state; max_error adds the abstain flag to every answer."""
+        guard_output, route_intent) about state; max_error adds the abstain flag to every answer. The wording is in
+        `lang`, else the client's `lang`, else the language of the state."""
         from .presets import questions
-        return self.decide(state, questions(name, lang, state, max_error))
+        return self.decide(state, questions(name, lang or self.defaults.get("lang"), state, max_error))
 
     def guard(self, state, kind="input", policy="strict", lang=None, max_error=None):
         """Run the guard_input / guard_output battery on state -> presets.guard(): {"action": pass | review | block |
         support, "reason", "checks"} plus "answers". max_error takes the thresholds from the model's calibration."""
         from .presets import guard
         answers = self.preset(state, "guard_" + kind, lang, max_error)
-        return {**guard(answers, policy, max_error), "answers": answers}
+        return {**guard(answers, policy, max_error, expect=kind), "answers": answers}
 
     def route(self, state, lang=None, min_confidence=0.6, max_error=None):
         """Run route_intent on state -> presets.route(): the intent, or "human" on low confidence / abstain."""
@@ -277,12 +278,12 @@ class AsyncBasal(_Client):
 
     async def preset(self, state, name, lang=None, max_error=None):
         from .presets import questions
-        return await self.decide(state, questions(name, lang, state, max_error))
+        return await self.decide(state, questions(name, lang or self.defaults.get("lang"), state, max_error))
 
     async def guard(self, state, kind="input", policy="strict", lang=None, max_error=None):
         from .presets import guard
         answers = await self.preset(state, "guard_" + kind, lang, max_error)
-        return {**guard(answers, policy, max_error), "answers": answers}
+        return {**guard(answers, policy, max_error, expect=kind), "answers": answers}
 
     async def route(self, state, lang=None, min_confidence=0.6, max_error=None):
         from .presets import route

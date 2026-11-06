@@ -140,7 +140,7 @@ def test_counters_start_at_zero_and_record_metadata_only():
     assert first["status"]["state"] == "ready" and first["status"]["auth"] is False
     s = r.json()
     t = s["traffic"]
-    assert t["requests"] == 6 and t["failed"] == 1  # as GET /metrics counts (a body that is not JSON is not counted)
+    assert t["requests"] == 7 and t["failed"] == 2  # as GET /metrics counts (a body that is not JSON too)
     assert t["seen"] == 7 and t["codes"] == {"200": 5, "422": 2}
     assert {e["endpoint"]: (e["requests"], e["failed"]) for e in t["endpoints"]} == {
         "/v1/basal": (1, 0), "/v1/decisions": (1, 0), "/v1/systemone": (5, 2)}
@@ -151,8 +151,15 @@ def test_counters_start_at_zero_and_record_metadata_only():
     assert all(row[3] > 0 and s["ready_at"] <= row[0] <= s["now"] for row in rows)
     assert t["latency"]["p50"] > 0 and t["w10"]["n"] == 7 and t["rate10"] > 0
     text = r.text
-    for word in ("Invoice", "1240", "Alpha", "Gamma", "Which?", "Paid?"):  # request text never reaches the state
+    # request text never reaches the state; words only: a number of the request (1240) can be a digit run of a timing
+    for word in ("Invoice", "PLN", "Alpha", "Gamma", "Which?", "Paid?"):
         assert word not in text
+
+    def strings(x):
+        if isinstance(x, dict):
+            x = list(x.values())
+        return [y for v in x for y in strings(v)] if isinstance(x, list) else [x] if isinstance(x, str) else []
+    assert not any("1240" in x for x in strings(s))  # nor in a string value (the state's numbers are timings)
     _, u2, _ = app_of()  # a new server starts at zero
     assert json.loads(u2.state({"requests": 0, "failed": 0, "seconds": 0.0}))["recent"] == []
 
@@ -236,7 +243,8 @@ def test_redact():
     assert redact("long_tokens", 2048) == 2048 and redact("reread_max_tokens", 2048) == 2048
     assert redact("auto_band", [0.2, 0.8]) == [0.2, 0.8] and redact("x", float("nan")) == "nan"
     assert redact("think_url", "https://u:p@h/v1#frag") == "https://h/v1"
-    assert redact("model", Path("/models/m")) == "/models/m" and redact("calibration", None) is None
+    m = redact("model", Path("/models/m"))
+    assert isinstance(m, str) and Path(m).as_posix() == "/models/m" and redact("calibration", None) is None
 
 
 def test_size_counts_questions_and_options():

@@ -32,7 +32,8 @@ from . import __version__
 from .calibrate import InputError, load
 from .engine import default_device, resolve
 from .facts import inject as inject_facts
-from .prompt import letter_ids, max_options, model_format, model_layout, render
+from .jsonl import read_lines
+from .prompt import letter_ids, max_options, model_format, model_layout, model_option_isolation, model_two_way, render
 from .server import to_items
 
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".gguf")
@@ -45,13 +46,26 @@ def in_holdout(group, holdout, seed):
 
 
 def split(path, holdout=0.25, seed=0):
-    """Labelled JSONL -> (train decisions with their bodies, held-out line texts, skipped counts). A line goes with the
-    group of its first decision."""
+    """Labelled JSONL -> (train decisions with their bodies, held-out line texts, skipped counts). Lines that share a
+    group on any of their decisions (a per-question "group") form one unit, so no group is on both sides; a unit goes
+    with the group of the first decision of its first line (a line that shares no group: its first decision's group)."""
     bodies, decisions = load(path)
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
-    side = {}
+    lines = read_lines(path)
+    root, first, owner = {}, {}, {}  # line -> parent line (union-find), line -> its first group, group -> a line
+
+    def find(x):
+        while root[x] != x:
+            root[x] = root[root[x]]
+            x = root[x]
+        return x
     for d in decisions:
-        side.setdefault(d["line"], in_holdout(d["group"], holdout, seed))
+        n = d["line"]
+        root.setdefault(n, n)
+        first.setdefault(n, d["group"])
+        other = owner.setdefault(d["group"], n)
+        a, b = find(n), find(other)
+        root[max(a, b)] = min(a, b)  # the unit's root is its first line
+    side = {n: in_holdout(first[find(n)], holdout, seed) for n in root}
     train, skipped = [], {}
     for d in decisions:
         if side[d["line"]]:
@@ -84,13 +98,54 @@ def example(tok, body, d, fmt, layout, max_len):
     return orders, None
 
 
+def refused(src):
+    """Why basal-finetune cannot train model src, or None: it trains and scores with the plain causal forward, and a
+    model the engine reads another way (basal.json "two_way", "option_isolation") would be trained under masks it is
+    not served with (and the merged model, keeping its basal.json, served two-way)."""
+    for key, read in (("two_way", model_two_way), ("option_isolation", model_option_isolation)):
+        if read(src):
+            return (f"{src}: basal.json \"{key}\": basal-finetune trains with the plain causal forward only; this model "
+                    "is served with other attention masks")
+    return None
+
+
+def lora_targets(model):
+    """The linear layers LoRA trains: those of the text decoder's layers only (layers.N.<module>, as --adapter takes
+    them), not the vision / audio towers ("all-linear" would train those too, and --adapter refuses such an adapter)."""
+    from .adapter import _LAYER
+    return sorted(n for n, mod in model.named_modules() if isinstance(mod, torch.nn.Linear) and _LAYER.match(n))
+
+
+def copy_side_files(src, out):
+    """The base model's files the merged model keeps (tokenizer, chat template, processor ...): not the weights, the
+    index, basal.json (written anew), the card, nor what belongs to the base weights only (adapter.NOT_FUSED: its
+    calibration files and NVFP4 activation scales)."""
+    from .adapter import NOT_FUSED
+    for f in sorted(Path(src).iterdir()):
+        if f.is_file() and not f.name.endswith(WEIGHT_SUFFIXES) and not f.name.endswith(".index.json") \
+                and f.name not in ("basal.json", "README.md", "MANIFEST.md", "SHA256SUMS", ".gitattributes") \
+                and not any(f.match(s) for s in NOT_FUSED):
+            shutil.copy2(f, Path(out) / f.name)
+
+
 def code_logits(model, ids, codes, softcap, device):
-    """The logits of the option codes at the answer position (only the last position goes through the output head)."""
-    out = model(input_ids=torch.tensor([ids], device=device), logits_to_keep=1)
-    logits = out.logits[0, -1].float()
-    if softcap:
-        logits = torch.tanh(logits / softcap) * softcap
-    return logits[torch.tensor(codes, device=device)]
+    """The logits of the option codes at the answer position as basal-serve reads them: the output head's input (the
+    final norm's output at the last position) times the code rows in fp32, then the model's final logit soft cap once.
+    (The model's own logits are capped already: a Gemma forward applies final_logit_softcapping itself.) In fp32 also
+    under the training steps' autocast, which would take the product in bf16 / fp16."""
+    head = model.get_output_embeddings()
+    got = {}
+    hook = head.register_forward_pre_hook(lambda mod, args: got.__setitem__("h", args[0]))
+    try:
+        model(input_ids=torch.tensor([ids], device=device), logits_to_keep=1)
+    finally:
+        hook.remove()
+    sel = torch.tensor(codes, device=device)
+    with torch.autocast(torch.device(device).type, enabled=False):  # fp32 under the training steps' autocast too
+        z = got["h"][0, -1].float() @ head.weight.index_select(0, sel).float().T
+        if head.bias is not None:
+            z = z + head.bias.index_select(0, sel).float()
+        return torch.tanh(z / softcap) * softcap if softcap else z
 
 
 def accuracy(model, examples, softcap, device):
@@ -148,6 +203,8 @@ def main(argv=None):
     if not (src / "basal.json").exists():
         raise SystemExit(f"{a.model} has no basal.json: use a basal model, or attach a chat model first "
                          "(basal-attach, docs/SERVING.md)")
+    if refused(src):
+        raise SystemExit(refused(src))
     fmt, layout = model_format(src), model_layout(src)
     try:
         train, held, skipped = split(a.labelled, a.holdout, a.seed)
@@ -193,9 +250,9 @@ def main(argv=None):
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()
     model = get_peft_model(model, LoraConfig(r=a.rank, lora_alpha=a.alpha, lora_dropout=a.dropout,
-                                             target_modules="all-linear", task_type="CAUSAL_LM"))
+                                             target_modules=lora_targets(model), task_type="CAUSAL_LM"))
     params = [p for p in model.parameters() if p.requires_grad]
-    print(f"basal-finetune: LoRA rank {a.rank} on all linear layers, {sum(p.numel() for p in params) / 1e6:.1f}M "
+    print(f"basal-finetune: LoRA rank {a.rank} on the decoder's linear layers, {sum(p.numel() for p in params) / 1e6:.1f}M "
           "parameters", file=sys.stderr)
     opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=0.0)
     scaler = torch.amp.GradScaler(device) if dtype == torch.float16 and device == "cuda" else None
@@ -236,11 +293,7 @@ def main(argv=None):
 
     model.save_pretrained(out / "lora")
     merged = model.merge_and_unload()
-    for f in sorted(src.iterdir()):  # tokenizer, chat template, basal.json ...; the weights are written below
-        if f.is_file() and not f.name.endswith(WEIGHT_SUFFIXES) and not f.name.endswith(".index.json") \
-                and f.name not in ("basal.json", "README.md", "MANIFEST.md", "SHA256SUMS", ".gitattributes") \
-                and not f.name.startswith("CALIBRATION."):
-            shutil.copy2(f, out / f.name)
+    copy_side_files(src, out)
     for old in out.glob("*.safetensors"):
         old.unlink()
     merged.save_pretrained(out, safe_serialization=True)

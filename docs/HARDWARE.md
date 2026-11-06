@@ -42,7 +42,7 @@ measurements):
 |---|---|---|
 | Data-centre (B300, B200, H100, H200) | `fast` (bf16) | limited by kernel launches at batch 1: FP8 gains ≤ 10% on H100 and is slower on B300, bf16 keeps decisions unchanged |
 | Workstation / consumer (RTX PRO 6000, RTX 5090) | `fp8` | compute-bound; FP8 gives 1.3–1.4× at 97% agreement |
-| RTX 4090 | `fast` (bf16) | FP8 compilation stalled on our test machine; bf16 works (1.5B: 12.5 ms) |
+| RTX 4090 | `fast` (bf16); for speed `fast` with `basal-2.0-mini-FP8` or `basal-2.0-4.5B-FP8` | those checkpoints give 1.29× (mini) and 1.40× (4.5B) the decisions/s of bf16 ([measured](#rtx-4090-basal-20-in-bf16-its-fp8-checkpoints-and-fp8-mode)); `basal-2.0-max-FP8` loads on 24 GB but ran out of memory on a long prompt (not recommended there); `--mode fp8` (torchao) starts in about 18 minutes, which looked like a stall, and is slower per request |
 | Desktop with unified memory (DGX Spark GB10) | `fp8` | memory-bandwidth-bound; FP8 halves latency |
 | Batched high-throughput serving with vLLM | `vllm` + the `-FP8` checkpoint on Hopper / Ada, the `-NVFP4` checkpoint on Blackwell (RTX 50xx, RTX PRO 6000, B200, DGX Spark); see [QUANTIZATION](QUANTIZATION.md#basal-15-the-modelopt-checkpoints) | basal-1.0 NVFP4: 3.2× throughput on the DGX Spark, but −3 accuracy points; the basal-1.5 checkpoints' agreement and speed: FP8 agrees with the bf16 model on 0.979–0.989 of decisions; NVFP4 on 0.979 for max and 0.937 for basal-1.5 (−2.8 points); no NVFP4 for mini |
 | A100 and other GPUs without FP8 (not measured) | `fast` | the bf16 path runs on any sm80+ GPU |
@@ -97,7 +97,30 @@ Speed-up against the 4.5B model measured with the released engine on the same ma
 RTX 5090: 28.0 ms; the earlier runs above: 18.9 and 27.3 ms). Agreement with fp32 (RTX 4090: bf16 is the reference).
 
 HTTP on H100 (`basal-serve --mode fast`): 7.7 ms p50, 147 decisions/s with 32 clients. NVFP4 on the DGX Spark: 16.5 ms
-but agreement 0.87 — not recommended. RTX 4090: the FP8 compilation stalled on our test machine; bf16 works.
+but agreement 0.87 — not recommended. RTX 4090: the FP8 start of that test did not stall but takes long (basal 2.5.3:
+about 18 minutes for basal-2.0-mini, [below](#rtx-4090-basal-20-in-bf16-its-fp8-checkpoints-and-fp8-mode)); bf16 works.
+
+## RTX 4090: basal-2.0 in bf16, its FP8 checkpoints and fp8 mode
+
+basal 2.5.3 (8e80d3e), torch 2.13.0+cu130, one RTX 4090 24 GB, `basal-bench --modes <mode>` (latency for two option
+orders and for one, decisions/s over 500 decisions, accuracy on the 44 bundled decisions); same top answer as bf16:
+synthetic identity readouts (200 single, 200 multi, 20 long; not the checkpoints' dev v2 gate,
+which their model cards give). Measured for [#111](https://github.com/rkinas/basal/pull/111).
+
+| model | mode | 2 orders | 1 order | dec/s | accuracy (44) | GB | same top as bf16 (single / multi / long) |
+|---|---|---|---|---|---|---|---|
+| basal-2.0-mini | `fast` (bf16) | 13.1 ms | 6.5 ms | 127.9 | 0.750 | 4.3 | reference |
+| basal-2.0-mini-FP8 | `fast` | 11.3 ms | 5.3 ms | **165.4** | 0.727 | 3.1 | 0.855 / 0.960 / 0.950 |
+| basal-2.0-mini | `fp8` (torchao, per row) | 16.4 ms | 6.7 ms | 138.8 | 0.750 | 3.2 | – |
+| basal-2.0-4.5B | `fast` (bf16) | 33.3 ms | 17.0 ms | 45.0 | 0.795 | 10.8 | reference |
+| basal-2.0-4.5B-FP8 | `fast` | 26.3 ms | 12.2 ms | **63.2** | 0.795 | 6.9 | 0.960 / 0.925 / 1.000 |
+
+- **`--mode fp8` does not stall**: with `TORCH_LOGS=recompiles` the start-up kept compiling and the server was ready
+  after 1,083 s (bf16 `fast`: about 3 minutes). It is 1.09× bf16's throughput but slower per request; the `-FP8`
+  checkpoints (static per-tensor scales, cuBLASLt) are faster and start in about bf16's time (graph warm-up 180 s vs
+  173 s for mini, 386 s vs 273 s for the 4.5B).
+- **basal-2.0-max-FP8** (12 GB of weights, whose bf16 does not fit 24 GB) loads and captures its graphs, then ran out
+  of memory on a long prompt of `basal-bench` (18 MB short, 23.6 GB in use); not measured further.
 
 ## 11B: basal-1.5-max
 
@@ -676,6 +699,47 @@ while without the cache it grows with it:
   buffers), counted against the budget. One 2.1k-token BAN-PL state is about 126 MB on 4.5B (60 layers, 2 KV heads of
   128). The wired limit is raised by the budget.
 
+### State cache disk tier
+
+`--state-cache-dir DIR` keeps every state the state cache stores as one `.safetensors` file under DIR: per layer
+`k.{i}` / `v.{i}` [KV heads, tokens, head size] as computed, the token ids and the prefix index's block hashes in the
+metadata, one subdirectory per model signature (model, revision, `config.json` and weight file sizes, adapter,
+quantisation, KV dtype). A background thread writes them (a full queue drops the write, counted in
+`basal_state_cache_disk_write_drops_total`). At start-up the server indexes the files of its signature from their
+headers, and on a memory miss it reads a state back, exactly or as the longest prefix. `--state-cache-disk-gb` bounds
+the directory, least recently used files out first. Each engine writes its own files (the engine is in the file name)
+and reads only its own, so the CUDA graph engine and MLX can share a directory without overwriting each other's states.
+
+Measured on an Apple M4 Max (40-core GPU, 128 GB), macOS 27.0.1, MLX 0.32.4, mlx-lm 0.32.2: `basal-serve --model
+Remek/basal-2.0-mini --mode mlx --no-calibration --state-cache-gb 16`, plus the run's flags. The input is 300 English
+web pages (2,167 characters, about 630 state tokens on average), one six-level `score` question each, `basal-run
+--concurrency 1`. Runs in ABBA order (off, memory, disk cold, disk warm, then the reverse); the table keeps the
+second run of each, as planned. p50 of the server's latency per request, from `tools/state_cache/compare.py`:
+
+| run | p50 off | p50 on | speed-up | top answers same | at margin >= 0.2 | \|dp\| median / p99 / max |
+|---|---|---|---|---|---|---|
+| restart over a warm directory, against cache off | 330 ms | 124 ms | 2.67x (**FAIL** `speedup>=3`) | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| restart, against memory hits in one process | 141 ms | 124 ms | 1.14x | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| memory hits in one process, against cache off | 330 ms | 141 ms | 2.34x | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| first pass writing to an empty directory, against the memory cache's first pass | 384 ms | 338 ms | 1.14x | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| second server over the first one's directory, against the first server | 437 ms | 153 ms | 2.85x | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+
+- **Restarts are exact.** On the same engine a state read back from disk gives the probabilities of the uncached
+  server bit for bit: 300 / 300 readouts identical, from a restart and from a second server process. The restart had
+  `basal_state_cache_misses_total 0` and `basal_state_cache_disk_loads_total 300`.
+- **A restart is as fast as a memory hit, not faster.** The 3x target was set from 1.5k-token states. These states
+  are about 630 tokens, and the six options in two orders are a large share of each request, so even the memory cache
+  gives 2.34x. The ABBA drift is large on this machine: the first run of each gave off 226 ms, memory 133 ms and
+  restart 124 ms (1.82x), and the first-pass pair 282 ms against 362 ms (0.78x) instead of 1.14x. What writing adds to a
+  request is the copy of its keys and values on the MLX thread: 9.7 ms for a 574-token state and 14.4 ms for 2,847
+  tokens (93 MB). The file itself is written off that thread.
+- **Reading a state back.** `DiskTier.load` of the largest file (93.3 MB, 2,847 tokens) takes a median 22.2 ms
+  (4.2 GB/s) when the file is not in the page cache and 2.0 ms when it is, 20 loads each. Without `sudo purge`, each
+  cold read was of a fresh copy written with `F_NOCACHE`.
+- **8 clients** (`--concurrency 8`, empty directory): 2.8 requests/s with the disk tier, 2.6 without, the same
+  probabilities bit for bit, `disk_write_drops_total 0`.
+- Not measured yet: the CUDA graph engine (restart, plain and Gemma 4). It needs an H100-class host.
+
 
 ## AMD Strix Halo (experimental, community-maintained)
 
@@ -764,11 +828,46 @@ every shape: 268 s (basal-2.0) and 180 s (mini) on a v5e, cached for later start
 Not on TPU: evidence spans, `--media`, early exit and quantisation. The 44 examples are a small sample; agreement and
 speed on your own items: `basal-bench --modes eager-fp32 tpu --questions <file.jsonl>`.
 
+## DGX Spark (GB10): batch flags with basal-2.0
+
+Whole-batch throughput of the bf16 engine (not `fp8`): `basal-calibrate --mode fast-nocompile` at the default
+concurrency (32) on 800 English decisions (every 5th line of a 4,000-decision public panel), basal-2.0 (4.5B) with
+basal 2.5.2, PyTorch 2.11.0+cu130 unless noted. Time includes the model load; agreement is argmax agreement with the
+default run.
+
+| flags | time | vs default | agreement |
+|---|---:|---:|---|
+| default | 399 s | – | – (a repeat: 800/800) |
+| `--concurrency 64` | 399 s | 1.00× | 800/800 |
+| `--concurrency 128` | 378 s | 0.95× | 800/800 |
+| `--batches fine` | 477 s | 1.20× | 800/800 |
+| `--prefix-cache on` | 470 s | 1.18× | 799/800 |
+| `--mode fast` | 441 s | 1.11× | 799/800 (a repeat: the same) |
+| `--deterministic` (PyTorch 2.13) | 410 s | 1.03× | two runs bit-identical |
+| PyTorch 2.13.0+cu130 | 399 s | 1.00× | 800/800 |
+| PyTorch 2.13, `--batches compact` | 394 s | 0.99× | 798/800 |
+
+On the GB10 the fastest variant, `--concurrency 128`, saves about 5% of the time; `fine`, `--prefix-cache on` and
+`fast` (its compile time included) are slower: keep the defaults. Accuracy stayed within one decision of the default's
+(0.8137) in every row.
+
+- **`--batches compact` needs PyTorch 2.13** here: 2.11's `varlen_attn` has no `enable_gqa`, and the engine refuses
+  compact rows (`this torch's varlen_attn has no enable_gqa`). The format-1 cascade's second pass needs 2.13 as well
+  (`seqused_k`); with it, basal-1.5 (4.5B, format 1) took 471 s against 483 s on 2.11, 800/800 agreeing.
+- **basal-2.0-mini**: 136 s on 2.11, the same on 2.13 (answers identical); `--batches compact` 139 s.
+- **One request at a time** (`basal-bench`, 44 built-in decisions), 4.5B: `eager` 9.95 decisions/s (load 76 s),
+  `fast-nocompile` 8.70 (334 s), `fast` 9.09 (508 s); mini: 27.0, 27.0 and 28.4. Unchanged from basal 2.4.1 within
+  0.5%.
+- **PyTorch 2.11 and FlexAttention**: the Gemma 4 attention test at head dimension 512 (`tests/test_sdpa_stride.py`)
+  fails to compile on the GB10 (`No valid triton configs ... Required: 165888 Hardware limit: 101376` bytes of shared
+  memory); PyTorch 2.13 compiles it.
+
 ## Notes per platform
 
 - **DGX Spark (GB10, aarch64, CUDA 13).** In the README install steps use the CUDA 13 build of PyTorch
   (`uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130`) instead of cu128. The GPU shares LPDDR5X memory (about 273 GB/s) with the CPU; every forward pass reads
-  all weights, which is why FP8 (half the bytes) halves latency.
+  all weights, which is why FP8 (half the bytes) halves latency. With PyTorch 2.13 (cu130), `--batches compact`
+  and the format-1 cascade also run; batch flags measured: [DGX Spark (GB10): batch flags](#dgx-spark-gb10-batch-flags-with-basal-20).
 - **B300 / B200 (sm_100/sm_103).** PyTorch cu130 wheels work. The `vllm` mode needs a CUDA toolkit (nvcc) of version
   12.9 or newer on the machine: vLLM's FlashInfer kernels are compiled on first use, and nvcc 12.8 (found in some
   container images) cannot target the B300 (`Unsupported gpu architecture 'compute_103a'`). Compilation of `nvfp4` takes long (about 50 minutes on

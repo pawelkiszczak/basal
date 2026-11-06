@@ -20,7 +20,7 @@ model is served with the --meta-from tokenizer only. The refusal shows a probe t
 one does.
 
 The non-weight files (basal.json, tokenizer, chat template, config, CALIBRATION*.json) come from --meta-from (default:
-the new checkpoint), so the merged model is served in that checkpoint's prompt format: merging basal-1.5 and basal-2.0
+the new checkpoint; another checkpoint must have their config.json architecture and tokenizer.json vocabulary), so the merged model is served in that checkpoint's prompt format: merging basal-1.5 and basal-2.0
 weights with --meta-from old gives a format 1 model, otherwise format 2. The prompt format moves accuracy as much as
 the weights do (docs/INTERPOLATION.md), so evaluate a merge together with the format it ships with. The shipped
 calibration is only a starting point: fit one per merged model with basal-calibrate.
@@ -34,8 +34,9 @@ import shutil
 from pathlib import Path
 
 # not copied from --meta-from: the model card and checksums describe the source checkpoint, the evidence head and
-# the thinking adapter were trained on its weights
-SKIP = {".gitattributes", "README.md", "SHA256SUMS", "evidence_head.pt"}
+# the thinking adapter were trained on its weights, and its NVFP4 activation scales (--mode nvfp4) were calibrated on
+# them (the merged model's activations differ: values above a stale scale are clipped)
+SKIP = {".gitattributes", "README.md", "SHA256SUMS", "evidence_head.pt", "NVFP4_AMAX.json"}
 # weight files of any format, and their indexes: the merged weights are the only ones in the output
 WEIGHT_SUFFIXES = {".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".h5", ".msgpack", ".onnx"}
 WEIGHT_PREFIXES = ("model.safetensors.index", "pytorch_model", "tf_model", "flax_model", "model.onnx")
@@ -69,10 +70,12 @@ def shards(model_dir):
     index = d / "model.safetensors.index.json"
     if index.exists():
         out = {}
-        for k, v in json.loads(index.read_text())["weight_map"].items():
+        for k, v in json.loads(index.read_text(encoding="utf-8"))["weight_map"].items():
             p = Path(v)
-            # the shard paths are reused under the output folder: nothing absolute, nothing that leaves the model
-            if p.is_absolute() or ".." in p.parts or not (d / p).resolve().is_relative_to(d.resolve()):
+            # the shard paths are reused under the output folder: nothing absolute, nothing that leaves the model.
+            # Checked on the path as written, not on where it resolves to: the files of a Hugging Face snapshot are
+            # symlinks into the cache's blobs/ folder, outside the snapshot, and are read like any other file
+            if p.is_absolute() or p.drive or ".." in p.parts:
                 raise SystemExit(f"{index}: shard path {v!r} is outside the model folder")
             out[k] = d / p
         return out
@@ -86,7 +89,7 @@ def shards(model_dir):
 def config_key(path):
     """config.json as compared: rope_theta folded into rope_parameters (the transformers 5 layout), keys that do not
     describe the architecture dropped."""
-    c = json.loads(Path(path).read_text())
+    c = json.loads(Path(path).read_text(encoding="utf-8"))
     if "rope_theta" in c:
         c.setdefault("rope_parameters", {"rope_theta": c["rope_theta"], "rope_type": "default"})
         if c.get("rope_scaling") is None:
@@ -98,7 +101,7 @@ def config_key(path):
 def tokenizer_key(path):
     """What fixes the meaning of a token id: vocabulary, BPE merges (string or pair form) and added tokens with their
     flags."""
-    t = json.loads(Path(path).read_text())
+    t = json.loads(Path(path).read_text(encoding="utf-8"))
     m = t.get("model", {})
     merges = [tuple(x.split(" ", 1)) if isinstance(x, str) else tuple(x) for x in m.get("merges") or []]
     return m.get("type"), m.get("vocab"), merges, t.get("added_tokens", [])
@@ -106,7 +109,7 @@ def tokenizer_key(path):
 
 def tokenizer_settings(path):
     """tokenizer.json without the sections that do not change token ids, merges in pair form."""
-    t = json.loads(Path(path).read_text())
+    t = json.loads(Path(path).read_text(encoding="utf-8"))
     t = {k: v for k, v in t.items() if k not in TOKENIZER_IGNORE}
     m = t.get("model", {})
     if m.get("merges"):
@@ -138,7 +141,7 @@ def check_pair(old, new, allow_tokenizer_difference=False):
             raise SystemExit(f"{name} missing in {missing[0]}: cannot check that the checkpoints share an "
                              "architecture / tokenizer")
     for d in (old, new):
-        if "quantization_config" in json.loads((Path(d) / "config.json").read_text()):
+        if "quantization_config" in json.loads((Path(d) / "config.json").read_text(encoding="utf-8")):
             raise SystemExit(f"{d} is quantized (quantization_config): interpolate the unquantized checkpoints and "
                              "quantize the result")
     po, pn = Path(old) / "config.json", Path(new) / "config.json"
@@ -176,6 +179,19 @@ def check_pair(old, new, allow_tokenizer_difference=False):
                 raise SystemExit(f"{k}: unsupported dtype {sn.get_dtype()}")
             specs[k] = (sn.get_dtype(), tuple(sn.get_shape()))
     return a, b, specs
+
+
+def check_meta(new, meta):
+    """--meta-from a checkpoint other than the two: its config.json and tokenizer.json become the merged model's, so
+    they must describe the checkpoints' architecture and vocabulary (SystemExit otherwise, before anything is
+    written)."""
+    for name, key, what in (("config.json", config_key, "architecture"), ("tokenizer.json", tokenizer_key, "vocabulary")):
+        p, q = Path(meta) / name, Path(new) / name
+        if not p.is_file():
+            raise SystemExit(f"--meta-from {meta}: no {name}; the merged model takes its {name} from there")
+        if p.read_bytes() != q.read_bytes() and key(p) != key(q):
+            raise SystemExit(f"--meta-from {meta}: its {name} differs from the checkpoints' (another {what}); the "
+                             f"merged model would be served with it")
 
 
 def save_streamed(path, specs, produce, metadata):
@@ -219,6 +235,8 @@ def interpolate(old, new, alpha, out, meta_from=None, allow_tokenizer_difference
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise SystemExit(f"{out} exists and is not empty; remove it or choose another --out")
     a, b, specs = check_pair(old, new, allow_tokenizer_difference)
+    if meta_from.resolve() not in (old.resolve(), new.resolve()):
+        check_meta(new, meta_from)
     tmp = out.parent / f".{out.name}.partial"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
@@ -248,11 +266,11 @@ def interpolate(old, new, alpha, out, meta_from=None, allow_tokenizer_difference
                 continue
             (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(f, tmp / rel)
-        info = json.loads((tmp / "basal.json").read_text()) if (tmp / "basal.json").exists() else {}
+        info = json.loads((tmp / "basal.json").read_text(encoding="utf-8")) if (tmp / "basal.json").exists() else {}
         info.update({"name": f"{info.get('name', new.name)}-interp-a{alpha:g}",
                      "interpolation": {"old": str(old), "new": str(new), "alpha": alpha,
                                        "rule": "(1 - alpha) * old + alpha * new, fp32 accumulate"}})
-        (tmp / "basal.json").write_text(json.dumps(info, indent=1) + "\n")
+        (tmp / "basal.json").write_text(json.dumps(info, indent=1) + "\n", encoding="utf-8")
         if out.exists():
             out.rmdir()  # empty, checked above
         tmp.rename(out)

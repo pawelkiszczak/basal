@@ -3,6 +3,7 @@ Gemma 4 models with a character-level tokenizer, CPU): the directory it writes, 
 basal-serve answering with it and basal-calibrate fitting its calibration."""
 import asyncio
 import json
+import os
 import string
 
 import pytest
@@ -92,7 +93,8 @@ def test_attach_and_serve(tmp_path, build):
     assert meta["attached"]["chat_template"] == "the base's" and meta["attached"]["model_type"].startswith(
         "qwen3" if build is qwen else "gemma4")
     assert json.loads((out / "basal.json").read_text()) == meta
-    assert (out / "config.json").is_symlink() and (out / "model.safetensors").is_symlink()
+    assert os.path.samefile(out / "config.json", base / "config.json") and os.path.samefile(
+        out / "model.safetensors", base / "model.safetensors")
     tok = PreTrainedTokenizerFast.from_pretrained(out)
     assert meta["readout"]["ids"] == [tok.convert_tokens_to_ids(c) for c in "ABCDEFGHIJ"]
     cal = json.loads((out / "CALIBRATION.json").read_text())
@@ -151,3 +153,24 @@ def test_calibrate_fits_the_attached_model(tmp_path, capsys):
     assert all(cal["temperature_source"][t].startswith("fitted") for t in ("choice", "noul", "score"))
     srv, _ = ask(out, {"refund": QUESTIONS["refund"]}, "--calibration", str(cal_path))
     assert srv.temps == cal["temperature_per_prim"]
+
+
+@pytest.mark.parametrize("where", ["same", "alias", "inside", "contains"])
+def test_out_that_overlaps_the_base_is_refused_before_any_write(tmp_path, where):
+    """--out the base's own directory (also through a symlink), a directory inside it or one containing it: refused
+    before anything is written, so the base's files stay as they were (they were replaced by links to themselves)."""
+    base = tmp_path / "models" / "base"
+    base.mkdir(parents=True)
+    files = {"config.json": b'{"model_type": "qwen3"}', "model.safetensors": b"\x00weights\x01"}
+    for name, data in files.items():
+        (base / name).write_bytes(data)
+    out = {"same": base, "inside": base / "attached", "contains": tmp_path / "models"}.get(where)
+    if where == "alias":
+        out = tmp_path / "alias"
+        out.symlink_to(base, target_is_directory=True)
+    with pytest.raises(SystemExit, match="base model's"):
+        attach(base, out, force=True)
+    assert sorted(p.name for p in base.iterdir()) == sorted(files)
+    for name, data in files.items():
+        assert not (base / name).is_symlink() and (base / name).read_bytes() == data
+    assert not (base / "attached").exists()
