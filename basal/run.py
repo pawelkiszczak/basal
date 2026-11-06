@@ -5,7 +5,8 @@
 Two input formats are accepted (they can be mixed):
   simple   {"id": ..., "state": "...", "question": "...", "options": ["...", "..."], "type": "choice"|"noul"|"score",
             "gold": <index, optional>}      type defaults to "choice"; for "noul" the options are [yes-text, no-text]
-  request  {"id": ..., "state": ..., "questions": {...}, "early_exit": ...}   a full /v1/systemone request body
+  request  {"id": ..., "state": ..., "questions": {...}, "early_exit": ..., "state_cache": ...}   a full /v1/systemone
+           request body
 
 Output (one line per input line, same order): {"id", "answers", "latency_ms"} plus, for simple lines, "prediction"
 (index of the chosen option), "confidence" and "correct" when "gold" is given; a line that cannot be sent or read
@@ -33,7 +34,7 @@ def to_request(item, early_exit=None, preset=None, lang=None):
         from .presets import questions
         item = dict(item, questions=questions(preset, lang, item["state"]))
     if "questions" in item:
-        body = {k: item[k] for k in ("state", "questions", "early_exit") if k in item}
+        body = {k: item[k] for k in ("state", "questions", "early_exit", "state_cache") if k in item}
     else:
         t, opts = item.get("type", "choice"), item["options"]
         if t == "noul":

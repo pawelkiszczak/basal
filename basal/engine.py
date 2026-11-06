@@ -1101,14 +1101,16 @@ class DiskTier:
     SUBDIRS = "0123456789abcdef"
     TMP_AGE = 600  # seconds: a leftover temporary file older than this is a crashed writer's
 
-    def __init__(self, root, budget_bytes, signature, engine, pack, unpack, accept_engines=None, after_load=None):
+    def __init__(self, root, budget_bytes, signature, engine, pack, unpack, accept_engines=None, after_load=None,
+                 prune_days=None):
         import queue
         from collections import OrderedDict
         self.signature, self.engine, self.accept = signature, engine, accept_engines
         self.root = Path(root) / hashlib.sha256(signature.encode()).hexdigest()[:16]
         for s in self.SUBDIRS:
             (self.root / s).mkdir(parents=True, exist_ok=True)
-        self.budget, self.used = int(budget_bytes), 0
+        self.used = 0
+        self.budget = budget_bytes
         self.pack, self.unpack, self.after_load = pack, unpack, after_load
         self.entries, self.index, self.lock = OrderedDict(), {}, threading.Lock()  # key -> (path, size, tokens, blocks)
         self.tags = {}  # key -> its file's tag (only tagged entries)
@@ -1116,9 +1118,88 @@ class DiskTier:
         self.closed = False
         self.pending, self.cancelled = set(), set()  # keys queued for writing; of those, deleted before written
         self.queue = queue.Queue(maxsize=self.QUEUE)
+        if prune_days is not None:
+            n = self.prune(prune_days)
+            if n:
+                print(f"basal: state cache: removed {n} model directories under {self.root.parent} not used for "
+                      f"{prune_days:g} days", flush=True)
         self.scan()
         self.thread = threading.Thread(target=self._writer, name="basal-state-cache-disk", daemon=True)
         self.thread.start()
+
+    @property
+    def budget(self):
+        """The byte budget: fixed, or "auto" (budget_bytes="auto"): half of the free disk space plus the files already
+        here (so it does not shrink as the cache grows), read at every use."""
+        if self._fixed is not None:
+            return self._fixed
+        st = os.statvfs(self.root)
+        return int(0.5 * (st.f_bavail * st.f_frsize + self.used))
+
+    @budget.setter
+    def budget(self, value):
+        self._fixed = None if value == "auto" else int(value)
+
+    def set_budget(self, spec):
+        """A new budget (bytes, or "auto"); least recently used files out beyond it."""
+        self.budget = spec
+        with self.lock:
+            self._evict()
+
+    def _siblings(self):
+        """The other models' cache directories beside this one (named by a signature digest: 16 hex digits)."""
+        import re
+        return [d for d in self.root.parent.iterdir()
+                if d != self.root and d.is_dir() and re.fullmatch(r"[0-9a-f]{16}", d.name)]
+
+    def prune(self, days):
+        """Removes the other models' cache directories whose newest state file is older than days; the number removed.
+        """
+        import shutil
+        import time
+        n, now = 0, time.time()
+        for d in self._siblings():
+            try:
+                newest = max((p.stat().st_mtime for p in d.glob("*/*.safetensors")), default=d.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+            if now - newest > days * 86400:
+                shutil.rmtree(d, ignore_errors=True)
+                n += 1
+        return n
+
+    def clear(self, scope="model"):
+        """Removes this model's state files (every engine's), after the queued writes land; scope "all-models" also
+        the other models' directories beside it. Returns {"files": n, "directories": m}."""
+        import shutil
+        if scope not in ("model", "all-models"):
+            raise ValueError(f"scope {scope!r}: model or all-models")
+        self.flush()
+        files = directories = 0
+        with self.lock:
+            self.cancelled |= self.pending  # (queued since the flush: removed once written)
+            for key in list(self.entries):
+                self._unlink(key)
+                files += 1
+            for s in self.SUBDIRS:
+                for p in (self.root / s).iterdir():
+                    if p.suffix == ".safetensors" or ".tmp-" in p.name:
+                        try:
+                            p.unlink()
+                            files += 1
+                        except FileNotFoundError:
+                            pass
+            if scope == "all-models":
+                for d in self._siblings():
+                    shutil.rmtree(d, ignore_errors=True)
+                    directories += 1
+            self.index.clear()
+            self.used = 0
+        return {"files": files, "directories": directories}
+
+    def reset_counters(self):
+        with self.lock:
+            self.loads = self.prefix_loads = self.writes = self.write_drops = self.errors = self.evictions = 0
 
     def _path(self, key):
         h = key.hex()
@@ -1200,7 +1281,8 @@ class DiskTier:
 
     def _evict(self):
         """Least recently used files out until the tier fits its budget (lock held)."""
-        while self.used > self.budget and self.entries:
+        budget = self.budget  # (auto: one statvfs; removing a file leaves free space + used unchanged)
+        while self.used > budget and self.entries:
             self._unlink(next(iter(self.entries)))
             self.evictions += 1
 
@@ -1413,7 +1495,8 @@ class DiskTier:
     def stats(self):
         with self.lock:
             return dict(disk_entries=len(self.entries), disk_bytes=self.used, disk_budget_bytes=self.budget,
-                        disk_loads=self.loads, disk_prefix_loads=self.prefix_loads, disk_writes=self.writes,
+                        disk_budget_auto=self._fixed is None, disk_loads=self.loads,
+                        disk_prefix_loads=self.prefix_loads, disk_writes=self.writes,
                         disk_write_drops=self.write_drops, disk_errors=self.errors, disk_evictions=self.evictions)
 
 
@@ -1441,6 +1524,38 @@ def torch_codec(device):
                 raise ValueError(f"{path}: {len(f.keys())} tensors for {L} layers")
             return [(f.get_tensor(f"k.{i}"), f.get_tensor(f"v.{i}")) for i in range(L)], md
     return pack, unpack
+
+
+def host_available_bytes():
+    """The host memory available to new allocations (psutil's `available`; Linux without psutil: MemAvailable), or
+    None where it cannot be read (macOS without psutil). The state cache's device memory on Apple Silicon (unified)."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except ImportError:
+        pass
+    try:
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+def cuda_available_bytes(dev):
+    """A CUDA device's memory available to this process's next tensors: free on the device plus what PyTorch's caching
+    allocator holds unused."""
+    free, _ = torch.cuda.mem_get_info(dev)
+    return int(free + torch.cuda.memory_reserved(dev) - torch.cuda.memory_allocated(dev))
+
+
+def cache_budget(gb, floor_gb=0):
+    """--state-cache-gb as a StateCache budget: "auto", bytes (at least floor_gb: --prefix-cache's own), or 0 (off)."""
+    if gb == "auto":
+        return "auto"
+    return int(max(gb or 0, floor_gb) * 2 ** 30)
 
 
 def mlx_codec(mx):
@@ -1479,16 +1594,25 @@ class StateCache:
     group (kv_quant: keys per channel, values per token), 2x / ~3.5x more states per GB, given back in their dtype.
 
     disk (--state-cache-dir): a DiskTier keeping every state stored with its token ids (16-bit, all its tokens) as a
-    file, read back on a memory miss (get, longest), also by later processes; an entry evicted here stays on disk."""
+    file, read back on a memory miss (get, longest), also by later processes; an entry evicted here stays on disk.
+
+    budget_bytes: bytes, or "auto" (--state-cache-gb auto): AUTO_SHARE of the device memory available now plus the
+    cache's own entries (so it does not shrink as the cache grows), available() read at most once per AVAILABLE_S.
+    available() -> bytes the device has free outside the cache (None: not readable here); also the ceiling() of a
+    fixed budget."""
 
     BLOCK = 256  # tokens per block of the prefix index
+    AUTO_SHARE = 0.5
+    AVAILABLE_S = 1.0
 
-    def __init__(self, budget_bytes, salt=b"", bits=16, disk=None):
+    def __init__(self, budget_bytes, salt=b"", bits=16, disk=None, available=None):
         from collections import OrderedDict
         if bits not in (16, 8, 4):
             raise ValueError(f"--state-cache-bits {bits}: 16, 8 or 4")
         self.bits = bits
-        self.budget, self.used, self.salt = int(budget_bytes), 0, salt
+        self.used, self.salt, self.available = 0, salt, available
+        self._read = (None, -float("inf"))  # the last available() reading and its time.monotonic()
+        self.budget = budget_bytes
         self.entries, self.lock = OrderedDict(), threading.Lock()
         self.index = {}  # chained block hash -> one key, or insertion-ordered keys sharing this prefix
         self.hits = self.misses = self.evictions = self.prefix_hits = 0
@@ -1671,9 +1795,76 @@ class StateCache:
                     keys[key] = None
                 else:
                     self.index[h] = {keys: None, key: None}
-            while self.used > self.budget:
-                self._drop(next(iter(self.entries)))
-                self.evictions += 1
+            self._evict()
+
+    def _evict(self):
+        """Least recently used entries out until the cache fits its budget (lock held)."""
+        budget = self.budget
+        while self.used > budget and self.entries:
+            self._drop(next(iter(self.entries)))
+            self.evictions += 1
+
+    @property
+    def budget(self):
+        if self._fixed is not None:
+            return self._fixed
+        free = self.available_now()
+        return int(self.AUTO_SHARE * ((free or 0) + self.used))
+
+    @budget.setter
+    def budget(self, value):
+        if value == "auto":
+            if self.available is None or self.available_now(fresh=True) is None:
+                raise ValueError("--state-cache-gb auto: the available memory is not readable here (install psutil); "
+                                 "give GB")
+            self._fixed = None
+        else:
+            self._fixed = int(value)
+
+    @property
+    def auto(self):
+        """Whether the budget is "auto"."""
+        return self._fixed is None
+
+    def available_now(self, fresh=False):
+        """The device memory available outside the cache (None: not known), read at most once per AVAILABLE_S."""
+        import time
+        if self.available is None:
+            return None
+        value, at = self._read
+        now = time.monotonic()
+        if fresh or now - at > self.AVAILABLE_S:
+            value = self.available()
+            self._read = (value, now)
+        return value
+
+    def ceiling(self):
+        """The most this cache could hold now: the available memory plus its own entries (None: not known)."""
+        free = self.available_now(fresh=True)
+        return None if free is None else free + self.used
+
+    def clear(self):
+        """Removes every entry from memory (the disk tier keeps its files); the number removed. Calls running on an
+        entry keep its tensors (their own references)."""
+        with self.lock:
+            n = len(self.entries)
+            self.entries.clear()
+            self.index.clear()
+            self.used = 0
+        return n
+
+    def set_budget(self, budget_bytes):
+        """A new memory budget (bytes, or "auto"); least recently used entries out beyond it."""
+        self.budget = budget_bytes  # (ValueError for "auto" where the available memory is not readable)
+        with self.lock:
+            self._evict()
+
+    def reset_counters(self):
+        """Zeroes the hit / miss / eviction counters (and the disk tier's); the entries stay."""
+        with self.lock:
+            self.hits = self.misses = self.evictions = self.prefix_hits = 0
+        if self.disk is not None:
+            self.disk.reset_counters()
 
     def _unpack(self, kv):
         """A stored entry's keys / values in their dtype (dequantised for 8 / 4 bits)."""
@@ -1682,12 +1873,15 @@ class StateCache:
         return [(kv_dequant(k, self.bits, True), kv_dequant(v, self.bits, False)) for k, v in kv]
 
     def stats(self, blocking=True):
-        """A CPU-only snapshot; nonblocking readers get None while the cache is busy."""
+        """A CPU-only snapshot; nonblocking readers get None while the cache is busy. available_bytes: the device
+        memory available outside the cache (the last reading, at most AVAILABLE_S old; None: not known)."""
+        free = self.available_now()
         if not self.lock.acquire(blocking=blocking):
             return None
         try:
             out = dict(entries=len(self.entries), used_bytes=self.used, budget_bytes=self.budget, hits=self.hits,
-                       misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits)
+                       misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits, bits=self.bits,
+                       budget_auto=self._fixed is None, available_bytes=free)
         finally:
             self.lock.release()
         if self.disk is not None:
@@ -1788,8 +1982,8 @@ class GraphBackend(EagerBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
-                 state_cache_import="same-engine", state_cache_signature=None):
+                 global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb="auto",
+                 state_cache_import="same-engine", state_cache_signature=None, state_cache_prune_days=None):
         if compile:
             persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
@@ -1911,15 +2105,17 @@ class GraphBackend(EagerBackend):
         self.prefix = bool(prefix) and shared
         used = state_cache_used(state_cache_gb, quant, fp8_scaling)
         self.state_cache_off = bool(state_cache_gb) and not used
-        gb = max(used, self.PREFIX_GB if self.prefix else 0)
+        budget = cache_budget(used, self.PREFIX_GB if self.prefix else 0)
         self.state_cache = None
-        if gb and shared:
-            disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature, "graph",
-                            *torch_codec(self.dev), after_load=self._trim,
-                            accept_engines="any" if state_cache_import == "any-engine" else None) \
+        if budget and shared:
+            disk = DiskTier(state_cache_dir, "auto" if state_cache_disk_gb == "auto" else state_cache_disk_gb * 2 ** 30,
+                            state_cache_signature, "graph", *torch_codec(self.dev), after_load=self._trim,
+                            accept_engines="any" if state_cache_import == "any-engine" else None,
+                            prune_days=state_cache_prune_days) \
                 if state_cache_dir else None
             salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
-            self.state_cache = StateCache(gb * 2 ** 30, salt=salt, bits=state_cache_bits, disk=disk)
+            self.state_cache = StateCache(budget, salt=salt, bits=state_cache_bits, disk=disk,
+                                          available=self._device_available)
         self._alloc_kv()
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix token ids)]
         if self.compact and template in ("on", "auto") and self.gemma is None:  # (Gemma 4's template: 7 tokens)
@@ -2247,6 +2443,19 @@ class GraphBackend(EagerBackend):
             k = torch.zeros((B, Hkv, S, d), dtype=self._dtype, device=self.dev)
             _cascade_varlen(q, k, k, k, k, _varlen_tree(seg, [[-1, -1]] * B, [S] * B, S, self._to_dev, True), 1.0)
 
+    def set_state_cache_budget(self, budget):
+        """A new memory budget of the state cache (bytes or "auto"; one object shared by every lane); the graphs'
+        memory stays as sized at start-up."""
+        self.state_cache.set_budget(budget)
+
+    def _device_available(self):
+        """The state cache's available(): this GPU's memory free for new tensors (the host's without CUDA: tests)."""
+        return cuda_available_bytes(self.dev) if self.dev.type == "cuda" else host_available_bytes()
+
+    def state_cache_ceiling(self):
+        """The most the state cache could hold now (its available memory plus its entries), or None: not known."""
+        return self.state_cache.ceiling()
+
     def lane(self):
         """A copy of this backend for basal-serve --deterministic --lanes N: it shares the weights, the tokenizer, the
         compiled forwards and the grid, and has its own graphs (captured here, in its own graph pool), key / value and
@@ -2530,11 +2739,11 @@ class GraphBackend(EagerBackend):
                 return 0
         return m
 
-    def _extend_states(self, units, keys, hits):
+    def _extend_states(self, units, keys, hits, stores=None):
         """Incremental states: a unit whose state (root) is not cached but begins with a cached state's first m tokens
         (a growing agent trace or chat history, or an edited one up to the edit) computes only tokens m.. over that
         state's keys / values (_continue); the result is cached, replacing the old entry when it extends it to its
-        end, and used as a hit."""
+        end (not for a unit whose stores[k] is False: "state_cache": "no-store"), and used as a hit."""
         if not keys or self.state_cache is None:
             return
         for k, key in enumerate(keys):
@@ -2561,7 +2770,8 @@ class GraphBackend(EagerBackend):
             # clients (basal-omni-1.0-max, H100)
             with self._launch if self.state_cache_lock else nullcontext():
                 new, _ = self._continue(root, prefix, m)
-            self.state_cache.put(key, new, tokens=root, replaces=old if m == n else None)
+            if stores is None or stores[k]:
+                self.state_cache.put(key, new, tokens=root, replaces=old if m == n else None)
             hits[k] = new
 
     @torch.no_grad()
@@ -3046,14 +3256,15 @@ class GraphBackend(EagerBackend):
         return out[0, self._to_dev(torch.tensor(cols))]
 
     @torch.no_grad()
-    def _tree_hidden(self, packs, idx, keys=None, hits=None):
+    def _tree_hidden(self, packs, idx, keys=None, hits=None, stores=None):
         """Branched units (one root each) -> hidden states at their readout positions, in two passes: their roots in a
         plain graph that also writes the keys and values (an uncompiled-shape forward beyond the largest graph), then
-        all other blocks, one row per unit, over those keys and values with the trie mask. keys / hits: per unit, the
-        state-cache key of its root and the cached keys / values; when every root is cached, pass 1 is skipped and the
-        cached keys / values go where pass 1 would have written them; the roots computed here are stored. Gemma 4:
-        pass 1 reads out at the root's last token (the only readout a root can hold: a prompt that is the shared
-        prefix itself) and pass 2 without a graph at the readout positions only."""
+        all other blocks, one row per unit, over those keys and values with the trie mask. keys / hits / stores: per
+        unit, the state-cache key of its root, the cached keys / values and whether a root computed here is stored
+        ("state_cache": "no-store": not); when every root is cached, pass 1 is skipped and the cached keys / values go
+        where pass 1 would have written them. Gemma 4: pass 1 reads out at the root's last token (the only readout a
+        root can hold: a prompt that is the shared prefix itself) and pass 2 without a graph at the readout positions
+        only."""
         P = [packs[k][2].index(1) for k in idx]  # block 0 (the root) comes first and is contiguous
         b = len(idx)
         n2 = max(len(packs[k][0]) - p for k, p in zip(idx, P))  # longest part below the root
@@ -3108,7 +3319,7 @@ class GraphBackend(EagerBackend):
                     traceback.clear_frames(e.__traceback__)  # (the failed forward's tensors, held by the error)
                     torch.cuda.empty_cache()
                     self.one_forward = min(self.one_forward, L - 1)
-                    return self._tree_hidden(packs, idx, keys, hits)
+                    return self._tree_hidden(packs, idx, keys, hits, stores)
         else:
             L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(b, self.BATCHES)
             g, ids, kv, *ro, h1 = self._graph(B, L)
@@ -3122,7 +3333,7 @@ class GraphBackend(EagerBackend):
             g.replay()
         if h1 is not None and self.state_cache is not None:  # store the roots computed here
             for r, key in enumerate(keys):
-                if key is not None and hits[r] is None:
+                if key is not None and hits[r] is None and (stores is None or stores[r]):
                     self.state_cache.put(key, [(kb[r, :, : P[r]].clone(), vb[r, :, : P[r]].clone()) for kb, vb in kv],
                                          tokens=packs[idx[r]][0][: P[r]])
         S = next((x for x in sfx if n2 <= x), None)
@@ -3383,20 +3594,22 @@ class GraphBackend(EagerBackend):
 
     def _cache_keys(self, groups, units):
         """Per unit, the state-cache key of its root when the root is the state prefix its group was cut at (None
-        otherwise), and the cached keys / values of the units whose root is in the cache."""
+        otherwise), the cached keys / values of the units whose root is in the cache, and whether the unit stores the
+        states it computes (its group's 4th element False: "state_cache": "no-store")."""
         if self.state_cache is None:
-            return None, {}
-        keys, hits = [], {}
+            return None, {}, None
+        keys, hits, stores = [], {}, []
         for k, (pk, _, g, _) in enumerate(units):
             cut = groups[g][2] if len(groups[g]) > 2 else None
             root = pk[2].index(1) if len(pk[4]) > 1 else None
             key = self.state_cache.key(pk[0][:root]) if cut and root == cut else None
             keys.append(key)
+            stores.append(len(groups[g]) < 4 or groups[g][3] is not False)
             if key is not None:
                 e = self.state_cache.get(key)
                 if e is not None:
                     hits[k] = e
-        return keys, hits
+        return keys, hits, stores
 
     @torch.no_grad()
     def run_shared(self, groups, policy=None, done=None):
@@ -3411,8 +3624,8 @@ class GraphBackend(EagerBackend):
         packs = [u[0] for u in units]
         cuda = self.dev.type == "cuda"
         pending = []
-        keys, hits = self._cache_keys(groups, units)
-        self._extend_states(units, keys, hits)
+        keys, hits, stores = self._cache_keys(groups, units)
+        self._extend_states(units, keys, hits, stores)
         for idx, kind in self._forwards(units, hits):
             with self._launch:  # the static buffers of a graph are shared by concurrent calls
                 if kind == "compact":
@@ -3422,7 +3635,8 @@ class GraphBackend(EagerBackend):
                 elif keys is None:
                     h = self._tree_hidden(packs, idx)
                 else:
-                    h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx])
+                    h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx],
+                                          [stores[k] for k in idx])
                 W, cols, pad = self._rows([x for k in idx for x in units[k][1]])
                 p = torch.softmax(self._code_logits(h, W).gather(1, cols).masked_fill(pad, float("-inf")), -1)
                 if cuda:
@@ -3452,7 +3666,7 @@ class GraphBackend(EagerBackend):
 
 
     @torch.no_grad()
-    def _long_hidden(self, pack, key=None, hit=None, between=None):
+    def _long_hidden(self, pack, key=None, hit=None, between=None, store=True):
         """One unit of the long lane -> hidden states at its readout positions: a single prompt in one layered forward;
         a branched unit in the two passes over fresh key / value buffers (pass 1 layered, or the cached state; pass 2
         uncompiled). The static buffers of the main lane's graphs are never touched."""
@@ -3466,7 +3680,7 @@ class GraphBackend(EagerBackend):
         else:
             kv = self._kv_new(P)
             h1 = self._forward_layered(self._to_dev(torch.tensor([t[:P]])), kv, between)[0]
-            if key is not None and self.state_cache is not None:
+            if key is not None and self.state_cache is not None and store:
                 self.state_cache.put(key, [(k[0].clone(), v[0].clone()) for k, v in kv], tokens=t[:P])
         n = len(t) - P
         seg2, par2 = np.array([[x - 1 for x in sg[P:]]]), [[-1 if q <= 0 else q - 1 for q in par[1:]]]
@@ -3489,9 +3703,10 @@ class GraphBackend(EagerBackend):
         the main lane's graphs replay; the state cache is shared with the main lane. -> the option probabilities of
         every prompt, as run_shared."""
         units = self._units(groups)
-        keys, hits = self._cache_keys(groups, units)
-        self._extend_states(units, keys, hits)
-        probs = [self._readout(self._long_hidden(pk, keys[k] if keys else None, hits.get(k), between), lids)
+        keys, hits, stores = self._cache_keys(groups, units)
+        self._extend_states(units, keys, hits, stores)
+        probs = [self._readout(self._long_hidden(pk, keys[k] if keys else None, hits.get(k), between,
+                                                 stores[k] if stores else True), lids)
                  for k, (pk, lids, _, _) in enumerate(units)]
         return self._assemble(groups, units, probs)
 
@@ -4103,13 +4318,13 @@ class MLXBackend:
     COMPUTES = ("auto", "bf16")
 
     def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm", state_cache_gb=0,
-                 prefix=False, compute="auto", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
-                 state_cache_import="same-engine", state_cache_signature=None):
+                 prefix=False, compute="auto", adapter=None, state_cache_dir=None, state_cache_disk_gb="auto",
+                 state_cache_import="same-engine", state_cache_signature=None, state_cache_prune_days=None):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
-        gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
+        budget = cache_budget(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
         salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
-        self.state_cache = StateCache(gb * 2 ** 30, salt=salt) if gb else None
+        self.state_cache = StateCache(budget, salt=salt, available=host_available_bytes) if budget else None
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
@@ -4117,9 +4332,34 @@ class MLXBackend:
         self.max_rows = max_rows or self.MAX_ROWS
         self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute, adapter).result()
         if self.state_cache is not None and state_cache_dir:  # (mlx is imported by _load; files read on the MLX thread)
-            self.state_cache.disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature,
-                                             "mlx", *mlx_codec(self.mx),
-                                             accept_engines="any" if state_cache_import == "any-engine" else None)
+            self.state_cache.disk = DiskTier(state_cache_dir,
+                                             "auto" if state_cache_disk_gb == "auto" else state_cache_disk_gb * 2 ** 30,
+                                             state_cache_signature, "mlx", *mlx_codec(self.mx),
+                                             accept_engines="any" if state_cache_import == "any-engine" else None,
+                                             prune_days=state_cache_prune_days)
+
+    def set_state_cache_budget(self, budget):
+        """A new memory budget of the state cache (bytes or "auto", on the MLX thread), the wired limit recomputed for
+        it ("auto": for its value now)."""
+        def apply():
+            self.state_cache.set_budget(budget)
+            self._wire(self.state_cache.budget)
+        self.pool.submit(apply).result()
+
+    def state_cache_ceiling(self):
+        """The most the state cache could hold now: the host memory available plus its entries, within the recommended
+        working set beside the weights and the buffer cache (None: not known)."""
+        ceiling = self.state_cache.ceiling()
+        if getattr(self, "_wired_rec", None) is not None:
+            room = self._wired_rec - self._weights_bytes - self.CACHE_BYTES
+            ceiling = room if ceiling is None else min(ceiling, room)
+        return ceiling
+
+    def _wire(self, cached):
+        """Keeps the weights, the buffer cache and cached bytes of states resident, within the recommended working set
+        (no-op without Metal)."""
+        if self._wired_rec is not None:
+            self.mx.set_wired_limit(min(self._wired_rec, self._weights_bytes + self.CACHE_BYTES + cached))
 
     def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto", adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
@@ -4186,10 +4426,10 @@ class MLXBackend:
         # new shape, and on a 16-24 GB Mac pushes everything else into swap)
         from mlx.utils import tree_flatten
         weights = sum(v.nbytes for _, v in tree_flatten(self.model.parameters()))
-        if mx.metal.is_available():
-            rec = mx.device_info().get("max_recommended_working_set_size", weights)
-            cached = self.state_cache.budget if self.state_cache is not None else 0
-            mx.set_wired_limit(min(rec, weights + self.CACHE_BYTES + cached))
+        self._weights_bytes = weights
+        self._wired_rec = mx.device_info().get("max_recommended_working_set_size", weights) \
+            if mx.metal.is_available() else None
+        self._wire(self.state_cache.budget if self.state_cache is not None else 0)
         mx.set_cache_limit(self.CACHE_BYTES)
         self.fwd = None  # basal/mlx_forward.py, before the packed rows wrap the RoPE layers
         if forward == "basal":
@@ -4472,7 +4712,7 @@ class MLXBackend:
         finally:
             mx.quantized_matmul, nn.Linear.__call__, mx.fast.scaled_dot_product_attention = qmm, linear, sdpa
 
-    def _state(self, root, ref=None):
+    def _state(self, root, ref=None, store=True):
         """Per-layer (keys, values) of a group's root (its tokens up to the server's cut: the state, or the template
         prefix) from the state cache, computed and stored on a miss. A root that begins with a cached one (a growing
         agent trace or chat history, or an edited state up to the edit, StateCache.longest) computes only its tokens
@@ -4487,7 +4727,8 @@ class MLXBackend:
         bits is keyed by the root and its kernels. The row count is also kept in the state's file
         (StateCache.put(tag=)), so a later server process tells the same of a state it reads from disk. A state from
         another engine's file (--state-cache-import any-engine) has other bits whatever its row count, and is used as
-        it is: that import is close to, not equal to, the uncached answers by its contract."""
+        it is: that import is close to, not equal to, the uncached answers by its contract. store False
+        ("state_cache": "no-store"): nothing is stored."""
         mx, cache = self.mx, self.state_cache
         refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
         bits = self._kernels(ref)
@@ -4512,8 +4753,9 @@ class MLXBackend:
                     initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
         kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial, ref)]
         mx.eval(kv)
-        cache.put(key, kv, tokens=root, replaces=replaces, tag=ref)
-        refs[key] = ref
+        if store:
+            cache.put(key, kv, tokens=root, replaces=replaces, tag=ref)
+            refs[key] = ref
         if len(refs) > 2 * len(cache.entries) + 64:  # entries evicted or replaced since
             self._refs = {k: r for k, r in refs.items() if k in cache.entries}
         return kv
@@ -4560,7 +4802,7 @@ class MLXBackend:
         h = self.lm.model(ids, cache=[_PackedRow(pos, mask[:, None])] * len(self.lm.model.layers))
         return h[mx.array([b for b, r in enumerate(rows) for _ in r[3]]), mx.array([j for r in rows for j in r[3]])]
 
-    def _group(self, toks, lids, cut=None):
+    def _group(self, toks, lids, cut=None, store=True):
         """One group: shared prefix once, then the suffixes in batches of max_rows (with `alone`, Qwen3.5: sorted by
         length, at most TOKEN_BUDGET padded tokens per batch). cut: the server's state-cache cut
         (tokens of the root, which every prompt of the group begins with): the root's keys / values come from the state
@@ -4570,12 +4812,12 @@ class MLXBackend:
         run their linear layers and attention at the uncached forward's row and key counts (_uncut), so a state
         computed for this request gives the uncached bits; one computed for another request (other questions) can
         differ in the last bits where that request's length picked other kernels
-        (HARDWARE.md#apple-m4-state-cache-on---mode-mlx)."""
+        (HARDWARE.md#apple-m4-state-cache-on---mode-mlx). store: whether a computed root is stored (_state)."""
         if cut and self.state_cache is not None and len(toks) == 1 and cut < len(toks[0]):
-            return [self._cut_single(toks[0], lids[0], cut)]
+            return [self._cut_single(toks[0], lids[0], cut, store)]
         P = self._shared_len(toks)
         if cut and self.state_cache is not None and cut <= P:
-            prefix = self._state(list(toks[0][:cut]), P)
+            prefix = self._state(list(toks[0][:cut]), P, store)
             if P > cut:
                 prefix = self._prefix(toks[0][:P], prefix, P)
         else:
@@ -4592,13 +4834,13 @@ class MLXBackend:
             out += self._letters(h, lids[i: i + self.max_rows])
         return out
 
-    def _cut_single(self, toks, lids, cut):
+    def _cut_single(self, toks, lids, cut, store=True):
         """A single prompt with a cut, as the uncached path reads it (_singles: one forward of the whole prompt): the
         state's keys / values from the cache (_state), then the rest of the prompt in one forward over them (at least
         MIN_CONTINUE tokens: from earlier in the state when the rest is shorter), read out at its last token, at the
         whole prompt's row and key counts (_uncut)."""
         L = len(toks)
-        root = self._state(list(toks[:cut]), L)
+        root = self._state(list(toks[:cut]), L, store)
         m = max(0, min(cut, L - self.MIN_CONTINUE))
         past = [(k[..., :m, :], v[..., :m, :]) for k, v in root] if m else None
         with self._uncut(L - m, L):
@@ -4631,26 +4873,28 @@ class MLXBackend:
         return res
 
     def _run_shared(self, groups):
-        # a group the server cut for the state cache (its third element) runs through _group, single prompts too
+        # a group the server cut for the state cache (its third element) runs through _group, single prompts too; its
+        # fourth element False: cached states are read, none stored ("state_cache": "no-store")
         cut = self.state_cache is not None
-        enc = [(self.encode(g[0]), g[1], g[2] if cut and len(g) > 2 else None) for g in groups]
+        enc = [(self.encode(g[0]), g[1], g[2] if cut and len(g) > 2 else None, len(g) < 4 or g[3] is not False)
+               for g in groups]
         out = [None] * len(groups)
-        single = [k for k, (t, _, c) in enumerate(enc) if len(t) == 1 and not c]
+        single = [k for k, (t, _, c, _) in enumerate(enc) if len(t) == 1 and not c]
         if single:
             for k, p in zip(single, self._singles([enc[k][0][0] for k in single], [enc[k][1][0] for k in single])):
                 out[k] = [p]
         if self.packed:  # packed row length: the prefix once, then every suffix
             n = {k: sum(map(len, t)) - (len(t) - 1) * self._shared_len(t)
-                 for k, (t, _, c) in enumerate(enc) if out[k] is None and not c}
+                 for k, (t, _, c, _) in enumerate(enc) if out[k] is None and not c}
             fit = [k for k in n if n[k] <= self.PACK_TOKENS]
             for c in self._chunks([n[k] for k in fit], self.PACK_BUDGET) if fit else []:
                 ks = [fit[j] for j in c]
                 probs = self._letters(self._packed([enc[k][0] for k in ks]), [x for k in ks for x in enc[k][1]])
                 for k in ks:
                     out[k], probs = probs[: len(enc[k][1])], probs[len(enc[k][1]):]
-        for k, (t, x, c) in enumerate(enc):
+        for k, (t, x, c, s) in enumerate(enc):
             if out[k] is None:
-                out[k] = self._group(t, x, c)
+                out[k] = self._group(t, x, c, s)
         return out
 
     def run_shared(self, groups, policy=None):

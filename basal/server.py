@@ -667,6 +667,13 @@ def lanes_refused(a, kind):
     return None
 
 
+def _group(entry):
+    """A queue entry's group for the engine: (prompts, code ids[, state prefix length[, False: store no state]])."""
+    cut = entry[4] if len(entry) > 4 else None
+    store = entry[5] if len(entry) > 5 else True
+    return (entry[0], entry[1]) + ((cut,) if cut else ()) + ((False,) if cut and not store else ())
+
+
 def _answer(fut, res):
     if not fut.done():
         fut.set_result(res)
@@ -824,6 +831,59 @@ def orders_arg(value):
     if value in ("1", "2", "auto") or (value.startswith("2le") and value[3:].isdigit() and int(value[3:]) >= 2):
         return value
     raise argparse.ArgumentTypeError(f"--orders must be 1, 2, auto or 2le<N> (N >= 2), got {value!r}")
+
+
+def cache_gb_arg(value):
+    """--state-cache-gb values: GB (>= 0), "N%" (0 < N <= 100) of the host's RAM, kept as given (resolve_cache_gb), or
+    auto (engine.StateCache: a share of the memory available, read as the cache is used)."""
+    if value == "auto":
+        return value
+    try:
+        if value.endswith("%"):
+            if 0 < float(value[:-1]) <= 100:
+                return value
+        elif float(value) >= 0:
+            return float(value)
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("--state-cache-gb: GB, N% of host RAM, or auto")
+
+
+def disk_gb_arg(value):
+    """--state-cache-disk-gb values: GiB above 0, or auto."""
+    if value == "auto":
+        return value
+    try:
+        if float(value) > 0:
+            return float(value)
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("--state-cache-disk-gb: GiB above 0, or auto")
+
+
+def host_ram_bytes():
+    """The host's physical memory (macOS and Linux)."""
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+
+
+def resolve_cache_gb(spec):
+    """A state-cache size in GB: a number as given, "N%" that share of the host's RAM; "auto" stays "auto"."""
+    if spec == "auto":
+        return spec
+    if isinstance(spec, str) and spec.endswith("%"):
+        try:
+            ram = host_ram_bytes()
+        except (ValueError, OSError, AttributeError):
+            raise SystemExit("--state-cache-gb N%: the host's RAM is not readable here; give GB")
+        return float(spec[:-1]) / 100 * ram / 2 ** 30
+    return float(spec)
+
+
+def state_cache_over(backend, budget):
+    """The most the backend's state cache could hold now (bytes) when a budget of `budget` bytes is above it, else None
+    (it fits, or the backend cannot tell: GraphBackend / MLXBackend.state_cache_ceiling)."""
+    ceiling = getattr(backend, "state_cache_ceiling", lambda: None)()
+    return ceiling if ceiling is not None and budget > ceiling else None
 
 
 def orders_for(orders, k):
@@ -1140,6 +1200,9 @@ class Server:
     waiting = None
 
     def __init__(self, a):
+        # --state-cache-gb N%: GB from here on (as given: GET /v1/state-cache's started_with)
+        self.state_cache_spec = getattr(a, "state_cache_gb", 0)
+        a.state_cache_gb = resolve_cache_gb(self.state_cache_spec)
         validate_quant(a.mode, a.quant)
         kind, quant, comp = MODES[a.mode]
         if getattr(a, "compile_scope", "model") == "layer" and (kind != "graph" or not comp):
@@ -1178,6 +1241,8 @@ class Server:
             if kind not in ("graph", "mlx"):
                 raise SystemExit("--state-cache-dir works with the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
                                  "nvfp4) and --mode mlx")
+        if getattr(a, "state_cache_prune_days", None) is not None and getattr(a, "state_cache_dir", None) is None:
+            raise SystemExit("--state-cache-prune-days needs --state-cache-dir")
         if getattr(a, "layout", None) not in (None, "canonical"):
             refuse_layout_caches(a.layout, a)
         if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind not in ("graph", "mlx")):
@@ -1303,8 +1368,9 @@ class Server:
                   flush=True)
         # --state-cache-dir: the compatibility signature of the cached states' files (engine.cache_signature)
         disk_kwargs = dict(state_cache_dir=getattr(a, "state_cache_dir", None),
-                           state_cache_disk_gb=getattr(a, "state_cache_disk_gb", 20.0),
+                           state_cache_disk_gb=getattr(a, "state_cache_disk_gb", "auto"),
                            state_cache_import=getattr(a, "state_cache_import", "same-engine"),
+                           state_cache_prune_days=getattr(a, "state_cache_prune_days", None),
                            state_cache_signature=None)
         if disk_kwargs["state_cache_dir"] is not None:
             kv_dtype = "bf16" if kind == "mlx" else {"bfloat16": "bf16", "float16": "f16", "float32": "f32"}.get(
@@ -1376,6 +1442,14 @@ class Server:
             self.free_lanes = list(self.lanes)
             print(f"basal: --lanes {a.lanes}: {a.lanes - 1} more copies of the graphs in {time.time() - t:.0f} s",
                   flush=True)
+        cache = getattr(self.backend, "state_cache", None)
+        if cache is not None and not cache.auto:  # (after the graphs: what the device has left now)
+            over = state_cache_over(self.backend, cache.budget)
+            if over is not None:
+                print(f"basal: warning: the state cache's budget ({cache.budget / 2 ** 30:.1f} GiB) is above what "
+                      f"this device can give it now ({over / 2 ** 30:.1f} GiB: available memory plus its entries); "
+                      "it grows until memory runs out before it reaches the budget. Give less, or "
+                      "--state-cache-gb auto", flush=True)
         if self.adapter:  # every backend has consumed the factors (merged, or written to its PEFT directory)
             self.adapter.deltas.clear()
         self.tok = self.backend.tok
@@ -1539,10 +1613,11 @@ class Server:
                 wait[0] = False
                 self.queued -= 1
 
-    async def ask(self, branches, pol, cut=None, lane="main"):
+    async def ask(self, branches, pol, cut=None, lane="main", store=True):
         """Position probabilities of every prompt of every branch: [[probs per prompt] per branch]. cut: the number of
         tokens of the request's state prefix (the state cache's unit), passed to the engine with every entry. lane
-        "long": the whole request is one entry of the long lane (--long-lane)."""
+        "long": the whole request is one entry of the long lane (--long-lane). store False ("state_cache": "no-store"):
+        cached states are read, none is stored."""
         loop = asyncio.get_running_loop()
         # SOAM: the whole request is one queue entry (one packed row: state once, every branch after it);
         # otherwise one entry per branch (all option orders of one question share the prefix). A two-way model: one
@@ -1558,7 +1633,7 @@ class Server:
         for e in entries:
             fut = loop.create_future()
             self.waiting[fut] = wait
-            entry = ([p for b in e for p in b[3]], [x for b in e for x in b[4]], fut, pol, cut)
+            entry = ([p for b in e for p in b[3]], [x for b in e for x in b[4]], fut, pol, cut, store)
             if lane == "long":
                 lens = [len(p) for p in entry[0]]
                 shared = cut or 0  # the state once, then every prompt's own tokens
@@ -1730,20 +1805,20 @@ class Server:
                 self.long_ready.clear()
                 continue
             now, rate = time.perf_counter(), self.long_rate
-            order = sorted(self.long_entries, key=lambda e: ((now - e[5]) / (e[6] * rate) + 1, -e[6]), reverse=True)
+            order = sorted(self.long_entries, key=lambda e: ((now - e[6]) / (e[7] * rate) + 1, -e[7]), reverse=True)
             batch, total = [], 0  # the highest response ratios first, up to LONG_BATCH requests / LONG_BATCH_TOKENS
             for e in order:
-                if batch and (len(batch) >= self.LONG_BATCH or total + e[6] > self.LONG_BATCH_TOKENS
+                if batch and (len(batch) >= self.LONG_BATCH or total + e[7] > self.LONG_BATCH_TOKENS
                               or e[3] != batch[0][3]):
                     continue
                 batch.append(e)
-                total += e[6]
+                total += e[7]
             for e in batch:
                 self.long_entries.remove(e)
             self.started(batch)
             if not self.long_entries:
                 self.long_ready.clear()
-            groups = [(e[0], e[1]) + ((e[4],) if e[4] else ()) for e in batch]
+            groups = [_group(e) for e in batch]
             t0 = time.perf_counter()
             self.gate.start()
             try:
@@ -1783,10 +1858,7 @@ class Server:
                 kw = {}
                 if getattr(backend, "streams", False):
                     kw["done"] = lambda j, res, ix=ix: loop.call_soon_threadsafe(_answer, live[ix[j]][2], res)
-                groups = []
-                for i in ix:  # (prompts, code ids[, state prefix length for the state cache])
-                    cut = live[i][4] if len(live[i]) > 4 else None
-                    groups.append((live[i][0], live[i][1]) + ((cut,) if cut else ()))
+                groups = [_group(live[i]) for i in ix]  # (prompts, code ids[, state prefix length[, False]])
                 out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
                 for i, o in zip(ix, out):
                     _answer(live[i][2], o)
@@ -1894,6 +1966,10 @@ class Server:
                 raise RequestError(f'facts "auto" reads a state of at most {FACTS_MAX_CHARS} characters, this one has '
                                    f'{len(text)}: send "facts": "off" or a shorter state')
             state = await asyncio.to_thread(inject_facts, text)
+        store = body.get("state_cache", "store")
+        if store not in ("store", "no-store"):
+            raise RequestError('state_cache must be "store" or "no-store"')
+        store = store == "store"
         if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
             if body.get("media") is not None:
                 raise RequestError("give media or images, not both")
@@ -1920,7 +1996,8 @@ class Server:
         if m is not None:  # media: one forward per prompt (eager) or one vLLM call per request; no queue or truncation
             outs, n_tok, longest, n_media = await self.ask_media(qs, branches, m)
         else:
-            qs, branches, outs, n_tok, longest, truncation, cut, lane = await self.ask_text(body, qs, branches, pol)
+            qs, branches, outs, n_tok, longest, truncation, cut, lane = await self.ask_text(body, qs, branches, pol,
+                                                                                            store)
         second = []
         if self.orders == "auto":  # the reversed option order, only for the branches that are uncertain in order 1
             redo = [j for j, (b, o) in enumerate(zip(branches, outs)) if self.uncertain(qs[b[0]], b[2], o)]
@@ -1932,7 +2009,7 @@ class Server:
                     n_tok, n_media = n_tok + n2, n_media + nm2
                 else:
                     n_tok += self.encode(second)[0]
-                    o2 = await self.ask(second, pol, cut, lane)
+                    o2 = await self.ask(second, pol, cut, lane, store)
                 for j, b2, o in zip(redo, second, o2):
                     branches[j][2].extend(b2[2]); outs[j] = outs[j] + o
         reread = None
@@ -2008,7 +2085,7 @@ class Server:
             longest[j] = max(longest[j], n)
         return outs, sum(n for _, n, _ in res), longest, sum(nm for _, _, nm in res)
 
-    async def ask_text(self, body, qs, branches, pol):
+    async def ask_text(self, body, qs, branches, pol, store=True):
         """The text path (as before media): prompts tokenized, the context checked (or the state truncated, which
         rebuilds the questions and branches), the queue -> (questions, branches, outs, prompt tokens, the longest
         prompt of each branch, truncation, state cut, lane)."""
@@ -2032,7 +2109,7 @@ class Server:
         self.check_context(qs, branches, longest)
         cut = self.cut_of(qs[0], branches)
         lane = self.lane_of(branches, longest, cut)
-        outs = await self.ask(branches, pol, cut, lane)
+        outs = await self.ask(branches, pol, cut, lane, store)
         return qs, branches, outs, n_tok, longest, truncation, cut, lane
 
     async def assemble(self, body, qs, branches, outs, m, n_tok, n_media, longest, second, truncation, lane, t0,
@@ -2289,11 +2366,13 @@ def add_engine_args(ap):
     ap.add_argument("--tree", choices=["auto", "dense", "flex"], default="dense",
                     help="with --lean pass2: the pass-2 trie mask as a dense additive mask (KV heads repeated) or as a "
                          "FlexAttention mask over the KV heads as they are. auto: flex with --lean pass2, else dense")
-    ap.add_argument("--state-cache-gb", dest="state_cache_gb", type=float, default=0,
+    ap.add_argument("--state-cache-gb", dest="state_cache_gb", type=cache_gb_arg, default=0,
                     help="CUDA graph engine and --mode mlx: keep the keys and values of request states on the GPU "
                          "up to this many GB (least recently used evicted); a later request with the same state "
                          "computes only its questions and options, one whose state begins with a cached one only its "
-                         "new tokens (0: off)")
+                         "new tokens (0: off); N%% = that share of the host's RAM (fixed at start-up); auto = half of "
+                         "the device memory available now plus the cache's own entries, read again as the cache is "
+                         "used (the GPU's on CUDA, the host's on Apple Silicon; needs psutil on macOS)")
     ap.add_argument("--state-cache-lock", dest="state_cache_lock", choices=["off", "on"], default="off",
                     help="--state-cache-gb in the CUDA graph engine: on continues cached states under the engine's "
                          "launch lock, which removes a rare HTTP 500 under concurrent requests (a torch.compile "
@@ -2309,8 +2388,12 @@ def add_engine_args(ap):
                          "file under this directory (one subdirectory per model signature), read back on a memory "
                          "miss, also by later server processes; least recently used files evicted at "
                          "--state-cache-disk-gb")
-    ap.add_argument("--state-cache-disk-gb", dest="state_cache_disk_gb", type=float, default=20.0,
-                    help="--state-cache-dir: GiB of state files kept on disk (default 20)")
+    ap.add_argument("--state-cache-disk-gb", dest="state_cache_disk_gb", type=disk_gb_arg, default="auto",
+                    help="--state-cache-dir: GiB of state files kept on disk; auto (default): half of the free disk "
+                         "space plus the files already there, refreshed as the cache is used")
+    ap.add_argument("--state-cache-prune-days", dest="state_cache_prune_days", type=float, default=None,
+                    help="--state-cache-dir: at start-up remove the cache directories of other models not used for "
+                         "this many days (default: never)")
     ap.add_argument("--state-cache-import", dest="state_cache_import", choices=["same-engine", "any-engine"],
                     default="same-engine",
                     help="--state-cache-dir: same-engine (default) reads only files this engine wrote; any-engine: also "
@@ -2520,7 +2603,8 @@ def error_body(e, error_format="basal"):
 
 def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     """The app of basal-serve: POST /v1/systemone and /v1/basal, POST /v1/decisions (OpenAI's Decisions API), GET
-    /v1/models, /health and /metrics; mcp: (routes,
+    /v1/models, /health and /metrics, the state cache's GET /v1/state-cache and POST /v1/state-cache/clear, /budget and
+    /counters/reset (docs/API.md#state-cache-management); mcp: (routes,
     lifespan) of --mcp on. A failed request answers error_body with http_status: 422 invalid request, 503 out of GPU memory, 500
     any other server error. ui: the basal.ui.UI of --ui on (its decision routes recorded, and GET /ui/state)."""
     from contextlib import asynccontextmanager, nullcontext
@@ -2652,6 +2736,128 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                       "read yet)", "gauge", [({}, cache_seen["at"])]))
         return PlainTextResponse(prometheus(m), media_type="text/plain; version=0.0.4")
 
+    def cache_body():
+        """GET /v1/state-cache: the state cache's tiers, budgets and counters."""
+        cache = getattr(srv.backend, "state_cache", None)
+        if cache is None:
+            return {"enabled": False}
+        st = cache.stats()
+        disk = None
+        if cache.disk is not None:
+            t = cache.disk
+            disk = {"dir": str(t.root.parent), "model_dir": str(t.root),
+                    "budget": "auto" if st["disk_budget_auto"] else st["disk_budget_bytes"] / 2 ** 30,
+                    "budget_bytes": st["disk_budget_bytes"], "used_bytes": st["disk_bytes"],
+                    "entries": st["disk_entries"], "import": "any-engine" if t.accept == "any" else "same-engine"}
+        names = ("hits", "misses", "prefix_hits", "evictions", "disk_loads", "disk_prefix_loads", "disk_writes",
+                 "disk_write_drops", "disk_errors", "disk_evictions")
+        return {"enabled": True,
+                "memory": {"budget": "auto" if st["budget_auto"] else st["budget_bytes"] / 2 ** 30,
+                           "budget_gb": st["budget_bytes"] / 2 ** 30, "budget_bytes": st["budget_bytes"],
+                           "used_bytes": st["used_bytes"], "available_bytes": st["available_bytes"],
+                           "entries": st["entries"], "bits": st["bits"],
+                           "started_with": getattr(srv, "state_cache_spec", None)},
+                "disk": disk, "counters": {n: st[n] for n in names if n in st}}
+
+    def bad(reason):
+        return JSONResponse({"error": reason, "code": "BAD_REQUEST"}, status_code=400)
+
+    async def cache_request(request):
+        """The admin check, the cache and the JSON object of a POST /v1/state-cache/... -> (response or None, cache,
+        body). Without --api-keys the routes are open (as /metrics); with them they need an admin key."""
+        rec = request.scope.get("basal.api_key")
+        if rec is not None and not rec.get("admin", False):
+            return JSONResponse({"error": "admin key required", "code": "FORBIDDEN"}, status_code=403), None, None
+        cache = getattr(srv.backend, "state_cache", None)
+        if cache is None:
+            return JSONResponse({"error": "no state cache on this server (--state-cache-gb)",
+                                 "code": "NO_STATE_CACHE"}, status_code=409), None, None
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw.strip() else {}
+        except ValueError as e:
+            return bad(f"the request body is not valid JSON: {e}"), None, None
+        if not isinstance(body, dict):
+            return bad("the request body must be a JSON object"), None, None
+        return None, cache, body
+
+    async def state_cache(_):
+        return JSONResponse(cache_body())
+
+    async def state_cache_clear(request):
+        """POST /v1/state-cache/clear {"tier": "memory"|"disk"|"all", "scope": "model"|"all-models"}."""
+        error, cache, body = await cache_request(request)
+        if error is not None:
+            return error
+        tier, scope = body.get("tier"), body.get("scope", "model")
+        if tier not in ("memory", "disk", "all"):
+            return bad('tier must be "memory", "disk" or "all"')
+        if tier != "memory" and cache.disk is None:
+            return bad("no disk tier (--state-cache-dir)")
+        if "scope" in body and tier == "memory":
+            return bad('scope is for the disk tier (tier "disk" or "all")')
+        if scope not in ("model", "all-models"):
+            return bad('scope must be "model" or "all-models"')
+        loop = asyncio.get_running_loop()
+        memory = await loop.run_in_executor(None, cache.clear) if tier in ("memory", "all") else 0
+        disk = await loop.run_in_executor(None, cache.disk.clear, scope) if tier in ("disk", "all") else {}
+        return JSONResponse({"cleared": {"memory_entries": memory, "disk_files": disk.get("files", 0),
+                                         "disk_directories": disk.get("directories", 0)},
+                             "state_cache": cache_body()})
+
+    async def state_cache_budget(request):
+        """POST /v1/state-cache/budget {"memory_gb": GB | "N%" | "auto", "disk_gb": GiB | "auto"} (either or both). A
+        fixed memory budget above what the device can give the cache now (state_cache_over) is refused."""
+        error, cache, body = await cache_request(request)
+        if error is not None:
+            return error
+        mem, disk = body.get("memory_gb"), body.get("disk_gb")
+        if mem is None and disk is None:
+            return bad("give memory_gb, disk_gb or both")
+        loop = asyncio.get_running_loop()
+        if mem == "auto":
+            if await loop.run_in_executor(None, functools.partial(cache.available_now, fresh=True)) is None:
+                return bad('memory_gb "auto": the available memory is not readable here (install psutil); give GB')
+        elif mem is not None:
+            if isinstance(mem, str) and mem.endswith("%"):
+                try:
+                    share = float(mem[:-1])
+                except ValueError:
+                    return bad('memory_gb must be GB, "N%" of the host\'s RAM or "auto"')
+                if not 0 < share <= 100:
+                    return bad('memory_gb "N%": 0 < N <= 100')
+                try:
+                    mem = resolve_cache_gb(mem)
+                except SystemExit as e:
+                    return bad(str(e))
+            elif isinstance(mem, bool) or not isinstance(mem, (int, float)):
+                return bad('memory_gb must be GB, "N%" of the host\'s RAM or "auto"')
+            if not mem > 0:
+                return bad("memory_gb must be above 0 (the cache is turned off with --state-cache-gb 0 at start-up)")
+            mem = int(mem * 2 ** 30)
+            over = await loop.run_in_executor(None, state_cache_over, srv.backend, mem)
+            if over is not None:
+                return bad(f"memory_gb {mem / 2 ** 30:.2f} is above what this device can give the state cache now "
+                           f"({over / 2 ** 30:.2f} GiB: available memory plus its entries); give less or \"auto\"")
+        if disk is not None:
+            if cache.disk is None:
+                return bad("no disk tier (--state-cache-dir)")
+            if disk != "auto" and (isinstance(disk, bool) or not isinstance(disk, (int, float)) or not disk > 0):
+                return bad('disk_gb must be GiB above 0 or "auto"')
+        if mem is not None:
+            await loop.run_in_executor(None, srv.backend.set_state_cache_budget, mem)
+        if disk is not None:
+            await loop.run_in_executor(None, cache.disk.set_budget, "auto" if disk == "auto" else int(disk * 2 ** 30))
+        return JSONResponse(cache_body())
+
+    async def state_cache_counters_reset(request):
+        """POST /v1/state-cache/counters/reset: the hit / miss / eviction / disk counters to 0 (the states stay)."""
+        error, cache, _ = await cache_request(request)
+        if error is not None:
+            return error
+        cache.reset_counters()
+        return JSONResponse(cache_body())
+
     mcp_routes, mcp_run = mcp or ([], None)
 
     @asynccontextmanager
@@ -2669,7 +2875,10 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
 
     routes = [Route("/v1/systemone", systemone, methods=["POST"]), Route("/v1/basal", systemone, methods=["POST"]),
               Route("/v1/decisions", decisions, methods=["POST"]), Route("/v1/models", models),
-              Route("/health", health), Route("/metrics", metrics), *mcp_routes]
+              Route("/health", health), Route("/metrics", metrics), Route("/v1/state-cache", state_cache),
+              Route("/v1/state-cache/clear", state_cache_clear, methods=["POST"]),
+              Route("/v1/state-cache/budget", state_cache_budget, methods=["POST"]),
+              Route("/v1/state-cache/counters/reset", state_cache_counters_reset, methods=["POST"]), *mcp_routes]
     return Starlette(routes=ui.routes(routes, counts) if ui is not None else routes, lifespan=lifespan)
 
 

@@ -43,8 +43,8 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from . import adapter as adapter_module
-from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, _varlen_attention, compact_refused,
-                     graph_memory_bytes, persist_compile_cache, set_attention, torch_varlen_available)
+from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, _varlen_attention, cache_budget,
+                     compact_refused, graph_memory_bytes, persist_compile_cache, set_attention, torch_varlen_available)
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -681,8 +681,8 @@ class GDNGraphBackend(GraphBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 device=None, global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
-                 state_cache_import="same-engine", state_cache_signature=None):
+                 device=None, global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb="auto",
+                 state_cache_import="same-engine", state_cache_signature=None, state_cache_prune_days=None):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
         # engine; quantisation is refused here. graph_memory_gb: the pass-2 graphs captured, _pin_memory). device:
         # "mps" / "cpu" (GDNMPSBackend: no CUDA graphs, uncompiled). state_cache_dir ..: refused (refused(disk=))
@@ -756,8 +756,8 @@ class GDNGraphBackend(GraphBackend):
         # --state-cache-gb: roots cut at the state boundary, kept as full-state checkpoints (keys / values + states);
         # --prefix-cache: also the template prefixes of short single-prompt requests (GraphBackend's budget)
         self.prefix = bool(prefix) and shared
-        gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
-        self.state_cache = StateCache(gb * 2 ** 30) if gb and shared else None
+        budget = cache_budget(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
+        self.state_cache = StateCache(budget, available=self._device_available) if budget and shared else None
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix ids, its row)]
         if self.compact and template in ("on", "auto"):
             self._template_prefixes(model_dir)
@@ -1128,12 +1128,12 @@ class GDNGraphBackend(GraphBackend):
 
     CONTINUE_MAX = 8192  # most new tokens a cached state is continued by (beyond: the whole state runs again)
 
-    def _extend_states(self, units, keys, hits):
+    def _extend_states(self, units, keys, hits, stores=None):
         """A request state that begins with a whole cached one (a growing agent trace or chat history): its new tokens
         continue the cached checkpoint (Qwen35Graph.forward_continue: the attention layers over the cached keys and
         values, the Gated DeltaNet layers from the cached states and tails), and the extended checkpoint replaces the
-        old entry and serves as a hit. A state that differs inside the cached tokens runs again: a recurrent state
-        cannot be cut there."""
+        old entry and serves as a hit (not stored for a unit whose stores[k] is False: "state_cache": "no-store"). A
+        state that differs inside the cached tokens runs again: a recurrent state cannot be cut there."""
         if not keys or self.state_cache is None:
             return
         na = len(self.kv_shapes)
@@ -1161,7 +1161,8 @@ class GDNGraphBackend(GraphBackend):
                                           [(se[None], ce[None]) for se, ce in e[na:]], kv, st)
             new = ([(torch.cat([ke, kn[0]], 1), torch.cat([ve, vn[0]], 1)) for (ke, ve), (kn, vn) in zip(e[:na], kv)]
                    + [(s[0], c[0]) for s, c in st])
-            self.state_cache.put(key, new, tokens=root, replaces=old)
+            if stores is None or stores[k]:
+                self.state_cache.put(key, new, tokens=root, replaces=old)
             hits[k] = new
 
     @staticmethod
@@ -1184,13 +1185,13 @@ class GDNGraphBackend(GraphBackend):
                 cb[r].copy_(ce, non_blocking=True)
 
     @torch.no_grad()
-    def _tree_hidden(self, packs, idx, keys=None, hits=None):
+    def _tree_hidden(self, packs, idx, keys=None, hits=None, stores=None):
         """Branched units -> hidden states at their readout positions. Pass 1: the roots in a plain graph that also
         writes their keys, values and recurrent states (beyond the largest graph: one uncaptured forward into fresh
         buffers). Pass 2: one row per leaf of each unit's trie, over its root, in pass-2 graphs of up to LEAF_ROWS[-1]
-        rows (uncaptured beyond them). keys / hits (--state-cache-gb): per unit, the state-cache key of its root and its
-        cached entry; when every root is cached and no prompt ends inside one, pass 1 is skipped (_load); roots computed
-        here are stored (_entry)."""
+        rows (uncaptured beyond them). keys / hits / stores (--state-cache-gb): per unit, the state-cache key of its
+        root, its cached entry and whether a root computed here is stored; when every root is cached and no prompt ends
+        inside one, pass 1 is skipped (_load); roots computed here are stored (_entry) unless stores says not."""
         P = [packs[k][2].index(1) for k in idx]  # block 0 (the root) comes first and is contiguous
         b = len(idx)
         roots = [packs[k][0][:p] for k, p in zip(idx, P)]
@@ -1232,7 +1233,7 @@ class GDNGraphBackend(GraphBackend):
             h1 = self.fwd(self._to_dev(ids), self._to_dev(lens), kv, st)
         if self.state_cache is not None and not cached:  # the roots computed here, as full-state checkpoints
             for r, key in enumerate(keys):
-                if key is not None and hits[r] is None:
+                if key is not None and hits[r] is None and (stores is None or stores[r]):
                     self.state_cache.put(key, self._entry(kv, st, r, P[r]), tokens=roots[r])
         rows, sel = [], []  # rows: (unit, token indices); sel: per readout (pass, row, column), in unit order
         for r, (leaf, reads) in enumerate(leaves):
@@ -1302,7 +1303,7 @@ class GDNGraphBackend(GraphBackend):
         return net
 
     @torch.no_grad()
-    def _long_hidden(self, pack, key=None, hit=None, between=None):
+    def _long_hidden(self, pack, key=None, hit=None, between=None, store=True):
         """One unit of the long lane (GraphBackend.run_long) -> hidden states at its readout positions, uncompiled and
         one layer at a time over fresh buffers: a single prompt as one row; a branched unit's root as one row that
         writes its keys, values and recurrent states (or its state-cache checkpoint), stored when keyed, then one row
@@ -1320,7 +1321,7 @@ class GDNGraphBackend(GraphBackend):
         else:
             kv, st = self._fresh(1, P)
             h1 = net.forward(dev(torch.tensor([t[:P]])), dev(torch.tensor([P])), kv, st)[0]
-            if key is not None and self.state_cache is not None:
+            if key is not None and self.state_cache is not None and store:
                 self.state_cache.put(key, self._entry(kv, st, 0, P), tokens=t[:P])
         S = max(map(len, rows))
         ids = np.full((len(rows), S), self.tok.pad_token_id, dtype=np.int64)

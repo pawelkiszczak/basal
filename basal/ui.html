@@ -163,6 +163,14 @@ td.t{font-family:var(--mono);color:#6e8698;font-size:10px}
 .bar span{display:block;height:100%;width:0;border-radius:6px;background:var(--green);transition:width .5s}
 .bar.purple span{background:var(--purple)}
 .bar.amber span{background:var(--amber)}
+.cache-actions{padding:0 18px 18px;display:flex;flex-direction:column;gap:10px}
+.cache-actions[hidden],.cache-actions [hidden]{display:none}
+.cache-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.cache-row label{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#8b98a8}
+.cache-row input{width:76px;padding:7px 9px;background:#0d131c;border:1px solid #2b3542;border-radius:7px;color:var(--soft);
+  font:12px var(--mono)}
+.cache-row input:focus{border-color:#91b980;outline:none}
+.cache-msg{font-size:12px;color:#93a1b1;min-height:1em}
 .notice{border:1px dashed #394555;border-radius:8px;padding:12px 14px;color:#93a1b1;font-size:12px;line-height:1.6;
   background:#0f151d}
 .notice code{color:var(--green);font-size:11px}
@@ -388,6 +396,19 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
     <section class="panel">
       <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>State cache</h2><span class="note" id="cache-note">—</span></div>
       <div class="body" id="cache"></div>
+      <div class="cache-actions" id="cache-actions" hidden>
+        <div class="cache-row">
+          <button class="btn" id="clear-mem" type="button" title="Remove the cached states from memory (the files on disk stay)">Clear memory</button>
+          <button class="btn" id="clear-disk" type="button" title="Remove this model's state files" hidden>Clear disk</button>
+          <button class="btn" id="reset-counters" type="button" title="Hits, misses and evictions to 0 (the states stay)">Reset counters</button>
+        </div>
+        <div class="cache-row">
+          <label>Memory GiB <input id="budget-mem" type="text" placeholder="auto"></label>
+          <label id="budget-disk-l" hidden>Disk GiB <input id="budget-disk" type="text" placeholder="auto"></label>
+          <button class="btn" id="apply-budgets" type="button" title="Until the server stops: its flags stay the source of truth">Apply budgets</button>
+        </div>
+        <div class="cache-msg" id="cache-msg"></div>
+      </div>
     </section>
   </div>
 
@@ -676,17 +697,66 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
 
   function renderCache(c) {
     if (!c) {
+      $('cache-actions').hidden = true;
       set('cache-note', 'off');
       setHTML('cache', '<div class="notice">No state cache on this server. Start it with <code>--state-cache-gb N</code> to keep computed states across requests over the same text; its entries, hits and evictions show here.</div>');
       return;
     }
-    const looks = c.hits + c.misses;
+    const looks = c.hits + c.misses, disk = c.disk_entries !== undefined;
     set('cache-note', `${int(c.entries)} states`);
     setHTML('cache', `<div class="stats">${stat('Hit rate', looks ? (c.hits / looks * 100).toFixed(1) : '—', looks ? '%' : '')}` +
       `${stat('Entries', int(c.entries))}${stat('Hits', int(c.hits))}${stat('Misses', int(c.misses))}` +
       `${stat('Prefix hits', int(c.prefix_hits))}${stat('Evictions', int(c.evictions))}</div>` +
-      meter('Memory', `${gib(c.used_bytes)} of ${gib(c.budget_bytes)}`, c.used_bytes / c.budget_bytes, 'purple'));
+      meter('Memory', `${gib(c.used_bytes)} of ${gib(c.budget_bytes)}${c.budget_auto ? ' (auto)' : ''}` +
+            (c.available_bytes != null ? ` · ${gib(c.available_bytes)} free` : ''), c.used_bytes / c.budget_bytes, 'purple') +
+      (disk ? meter('Disk', `${int(c.disk_entries)} files · ${gib(c.disk_bytes)} of ${gib(c.disk_budget_bytes)}${c.disk_budget_auto ? ' (auto)' : ''}`,
+                    c.disk_bytes / c.disk_budget_bytes, 'amber') : ''));
+    $('cache-actions').hidden = false;
+    $('clear-disk').hidden = $('budget-disk-l').hidden = !disk;
+    if (!S.cacheFilled) {  // the budget fields from the server once, not on every poll (they may be being edited)
+      S.cacheFilled = true;
+      $('budget-mem').value = c.budget_auto ? 'auto' : +(c.budget_bytes / 2 ** 30).toFixed(2);
+      if (disk) $('budget-disk').value = c.disk_budget_auto ? 'auto' : +(c.disk_budget_bytes / 2 ** 30).toFixed(1);
+    }
   }
+
+  async function act(path, body) {
+    // POST v1/state-cache/... with the page's key -> the reply's JSON, or null (the reason in cache-msg)
+    let r;
+    try {
+      r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json', ...(S.key ? {Authorization: 'Bearer ' + S.key} : {})},
+                             body: JSON.stringify(body || {})});
+    } catch (e) { set('cache-msg', 'Unreachable'); return null; }
+    if (r.status === 401) { login(S.key ? 'This key was not accepted.' : ''); return null; }
+    if (r.status === 403) { set('cache-msg', 'admin key required'); return null; }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* no JSON body */ }
+    if (!r.ok) { set('cache-msg', (j && j.error) || 'HTTP ' + r.status); return null; }
+    clearTimeout(S.timer);
+    poll();
+    return j;
+  }
+  $('clear-mem').addEventListener('click', async () => {
+    if (!confirm('Clear the cached states in memory? Files on disk stay.')) return;
+    const j = await act('v1/state-cache/clear', {tier: 'memory'});
+    if (j) set('cache-msg', `Cleared ${int(j.cleared.memory_entries)} states from memory`);
+  });
+  $('clear-disk').addEventListener('click', async () => {
+    if (!confirm("Remove this model's state files from disk? States in memory stay.")) return;
+    const j = await act('v1/state-cache/clear', {tier: 'disk'});
+    if (j) set('cache-msg', `Removed ${int(j.cleared.disk_files)} files`);
+  });
+  $('reset-counters').addEventListener('click', async () => {
+    if (await act('v1/state-cache/counters/reset')) set('cache-msg', 'Counters reset');
+  });
+  $('apply-budgets').addEventListener('click', async () => {
+    const body = {}, mem = $('budget-mem').value.trim(), d = $('budget-disk').value.trim();
+    if (mem) body.memory_gb = mem === 'auto' || mem.endsWith('%') ? mem : Number(mem);
+    if (d && !$('budget-disk-l').hidden) body.disk_gb = d === 'auto' ? 'auto' : Number(d);
+    const j = await act('v1/state-cache/budget', body);
+    const tier = t => t.budget === 'auto' ? 'auto (' + gib(t.budget_bytes) + ')' : gib(t.budget_bytes);
+    if (j) set('cache-msg', `Budgets: memory ${tier(j.memory)}` + (j.disk ? `, disk ${tier(j.disk)}` : '') + ' until the server stops');
+  });
 
   function renderGpus(t) {
     const gpus = t.gpus || [];
